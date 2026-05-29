@@ -1,0 +1,378 @@
+﻿Проанализирую весь материал и дам обновленное видение.
+СИНТЕЗ ВСЕХ МАТЕРИАЛОВ
+Изучив критику Gemini, я вижу критически важные граничные случаи, которые я действительно упустил:
+1. AbortController - не панацея (Gemini прав на 100%)
+// МОЕ ПРЕДЛОЖЕНИЕ БЫЛО НЕПОЛНЫМ:
+sessionAbortController.abort(reason);
+
+// ПРОБЛЕМА: orchestratorSleepMs НЕ СЛУШАЕТ abort signal!
+// Текущий код (job-orchestrator.js):
+function orchestratorSleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+  // ← Этот Promise НЕ прервется при abort()
+}
+Реальность: Даже после stopAllProcesses(), код продолжит выполнение через 10 секунд (ROUND1_POST_SEND_MS), потому что setTimeout уже запущен.
+Исправление:
+// ПРАВИЛЬНО: CancellableOrchestratorSleep
+function orchestratorSleepMs(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('Aborted'));
+      return;
+    }
+    
+    const timer = setTimeout(resolve, ms);
+    
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(new Error('Aborted'));
+    });
+  });
+}
+
+// Использование:
+await orchestratorSleepMs(10000, sessionAbortController.signal);
+2. Session ID в памяти SW - провал (Gemini прав)
+// МОЕ ПРЕДЛОЖЕНИЕ:
+let currentSessionId = 0; // ← ИСЧЕЗНЕТ при пробуждении SW
+
+// РЕАЛЬНОСТЬ из кода:
+// - Service Worker засыпает через 30s бездействия
+// - При пробуждении ВСЕ let переменные = undefined
+// - Мы потеряем трек текущей сессии
+Исправление:
+// Session ID ТОЛЬКО в jobState (уже есть в коде):
+function getActiveSessionId() {
+  const state = loadJobState(); // из CompressedStorage
+  return state?.session?.startTime || null;
+}
+
+// В setTimeout:
+const capturedSessionId = getActiveSessionId();
+setTimeout(() => {
+  if (getActiveSessionId() !== capturedSessionId) {
+    console.log('[STALE] Session changed');
+    return;
+  }
+  // продолжаем...
+}, delay);
+3. NEED_FOCUS без проверки сессии - дыра (Gemini прав)
+Сценарий:
+    • Вчера: Job #1 открыл вкладку ChatGPT 
+    • Сегодня: Job #2 работает с другими вкладками 
+    • Вкладка ChatGPT от Job #1 просыпается → шлет NEED_FOCUS 
+    • Background переключает фокус на СТАРУЮ вкладку → Job #2 ломается 
+Исправление:
+case 'NEED_FOCUS': {
+  const tabId = sender.tab?.id;
+  const requestSessionId = message.sessionId; // ← ОБЯЗАТЕЛЬНО!
+  const currentSessionId = jobState?.session?.startTime;
+  
+  // Session validation
+  if (!requestSessionId || requestSessionId !== currentSessionId) {
+    console.log(`[NEED_FOCUS] Stale request from old session`);
+    // Убить старый content script:
+    chrome.tabs.sendMessage(tabId, { 
+      type: 'DIE', 
+      reason: 'session_expired' 
+    });
+    return;
+  }
+  
+  const llmName = message.model || TabMapManager.getNameByTabId(tabId);
+  const expectedTabId = TabMapManager.get(llmName);
+  
+  if (expectedTabId === tabId) {
+    activateTabForDispatch(tabId);
+  }
+  return false;
+}
+4. TabMapManager await - критично (Gemini + я согласны)
+Проверил код tab-manager.js:
+const setTab = (llmName, tabId) => withLock(async () => {
+  // ...
+  await saveTabMapToStorage(llmTabMap);
+  // ...
+});
+Это 100% async. Отсутствие await в ~15 местах = race conditions.
+
+ИСПРАВЛЕННОЕ РЕШЕНИЕ 1: "Session Boundary + Cancellable Operations"
+Файл 1: job-orchestrator.js - Cancellable Sleep
+// === SESSION MANAGEMENT ===
+function getActiveSessionId() {
+  return jobState?.session?.startTime || null;
+}
+
+function isSessionActive(sessionId) {
+  return sessionId && getActiveSessionId() === sessionId;
+}
+
+// === CANCELLABLE SLEEP ===
+let globalAbortController = new AbortController();
+
+function resetGlobalAbortController() {
+  globalAbortController = new AbortController();
+}
+
+function getGlobalAbortSignal() {
+  return globalAbortController.signal;
+}
+
+function abortAllOperations(reason) {
+  console.log(`[ABORT] Cancelling all operations: ${reason}`);
+  globalAbortController.abort(reason);
+  resetGlobalAbortController();
+}
+
+// НОВАЯ ВЕРСИЯ orchestratorSleepMs
+function orchestratorSleepMs(ms, signal = getGlobalAbortSignal()) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error(`Sleep aborted: ${signal.reason}`));
+      return;
+    }
+    
+    const timer = setTimeout(() => {
+      resolve();
+    }, ms);
+    
+    const abortHandler = () => {
+      clearTimeout(timer);
+      reject(new Error(`Sleep aborted: ${signal.reason}`));
+    };
+    
+    signal?.addEventListener('abort', abortHandler, { once: true });
+  });
+}
+
+// === STOP ALL PROCESSES ===
+function stopAllProcesses(reason = 'unspecified', { closeTabs = false } = {}) {
+  console.log(`[STOP] Reason: ${reason}`);
+  
+  // 1. Abort ВСЕ pending операции
+  abortAllOperations(reason);
+  
+  // 2. Остальная очистка
+  stopHumanPresenceLoop();
+  stopHeartbeatMonitor();
+  
+  // 3. Clear state (с await внутри async context если нужно)
+  if (typeof TabMapManager?.clear === 'function') {
+    TabMapManager.clear().catch(err => {
+      console.warn('[STOP] TabMapManager.clear failed:', err);
+    });
+  }
+  
+  jobState = {};
+  saveJobState(jobState);
+  
+  if (closeTabs) {
+    closeAllModelTabs();
+  }
+}
+Файл 2: dispatch-coordinator.js - Session-aware setTimeout
+// === SUPERVISOR TIMER с session check ===
+function schedulePromptDispatchSupervisor() {
+  if (promptDispatchSupervisorTimer) return;
+  
+  const adaptiveTick = /* ... */;
+  const capturedSessionId = getActiveSessionId(); // ← из jobState!
+  
+  promptDispatchSupervisorTimer = setTimeout(() => {
+    promptDispatchSupervisorTimer = null;
+    
+    // SESSION BOUNDARY CHECK
+    if (!isSessionActive(capturedSessionId)) {
+      console.log('[SUPERVISOR] Session changed, aborting');
+      return;
+    }
+    
+    // ABORT SIGNAL CHECK
+    if (getGlobalAbortSignal().aborted) {
+      console.log('[SUPERVISOR] Operations aborted');
+      return;
+    }
+    
+    runPromptDispatchSupervisor();
+  }, adaptiveTick);
+}
+Файл 3: dispatch-retry.js - Session-aware retry
+function sendMessageSafely(tabId, llmName, message, attemptNum = 1) {
+  const capturedSessionId = getActiveSessionId();
+  
+  return new Promise((resolve) => {
+    // ... existing code ...
+    
+    const retryFn = () => {
+      // SESSION CHECK перед retry
+      if (!isSessionActive(capturedSessionId)) {
+        console.log(`[RETRY] Session changed, aborting retry for ${llmName}`);
+        resolve(null);
+        return;
+      }
+      
+      // TAB CHECK
+      const currentTabId = TabMapManager.get(llmName);
+      if (currentTabId !== tabId) {
+        console.log(`[RETRY] Tab changed for ${llmName}`);
+        resolve(null);
+        return;
+      }
+      
+      sendMessageSafely(tabId, llmName, message, attemptNum + 1).then(resolve);
+    };
+    
+    setTimeout(retryFn, retryDelay);
+  });
+}
+Файл 4: content-utils.js - Visibility-aware sleep с sessionId
+const sleep = (ms) => {
+  return new Promise((resolve) => {
+    if (ms <= 0) { resolve(); return; }
+    
+    const startedAt = Date.now();
+    const speedMode = !!window.__PRAGMATIST_SPEED_MODE;
+    const factor = speedMode ? 0.35 : 1;
+    const targetMs = Math.max(speedMode ? 25 : 0, ms * factor);
+    
+    let timerId = null;
+    let pausedAt = null;
+    let resolved = false;
+    
+    const cleanup = () => {
+      if (timerId) clearTimeout(timerId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+    
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      resolve();
+    };
+    
+    const scheduleRemaining = () => {
+      if (resolved) return;
+      
+      const activeTime = pausedAt 
+        ? (pausedAt - startedAt) 
+        : (Date.now() - startedAt);
+      const remaining = Math.max(0, targetMs - activeTime);
+      
+      if (remaining <= 0) {
+        finish();
+        return;
+      }
+      
+      if (document.visibilityState !== 'visible') {
+        if (!pausedAt) {
+          pausedAt = Date.now();
+          requestFocusFromBackground();
+        }
+        return;
+      }
+      
+      pausedAt = null;
+      timerId = setTimeout(finish, remaining);
+    };
+    
+    const handleVisibility = () => {
+      if (resolved) return;
+      
+      if (document.visibilityState === 'visible') {
+        scheduleRemaining();
+      } else {
+        if (timerId) clearTimeout(timerId);
+        timerId = null;
+        if (!pausedAt) pausedAt = Date.now();
+      }
+    };
+    
+    document.addEventListener('visibilitychange', handleVisibility);
+    scheduleRemaining();
+  });
+};
+
+let lastFocusRequest = 0;
+function requestFocusFromBackground() {
+  const now = Date.now();
+  if (now - lastFocusRequest < 3000) return;
+  lastFocusRequest = now;
+  
+  const sessionId = window.__CURRENT_SESSION_ID__; // ← ВАЖНО!
+  
+  try {
+    chrome.runtime.sendMessage({ 
+      type: 'NEED_FOCUS', 
+      model: window.__LLM_MODEL__,
+      sessionId: sessionId, // ← передаем session!
+      reason: 'sleep_paused'
+    }, () => chrome.runtime.lastError);
+  } catch (_) {}
+}
+Файл 5: message-router.js - NEED_FOCUS с session validation
+case 'NEED_FOCUS': {
+  const tabId = sender.tab?.id;
+  const requestSessionId = message.sessionId;
+  const currentSessionId = jobState?.session?.startTime;
+  
+  // CRITICAL: Session validation
+  if (!requestSessionId || requestSessionId !== currentSessionId) {
+    console.log(`[NEED_FOCUS] Ignoring stale request from old session`);
+    
+    // Опционально: убить старый content script
+    chrome.tabs.sendMessage(tabId, {
+      type: 'SESSION_EXPIRED',
+      currentSession: currentSessionId
+    }, () => chrome.runtime.lastError);
+    
+    return false;
+  }
+  
+  const llmName = message.model || TabMapManager.getNameByTabId(tabId);
+  const expectedTabId = TabMapManager.get(llmName);
+  
+  if (tabId && expectedTabId === tabId) {
+    activateTabForDispatch(tabId);
+  }
+  
+  return false;
+}
+Файл 6: Content scripts - сохранение sessionId
+В начале injectAndGetResponse() каждого content-*.js:
+// Сохраняем sessionId из meta
+if (message.meta?.sessionId) {
+  window.__CURRENT_SESSION_ID__ = message.meta.sessionId;
+}
+
+ИСПРАВЛЕННАЯ ТАБЛИЦА
+#	Файл	Изменение	Строк
+1	job-orchestrator.js	Cancellable sleep + abort	~60
+2	dispatch-coordinator.js	Session check в supervisor	~15
+3	dispatch-retry.js	Session check в retry	~10
+4	content-utils.js	Visibility-aware sleep	~80
+5	message-router.js	NEED_FOCUS validation	~20
+6	content-*.js (8 files)	Store sessionId	~8
+7	Все файлы с TabMapManager	Добавить await	~15 мест
+Итого: ~200 строк изменений, 4-6 часов работы
+
+МОЯ ФИНАЛЬНАЯ ПОЗИЦИЯ
+Gemini абсолютно прав в критике:
+    1. AbortController без cancellable sleep - иллюзия 
+    2. Session ID в let переменной - провал при пробуждении SW 
+    3. NEED_FOCUS без session validation - дыра безопасности 
+    4. await TabMapManager - критичный баг 
+Мой обновленный план:
+Фаза 1 (сегодня, 2-3 часа):
+    • Исправить await TabMapManager (~15 мест) 
+    • Добавить cancellable orchestratorSleepMs 
+    • Session validation в NEED_FOCUS 
+Фаза 2 (эта неделя, 2-3 часа):
+    • Visibility-aware sleep в content-utils.js 
+    • Session checks во всех setTimeout/retry 
+Фаза 3 (опционально):
+    • SPA Navigation Guard 
+    • Extension Context Guard 
+Реалистичная оценка: Фазы 1+2 устраняют 80-85% проблем за 4-6 часов работы.
+Хочешь начать с Фазы 1?
+

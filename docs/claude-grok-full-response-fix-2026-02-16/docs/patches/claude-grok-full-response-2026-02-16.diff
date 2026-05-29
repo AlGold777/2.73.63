@@ -1,0 +1,121 @@
+diff --git a/docs/claude-grok-full-response-fix-2026-02-16.md b/docs/claude-grok-full-response-fix-2026-02-16.md
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/docs/claude-grok-full-response-fix-2026-02-16.md
+@@ -0,0 +1,52 @@
++# Claude + Grok: full response capture fix (2026-02-16)
++
++## Problem
++- Claude sometimes returned only the last phrase of the answer.
++- Grok sometimes returned unrelated snippets (for example, short UI fragments) instead of the full assistant answer.
++
++## Root cause
++- Too-fragile selectors (deep structural chains, unstable utility classes, `nth-*` dependencies).
++- Overly generic fallbacks (`.prose` etc.) were reached too early and could match non-target blocks.
++- Missing explicit "latest assistant answer" targeting.
++- Response selectors and `observationDefaults.targetSelectors` were not fully aligned.
++
++## Solution summary
++1. Replace brittle selectors with stable assistant-message anchored selectors.
++2. For Claude: force targeting of the **last assistant response** (`data-is-response="true":last-of-type` + conversation-turn assistant anchors).
++3. For Claude: explicitly exclude reasoning/thinking blocks with `:not([data-testid*="thinking" i]...)` filters.
++4. For Grok: prioritize message-bubble / explicit response containers (`response-content-markdown`, `data-testid*="response"`) before generic selectors.
++5. Keep backward compatibility via fallback selectors.
++6. Sync response selectors into `observationDefaults.targetSelectors`.
++
++## Affected files
++- `selectors/claude.config.js`
++- `selectors/grok.config.js`
++- then rebuild bundles: `npm run build:bundles`
++
++## Validation checklist
++- Claude response returns complete answer text, not tail fragment.
++- Grok response returns full assistant answer, not UI snippet.
++- No regression for composer/sendButton matching.
++
++## Notes
++- This patch intentionally keeps old fallback paths to reduce breakage risk.
++- If your branch diverged, apply with `git apply --reject` and resolve rejected hunks manually using the final selector blocks from this patch.
++
++diff --git a/selectors/claude.config.js b/selectors/claude.config.js
++index 2222222..3333333 100644
++--- a/selectors/claude.config.js
+++++ b/selectors/claude.config.js
++@@ -16,10 +16,23 @@
++       //-- 1.1. Берём именно ПОСЛЕДНИЙ ответ ассистента Claude --//
++       response: [
++-        'div:nth-of-type(2) > div.grid.grid-rows-\\[auto_auto\\] > div.row-start-2.col-start-1:nth-of-type(2) > div.row-start-1.col-start-1 > div > div.standard-markdown.grid-cols-1',
++-        '[data-testid="chat-response"]'
+++        'div[data-is-response="true"]:last-of-type div.font-claude-response.relative div.standard-markdown.grid-cols-1',
+++        'div[data-is-response="true"]:last-of-type div.standard-markdown.grid-cols-1',
+++        'div[data-testid="conversation-turn"][data-role="assistant"]:last-of-type div.standard-markdown.grid-cols-1',
+++        'div[data-testid="conversation-turn"][data-author-role="assistant"]:last-of-type div.standard-markdown.grid-cols-1',
+++        'div[data-is-response="true"]:last-of-type [data-testid="message-text"]:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        'div[data-is-response="true"]:last-of-type article:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        'div[data-is-response="true"]:last-of-type:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        'div[data-testid="conversation-turn"][data-role="assistant"]:last-of-type [data-testid="message-text"]:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        'div[data-testid="conversation-turn"][data-author-role="assistant"]:last-of-type [data-testid="message-text"]:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        'div[data-testid="conversation-turn"][data-role="assistant"]:last-of-type article:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        'div[data-testid="conversation-turn"][data-author-role="assistant"]:last-of-type:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        '[data-testid="chat-response"]:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])'
++       ]
++@@ -30,7 +43,16 @@
++     observationDefaults: {
++       rootSelector: 'main',
++       targetSelectors: [
++-        '[data-testid="chat-response"]'
+++        'div[data-is-response="true"]:last-of-type div.font-claude-response.relative div.standard-markdown.grid-cols-1',
+++        'div[data-is-response="true"]:last-of-type div.standard-markdown.grid-cols-1',
+++        'div[data-testid="conversation-turn"][data-role="assistant"]:last-of-type div.standard-markdown.grid-cols-1',
+++        'div[data-testid="conversation-turn"][data-author-role="assistant"]:last-of-type div.standard-markdown.grid-cols-1',
+++        'div[data-is-response="true"]:last-of-type [data-testid="message-text"]:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        'div[data-is-response="true"]:last-of-type article:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        'div[data-testid="conversation-turn"][data-role="assistant"]:last-of-type [data-testid="message-text"]:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        'div[data-testid="conversation-turn"][data-author-role="assistant"]:last-of-type [data-testid="message-text"]:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        'div[data-testid="conversation-turn"][data-role="assistant"]:last-of-type article:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        'div[data-testid="conversation-turn"][data-author-role="assistant"]:last-of-type:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])',
+++        '[data-testid="chat-response"]:not([data-testid*="thinking" i]):not([data-testid*="thought" i]):not([data-testid*="reason" i]):not([data-testid*="analysis" i]):not([data-testid*="scratch" i]):not([data-testid*="work" i]):not([data-testid*="step" i]):not([data-testid*="draft" i]):not([data-testid*="trace" i]):not([data-testid*="internal" i]):not([data-testid*="reflection" i])'
++       ],
++       stabilizationDelayMs: 1800,
++       endGenerationMarkers: [
++
++diff --git a/selectors/grok.config.js b/selectors/grok.config.js
++index 4444444..5555555 100644
++--- a/selectors/grok.config.js
+++++ b/selectors/grok.config.js
++@@ -43,11 +43,18 @@
++           response: {
++             primary: [
++-              '.prose',
++-              '[data-testid="chat-response"]'
+++              'div.message-bubble div.response-content-markdown',
+++              'div.relative.response-content-markdown',
+++              'div[data-testid="grok-response"] .prose',
+++              'main [data-testid*="response"] .prose',
+++              'main [data-testid*="thread"] .prose',
+++              'section[data-testid*="response"] .prose'
++             ],
++             fallback: [
++-              'main [class*="response"]'
+++              'div[data-testid="grok-response"] article',
+++              'main [data-testid*="response"] article',
+++              'section[data-testid*="response"]',
+++              '.prose',
+++              'article[data-testid="tweet"]',
+++              'main [class*="response"]'
++             ],
++             extraction: {
++               method: 'innerText',
++@@ -86,7 +93,10 @@
++         observation: {
++           rootSelector: 'main[role="main"]',
++           targetSelectors: [
++-            '.prose'
+++            'div.message-bubble div.response-content-markdown',
+++            'div.relative.response-content-markdown',
+++            'div[data-testid="grok-response"]',
+++            'section[data-testid*="response"]'
++           ],
++           stabilizationDelayMs: 1600,
++           endGenerationMarkers: [

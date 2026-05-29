@@ -1,0 +1,356 @@
+**Финальный подробный план (jen16) — документ для реализации LLM**
+
+Этот документ должен быть достаточно конкретным, чтобы даже слабая модель не пошла «не туда».
+
+---
+
+**Цель**
+Стабилизировать расширение (безопасность, память, UX, надежность), без крупных миграций (TS/Vite/Hybrid).
+
+**Не входит в текущий цикл**
+- TypeScript миграция
+- Vite/Webpack build pipeline
+- Hybrid (API + Web)
+
+**Важные правила окружения**
+- MV3 service worker может "уснуть" → не полагаться на `setInterval` для критических задач.
+- Не использовать ES-модули в background, если `manifest.json` не переведён на `"type": "module"`.
+- Любые новые файлы в content scripts должны быть добавлены в `manifest.json` **в правильном порядке** (порядок важен).
+- Любые новые файлы в background должны быть подключены через `importScripts()` **или** через переход на `type: module` (выбрать один путь, не смешивать).
+
+---
+
+**Критические уточнения (Patch v1) — обязательно к реализации**
+
+**Зачем:** закрыть пробелы по race conditions, attach‑таймингам и недоописанным контрактам.
+
+1) **Race Conditions / Handshake‑протокол**
+- Добавить явный handshake между background и content script:
+  - Content → `SCRIPT_READY` (с `tabId`, `llmName`, `tabSessionId`).
+  - Background → `ACK_READY` (с `tabSessionId`, `dispatchId`).
+  - Любой dispatch отправляется **только после** `ACK_READY`.
+- Обработать случай, когда `SCRIPT_READY` пришёл до listener:
+  - Content повторяет `SCRIPT_READY` каждые 2s до `ACK_READY`, но не более 5 попыток.
+- Реакция на SPA‑redirect:
+  - Content отправляет повторный `SCRIPT_READY` при `popstate` и при изменении `location.href`.
+- Критерий: нет dispatch без ACK; тайм‑аут ожидания ACK = 6s.
+
+2) **AttachmentHandler — ожидание завершения загрузки**
+- `attach()` возвращает `{ success, uploadedCount, failedFiles, reason }`.
+- После attach ждать платформенный индикатор:
+  - Claude: появление атрибута `data-upload-id` или исчезновение элемента загрузки.
+  - Gemini: появление thumbnail/preview элемента.
+  - Perplexity: появление чипа файла или завершение progress‑bar.
+  - Qwen: появление мини‑карточки/иконки файла рядом с композером.
+- Тайм‑аут на файл: 10s, после чего `reason = 'TIMEOUT'`.
+- Критерий: `send()` вызывается только после подтверждения загрузки.
+
+3) **SafeMutex — точный контракт**
+- API: `runExclusive(fn, { timeoutMs = 30000, queueLimit = 10 })`.
+- FIFO очередь; при превышении `queueLimit` → reject `QueueFullError`.
+- `timeoutMs` → reject `TimeoutError`, но `fn` продолжает выполняться.
+- `finally` всегда освобождает lock и запускает следующую задачу.
+- Критерий: deadlock невозможен, ошибки всегда пробрасываются.
+
+4) **TTLMap — точные правила**
+- `touchOnGet = true` (обновлять timestamp на каждом get).
+- Очистка oldest‑first, только expired‑entries (валидные не трогать).
+- `_lazyCleanup(limit=10)` не запускается при `get()` на несуществующие ключи.
+- Критерий: активно используемые ключи не вычищаются преждевременно.
+
+5) **Remote selectors — доверие только к коду**
+- `TRUSTED_HASH` захардкожен в коде, не хранится в storage.
+- Обновление hash — только через релиз расширения.
+- При несовпадении: fallback на встроенные селекторы + warning‑лог.
+- Критерий: MITM не может подменить селекторы без релиза.
+
+6) **SMART‑критерии (обязательные измеримые цели)**
+- Инкрементальный рендер: обновление 100 элементов < 16ms; изменение 1 элемента → 1 DOM update.
+- Focus минимизация: максимум 2 tab‑switch на dispatch; если `requiresFocus=false` → 0.
+- Cleanup: после закрытия таба все ключи `tabId` удалены; таймеры очищены; jobState без записи.
+
+7) **Минимальные acceptance‑проверки**
+- `rg -n "innerHTML\\s*="` → только через `sanitizeHTML`.
+- Сценарий: dispatch → close tab → не остаётся state в `chrome.storage.session`.
+- Сценарий: attach файлы в Claude/Gemini → отправка только после upload.
+- Сценарий: повторный `SCRIPT_READY` → ACK получен → dispatch успешен.
+
+---
+
+**🔴 Критично**
+
+1) **DOMPurify для `innerHTML`**
+- **Где:** `results.js`, `results-shared.js`, все content scripts, любые прямые `innerHTML = ...`.
+- **Добавить файл:** `utils/sanitize.js`.
+- **Подключение:**
+  - В content scripts: добавить DOMPurify в `manifest.json` перед скриптами, которые используют `sanitizeHTML`.
+  - В `result_new.html` (или где рендерится results UI) тоже подключить DOMPurify.
+- **Реализация `sanitizeHTML` (строго):**
+  - Ограничить теги: `b, i, em, strong, p, br, ul, ol, li, code, pre, a`.
+  - Разрешить атрибуты: `href, class`.
+  - Запретить `javascript:` и `data:` ссылки (через `ALLOWED_URI_REGEXP`).
+  - Для ссылок: автоматически выставлять `rel="noopener noreferrer"`.
+- **Требование:** никакого прямого `innerHTML = ...` без `sanitizeHTML`.
+- **Критерий готовности:** проверка `rg -n "innerHTML\s*="` → все присваивания заворачиваются через `sanitizeHTML`.
+
+2) **TTLMap — выборочно, без `setInterval`**
+- **Использовать TTLMap только для:**
+  - `platformRunHistory`
+  - `selectorResolutionMetrics`
+  - `telemetrySampleCache`
+- **Не использовать TTLMap для:**
+  - `promptDispatchMutexByLlm`
+  - `promptSubmitWaiters`
+  - `rateLimitTimers`
+  Эти структуры очищаются явно при завершении операций.
+- **Добавить файл:** `utils/ttl-map.js`.
+- **Реализация TTLMap:**
+  - Ленивая очистка **в `get()` и `set()`**.
+  - Чистить не более 10 записей за операцию, чтобы не блокировать.
+  - Не использовать `setInterval`.
+  - По желанию обновлять timestamp на `get` (LRU-подобное поведение) — явно описать в коде.
+- **Критерий готовности:** Map не растут бесконечно; активные операции не ломаются из-за TTL.
+
+3) **SafeMutex с пробросом ошибок**
+- **Где:** `background.js` (замена `withPromptDispatchLock`).
+- **Добавить файл:** `utils/safe-mutex.js`.
+- **Требование:** ошибки не глотать. Логировать и `throw`.
+- **Критерий готовности:** caller получает ошибку при сбое dispatch.
+
+4) **Cleanup при закрытии вкладок / уходе с домена**
+- **Где:** `background.js`.
+- **Что:** единая функция `cleanupTabResources(tabId)`.
+- **Внутри очистить:**
+  - `pingWindowByTabId`
+  - `promptDispatchMutexByLlm`
+  - `promptSubmitWaiters`
+  - `rateLimitState`
+  - `rateLimitTimers`
+  - `jobState.llms[llmName]`
+  - `TabMapManager` (removeByTabId)
+  - отмена deferred timers (если есть)
+- **Хуки:**
+  - `chrome.tabs.onRemoved`
+  - `chrome.tabs.onUpdated` → только если `changeInfo.url` и вкладка уходит с нужного домена
+- **Критерий готовности:** закрытие вкладки освобождает все связанные структуры.
+
+5) **Storage Compression (LZString) + миграция + pruning**
+- **Добавить файл:** `utils/storage-compress.js`.
+- **Подключение LZString:** `lib/lz-string.min.js`, подключить в background через `importScripts()`.
+- **Обязательные исправления:**
+  - `chrome.storage.local.getBytesInUse(null)` возвращает число.
+  - `QUOTA_BYTES` может быть `undefined` → fallback `10 * 1024 * 1024`.
+  - Для несжатых данных хранить **оригинальный объект**, не JSON-строку.
+- **Алгоритм хранения:**
+  - Если payload < 10KB → сохранять как объект.
+  - Если payload >= 10KB → сжать `LZString.compressToUTF16` и сохранить как строку с префиксом `__LZ__`.
+  - Если сжатие не дало выигрыша (например < 10%) → сохранить как объект.
+- **Алгоритм чтения:**
+  - Если строка и начинается с `__LZ__` → распаковать и `JSON.parse`.
+  - Если строка без префикса → `JSON.parse` (для миграции старого формата).
+  - Если объект → вернуть как есть.
+- **Миграция:** однократная по флагу `__storage_migrated_v2`.
+- **Pruning:** если использование >80% → удалить старые логи/результаты (старше 7 дней).
+- **Критерий готовности:** большие payload’ы не переполняют storage; старые данные корректно читаются.
+
+---
+
+**🟠 Высокий приоритет**
+
+6) **Инкрементальный рендер `results.js`**
+- **Цель:** убрать полный `innerHTML = ''` и мигание.
+- **Реализация:**
+  - Использовать `DocumentFragment`.
+  - Хранить `data-item-id` и `data-hash` для каждого элемента.
+  - Обновлять только те элементы, у которых изменился `hash`.
+  - Удалять элементы, которых нет в новом наборе.
+  - Не делать `container.querySelector` внутри цикла по всем items без кеша (избегать O(n^2)).
+- **Критерий:** 50+ элементов рендерятся без лагов и мигания.
+
+7) **AttachmentHandler (per-platform + явный fallback)**
+- **Добавить файл:** `content-scripts/attachment-handler.js`.
+- **Стратегии:**
+  - GPT/Grok → `input[type="file"]` + DataTransfer + `change` event.
+  - Claude/Gemini → вероятно требуют user-gesture, автоматизация может не пройти.
+- **Важно:** `ClipboardEvent` и синтетический drop могут блокироваться браузером → считать best-effort.
+- **Fallback:** если стратегия не сработала, вернуть `{ success: false, reason: 'MANUAL_REQUIRED', message: ... }`.
+- **Критерий:** там, где автоматизация невозможна, пользователь явно видит инструкцию.
+
+
+---
+
+**🟡 Средний приоритет**
+
+8) **BaseLLMAdapter для content scripts**
+- **Добавить файл:** `content-scripts/base-adapter.js`.
+- **Общее:** waitForElement, humanType, submit, handleMessage.
+- **Guard:** предотвращать двойную загрузку (`window[MODEL + 'ContentScriptLoaded']`).
+- **Критерий:** дублирование < 20%.
+
+9) **Zombie content scripts cleanup**
+- **В `BaseLLMAdapter`:**
+  - MutationObserver и `popstate` для SPA.
+  - Очистка observers/intervals.
+  - Reset `window[MODEL + 'ContentScriptLoaded']`.
+- **Критерий:** при уходе с домена нет "зомби".
+
+10) **Magic numbers → config**
+- **Добавить файл:** `config/timing.js`.
+- **Правило:** все тайминги через `getTiming()`.
+- **Критерий:** нет числовых задержек в бизнес-логике.
+
+11) **Remote selectors SHA256**
+- **Где:** `selector-manager.js` или `background.js`.
+- **Что:** проверка SHA256 перед применением.
+- **Критерий:** несовпадение hash блокирует remote selectors.
+
+12) **API ключи**
+- **Рекомендуемый подход:** `chrome.storage.session` (не сохраняется на диск).
+- **Если нужна персистентность:** шифрование с passphrase (пользователь вводит при старте).
+- **Важное:** не хранить passphrase в storage.
+- **Критерий:** ключи не лежат в plaintext без предупреждения.
+
+**🟢 Архитектурные улучшения**
+
+13) **Split `background.js` на модули**
+- **Важно:** если не переводить background в `type: module`, использовать `importScripts()`.
+- **Целевая структура:**
+  - `background/index.js` — entry (≤500 строк, только wiring/initialization).
+  - `background/tab-manager.js` — управление `TabMapManager`, lifecycle hooks, cleanup hooks.
+  - `background/dispatch-coordinator.js` — core `dispatchPromptToTab`, retries, focus coordination, telemetry emits.
+  - `background/job-orchestrator.js` — `startModelForLLM`, `runModelThroughTabs`, job state persistence, human visit orchestration.
+  - `background/message-router.js` — `chrome.runtime.onMessage`, `sendMessageSafely`, adapters for telemetry/events.
+- **Имплементация:**
+  1. `index.js` подключает `importScripts()` с новыми модулями, регистрирует слушатели (`tabs`, `alarms`, `runtime`, `storage`), и стартует `ensureInitialState`.
+  2. Каждый модуль экспортирует namespace/функции, которые `index.js` использует (например, `dispatchCoordinator.dispatchPromptToTab`).
+  3. Перенести существующие глобальные функции/переменные в соответствующие модули с минимальными пересечениями; shared state (`jobState`, `TabMapManager`, `selectorResolutionMetrics`) либо делится через getter/setter или singletons.
+  4. Убедиться, что порядок импорта через `importScripts` сохраняет зависимости (`tab-manager` до `dispatch-coordinator`, поскольку последний читает `TabMapManager`).
+- **Acceptance:**
+  - `background/index.js` ≤ 500 строк, содержит только wiring + feature toggles.
+  - Модули покрыты unit/acceptance tests (если есть) и документируются (README в `background/`).
+
+14) **Semantic selectors fallback**
+- ARIA/text/placeholder fallback, генерация CSS selector и кеширование.
+- **Критерий:** селекторы восстанавливаются без ручного вмешательства.
+
+15) **State Machine для dispatch lifecycle**
+- Ввести явные состояния и переходы.
+- **Критерий:** нет разрозненных флагов dispatch.
+
+16) **Event-driven SCRIPT_READY**
+- Content script сам отправляет `SCRIPT_READY`.
+- Background не делает polling.
+
+17) **Circuit Breaker persistence**
+- Хранение в `chrome.storage.session`, восстановление при старте background.
+
+18) **Retry + Circuit Breaker (идемпотентность, классификация)**
+- **Примечание:** архитектурный раздел, перенесено из high-priority; требует глобальной координации dispatcher + utilities.
+- **Добавить файл:** `utils/retry-strategy.js` (если ещё не готов) и связать с background.
+- **Классы ошибок:**
+  - `PERMANENT` (AUTH, FORBIDDEN, INVALID_KEY) → не ретраить.
+  - `RATE_LIMITED` → ретрай с повышенной задержкой.
+  - `TRANSIENT` (timeout/network) → обычный backoff.
+- **Идемпотентность:**
+  - `dispatchId` добавляется в каждую отправку, `DispatchIdRegistry` хранит timestamps (TTL 60s).
+  - До повторной отправки проверять, не был ли тот же `dispatchId` недавно «подтверждён».
+- **Circuit Breaker:**
+  - failureThreshold=5, recoveryTime=60s.
+  - persist state с дебаунсом ~2s в `chrome.storage.session` (или `local` как fallback).
+- **Пошагово:**
+  1. `dispatchId` генерируется в `dispatchPromptToTab`, записывается в реестр, логируется.
+  2. Ошибки классифицируются через `RetryStrategy.classifyError`, `shouldRetry`/`getDelay` и ограничиваются `maxAttempts`.
+  3. `CircuitBreaker.recordFailure/recordSuccess` переключает состояния, переходит в `OPEN` при 5 провалах, восстанавливается через 60s.
+  4. При попытке dispatch, когдаBreaker открыт, выдать `updateModelState` + telemetry и не запускать новую сессию.
+- **Acceptance:**
+  - `maxAttempts` не превышается (обычно ≤5).
+  - `chrome.storage.session` содержит `circuitBreakerState` только после debounce.
+  - `PROMPT_SUBMITTED` с повторным `dispatchId` внутри 60s игнорируется (лог `PROMPT_SUBMITTED_STALE`).
+  - Rate-limit errors увеличивают задержку, permanent errors прерывают retries.
+- **Критерий:** ретраи конечные, дубли не отправляются.
+
+19) **Focus минимизация**
+- **Ключевая правка:** `chrome.tabs.sendMessage` не принимает `timeout` → использовать `Promise.race`.
+- **Поток:**
+  1) `GET_ANSWER_NO_FOCUS` с `sendMessageWithTimeout`.
+  2) При `requiresFocus`/таймауте — минимальный `withPromptDispatchFocusLock`: активировать вкладку, вызвать `GET_ANSWER`, дождаться `PROMPT_SUBMITTED`, вернуть фокус.
+  3) Учитывать `focusSwitches` и сохранять в `jobState`.
+- **Acceptance:**
+  - Если `requiresFocus=false`, `focusSwitches === 0`.
+  - `Promise.race` тайм-аутит через 5s без переключений.
+  - После диспатча с фокусом предыдущая вкладка восстанавливается <200ms.
+  - Логи содержат `focusSwitches` count (max 2).
+- **Критерий:** лишние переключения минимальны.
+
+20) **Selector cache cleanup через background alarm**
+- **Важно:** `chrome.alarms` работает только в background; content scripts проверяют TTL, но не чистят сами.
+- **Пошагово:**
+  1. Добавить `SELECTOR_CACHE_CLEANUP_ALARM` (10 минут), запускать на старте/`onStartup`.
+  2. `cleanupExpiredSelectorCache` сравнивает `timestamp`, удаляет `selector_cache_*` записи старше 30 дней (не более 100 за прогон).
+  3. Content scripts просто читают запись и проверяют TTL (без cleanup). Если запись просрочена, возвращают `null`.
+  4. Background логирует удалённые ключи для диагностики.
+- **Acceptance:**
+  - Alarm срабатывает каждые 10 минут (см. `chrome.alarms`).
+  - `readCache` не вызывает `cleanupExpiredCache`.
+  - `cleanupExpiredSelectorCache` удаляет только устаревшие ключи и не обрабатывает более 100 записей за прогон.
+- **Критерий:** фоновый cleanup не блокирует чтения.
+
+---
+
+**Порядок работ**
+1→5 (критичные) → 6→7 (high) → 8→12 (medium) → 13→20 (архитектура)
+
+---
+
+**Мини-чеклисты для сложных пунктов**
+
+A) **Storage Compression (пошагово)**
+1. Создать `lib/lz-string.min.js` и подключить через `importScripts()` в background.
+2. Реализовать `CompressedStorage`:
+   - `set(key, value)` → stringify → decide compression → store.
+   - `get(key)` → detect prefix → decompress or parse or return object.
+3. Миграция:
+   - Если нет `__storage_migrated_v2`, пройти ключи `results/notes/logs`.
+   - Пересохранить через `CompressedStorage.set`.
+   - Поставить флаг миграции.
+4. Добавить `checkQuota()` и `pruneIfNeeded(80)`.
+5. В местах записи больших данных заменить `chrome.storage.local.set/get` на `CompressedStorage`.
+6. Проверить, что старые данные читаются корректно.
+
+B) **AttachmentHandler (пошагово)**
+1. Создать `content-scripts/attachment-handler.js`.
+2. Внести стратегии по платформам (GPT, Grok, Claude, Gemini).
+3. Реализовать `attach(platform, files)`:
+   - Найти элемент.
+   - Попробовать основную стратегию.
+   - Если не получилось → fallback `MANUAL_REQUIRED`.
+4. В content-скриптах заменить дублированный код на вызовы `AttachmentHandler.attach()`.
+5. Логировать причины неудачи (ELEMENT_NOT_FOUND, FILES_NOT_ACCEPTED, MANUAL_REQUIRED).
+
+C) **Focus минимизация (пошагово)**
+1. В background реализовать `sendMessageWithTimeout(tabId, msg, ms)` через `Promise.race`.
+2. Сначала отправлять `GET_ANSWER_NO_FOCUS`.
+3. В content script:
+   - Если нет активного input или нельзя взаимодействовать → вернуть `{ requiresFocus: true }`.
+4. Если `requiresFocus` или timeout → активировать вкладку минимально, отправить обычный `GET_ANSWER`.
+5. Вернуть пользователя на исходную вкладку.
+
+D) **TTLMap (пошагово)**
+1. Создать `utils/ttl-map.js`.
+2. В `set` и `get` вызывать `_lazyCleanup()` (до 10 записей).
+3. В `get` при истечении TTL удалять и возвращать `undefined`.
+4. Заменить только три указанные структуры.
+
+E) **DOMPurify (пошагово)**
+1. Подключить DOMPurify в content scripts и results UI.
+2. Создать `utils/sanitize.js`.
+3. Заменить все `innerHTML =` на `sanitizeHTML`.
+4. Проверить `rg -n "innerHTML\s*="` → нет необработанных присваиваний.
+
+---
+
+**Минимальная проверка после внедрения**
+- Запуск dispatch на 2–3 модели подряд → нет фризов/миганий.
+- Закрытие вкладки LLM → нет зомби-таймеров/записей.
+- Повторный запуск → данные из storage читаются корректно.
+- Попытка отправить unsafe HTML → не исполняется.

@@ -1,0 +1,139 @@
+diff --git a/results.js b/results.js
+--- a/results.js
++++ b/results.js
+@@
+-        ingestLogs(llmName, [makeLocalDiagEntry(
+-            options.source === 'status_indicator_dblclick'
+-                ? 'Manual ping: status indicator double-click'
+-                : 'Manual ping: button click',
++        ingestLogs(llmName, [makeLocalDiagEntry(
++            String(options.source || '').startsWith('status_indicator_')
++                ? 'Manual ping: status indicator request'
++                : 'Manual ping: button click',
+             `advance=${advanceStrategy ? 'true' : 'false'} source=${options.source || 'button'}`,
+             'info'
+         )]);
+ 
++        const useRequestResponsePath = String(options.source || '').startsWith('status_indicator_');
+         chrome.runtime.sendMessage({
+-            type: 'MANUAL_RESPONSE_PING',
++            type: useRequestResponsePath ? 'REQUEST_LLM_RESPONSE' : 'MANUAL_RESPONSE_PING',
+             llmName,
+             manualRecovery: true,
+             advanceStrategy,
+-            reason: 'status_indicator'
++            reason: options.source || 'manual_button'
+         }, (response) => {
+@@
+-            if (status === 'manual_ping_sent') {
++            if (status === 'cached_response_sent') {
++                ingestLogs(llmName, [makeLocalDiagEntry(
++                    'Manual ping: cached response requested',
++                    `source=${options.source || 'button'}`,
++                    'success'
++                )]);
++                setPingButtonState(llmName, 'success', 'Answer loaded from cache');
++                manualRecoveryAdvanceNext[llmName] = true;
++            } else if (status === 'manual_ping_sent') {
+                 console.log(`[RESULTS] Manual ping dispatched for ${llmName}`);
+                 const strategyDetails = response?.strategyId
+                     ? `strategy=${response.strategyId} attempt=${response.attempt ?? 0} advance=${advanceStrategy ? 'true' : 'false'}`
+                     : '';
+                 ingestLogs(llmName, [makeLocalDiagEntry('Manual ping sent (waiting for response)', strategyDetails, 'success')]);
+                 manualRecoveryAdvanceNext[llmName] = true;
+@@
+             indicator.className = 'status-indicator';
+             const mappedClass = statusClassMap[normalizedStatus];
+             if (mappedClass) {
+                 indicator.classList.add(mappedClass);
+             }
++            indicator.setAttribute('role', 'button');
++            indicator.tabIndex = 0;
+             indicator.dataset.currentStatus = normalizedStatus;
+             indicator.dataset.statusRank = String(incomingRank);
+             const statusTitle = resolveIndicatorTooltip(normalizedStatus, data);
+             indicator.dataset.statusTitle = statusTitle;
+             indicator.title = `${statusTitle} • Double-click to fetch this model answer`;
++            indicator.setAttribute('aria-label', `${normalizedName} status: ${statusTitle}. Double-click to fetch this model answer.`);
+         });
+@@
+-            document.addEventListener('click', (event) => {
++            document.addEventListener('dblclick', (event) => {
+                 const indicator = event.target?.closest?.('.status-indicator');
+                 if (!indicator) return;
+                 const llmName = indicator.dataset.llmName;
+                 if (!llmName) return;
+                 event.preventDefault();
+                 event.stopPropagation();
+-                const clickCount = Number(event.detail || 1);
+-                if (clickCount < 2) {
+-                    clearTimeout(statusIndicatorClickTimers[llmName]);
+-                    statusIndicatorClickTimers[llmName] = setTimeout(() => {
+-                        delete statusIndicatorClickTimers[llmName];
+-                    }, 450);
+-                    ingestLogs(llmName, [makeLocalDiagEntry(
+-                        'Manual ping: status indicator single click ignored',
+-                        'double-click required',
+-                        'info'
+-                    )]);
+-                    return;
+-                }
+                 clearTimeout(statusIndicatorClickTimers[llmName]);
+                 delete statusIndicatorClickTimers[llmName];
+                 triggerManualPing(llmName, indicator, { source: 'status_indicator_dblclick' });
+             }, true);
++
++            document.addEventListener('keydown', (event) => {
++                const indicator = event.target?.closest?.('.status-indicator');
++                if (!indicator) return;
++                if (event.key !== 'Enter' && event.key !== ' ') return;
++                const llmName = indicator.dataset.llmName;
++                if (!llmName) return;
++                event.preventDefault();
++                event.stopPropagation();
++                triggerManualPing(llmName, indicator, { source: 'status_indicator_keyboard' });
++            }, true);
+         } catch (err) {
+             console.error('[results] modal wiring top-level error', err);
+         }
+     }
+diff --git a/styles.css b/styles.css
+--- a/styles.css
++++ b/styles.css
+@@
+ .status-indicator {
+   display: inline-block;
+   width: 12px;
+   height: 12px;
+   border-radius: 50%;
+   margin-left: 0;
+   background-color: #d1d5db;
+   transition: background-color 0.3s ease, opacity 0.2s ease;
+   vertical-align: middle;
+   cursor: pointer;
+ }
++
++.status-indicator:focus-visible {
++  outline: 2px solid rgba(37, 99, 235, 0.65);
++  outline-offset: 3px;
++}
+diff --git a/manifest.json b/manifest.json
+--- a/manifest.json
++++ b/manifest.json
+@@
+-  "version": "2.73.43",
++  "version": "2.73.44",
+diff --git a/docs/change-log-codex.md b/docs/change-log-codex.md
+--- a/docs/change-log-codex.md
++++ b/docs/change-log-codex.md
+@@
+ ## Change Log — Codex
++
++### 2026-05-20 09:38 CEST — v2.73.44
++
++- Для чего: исправить ручной вызов ответа конкретной модели по двойному клику на статус-индикаторе журнала модели. Изменение: статус-индикатор теперь отправляет `REQUEST_LLM_RESPONSE` для одной модели, то есть использует тот же путь, что кнопка `Get answers`: сначала отдаётся cached answer из background state, а при отсутствии кэша запускается manual late collect. Файл: `results.js`.
++- Для чего: убрать нестабильность обработки двойного клика через `click`/`event.detail`. Изменение: обработчик статус-индикаторов переведён на настоящий delegated `dblclick`; добавлен keyboard fallback `Enter`/`Space`. Файл: `results.js`.
++- Для чего: сделать интерактивность статус-индикатора явной для UI и accessibility. Изменение: статус-индикаторы получают `role="button"`, `tabIndex=0`, `aria-label`, tooltip “Double-click to fetch this model answer” и `focus-visible` outline. Файлы: `results.js`, `styles.css`.
++- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.73.44`. Файл: `manifest.json`.
+ 
+ ### 2026-05-20 08:47 CEST — v2.73.43

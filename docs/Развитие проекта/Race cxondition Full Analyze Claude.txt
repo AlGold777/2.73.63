@@ -1,0 +1,840 @@
+﻿Что происходит сейчас
+Проблема в двух словах: Расширение не знает, когда "забыть" про старые задачи.
+
+Сценарий 1: Опоздавший курьер
+Ты запустил запрос → расширение отправило команды во вкладки → ты нажал "Стоп" → запустил новый запрос.
+Но старые команды уже "в пути". Через 3 секунды они доставляются — и ломают новый запрос, потому что расширение не проверяет "а это вообще для текущей сессии?"
+
+Сценарий 2: Два блокнота
+Расширение записывает "какая вкладка = какая модель" в два места одновременно:
+    • TabMapManager (медленно, через storage) 
+    • jobState.llms[].tabId (быстро, в памяти) 
+Они рассинхронизируются. Одна часть кода смотрит в один блокнот, другая — в другой. Хаос.
+
+Сценарий 3: Призрак в браузере
+Ты на  .ai нажал "New Chat". URL изменился, страница перерисовалась — но content script этого не заметил. Он всё ещё слушает старые элементы, которых уже нет в DOM. Промпт уходит в никуда.
+
+Как должно быть
+1. Номерок сессии
+Каждый запуск получает уникальный номер. Любой отложенный callback первым делом спрашивает: "Мой номер ещё актуален?" Нет — молча уходит.
+2. Один блокнот
+Только TabMapManager знает какая вкладка какой модели принадлежит. Точка. Никаких дублей.
+3. Детектор навигации
+Content script следит за URL. Изменился pathname? Очистить всё, переинициализироваться.
+
+
+
+Ключевые выводы:
+Что отбросил как переусложнение:
+    •   CAS/SharedArrayBuffer/Mutex — overkill для single-threaded JS, chrome.storage.sync не имеет {ifVersion} API (выдуманный код) 
+    •   "6-8 недель рефакторинга" — паникёрство 
+    •  : Network-level scraping — радикальный pivot, не quick fix 
+Что принял как критичное:
+Приоритет	Проблема	Источник
+🔴 P0	Session boundary для stale callbacks	 
+🔴 P0	Dual source of truth (TabMapManager vs jobState.tabId)	 
+🔴 P0	SPA Navigation Zombies	 
+🔴 P0	Extension Context Invalidated	 
+🟡 P1	TabMapManager операции без await	 
+🟡 P1	Singleton guard для content scripts	 
+Главный инсайт: В коде УЖЕ есть sessionId (строка 569-572), но он не проверяется в retry-логике sendMessageSafely. Это главная точка сбоя.
+Практические патчи:
+    1. Session Boundary Guard — 15 строк кода, немедленный эффект 
+    2. SPA Navigation Guard — отдельный файл, детектирует client-side navigation 
+    3. Extension Context Guard — обёртки для chrome.runtime.* 
+    4. Singleton Guard — версионный контроль content scripts 
+    5. Awaited TabMapManager — grep + replace ~15 мест 
+Реалистичный срок: 1-2 недели для P0+P1 (не 6-8 недель как пугает DeepSeek).
+
+
+
+Race Conditions в LLM_Codex — Экспертный Анализ
+Критическая Оценка Предоставленных Анализов
+Что переоценено (отбрасываю):
+    1.   CAS/SharedArrayBuffer — Overkill. JavaScript single-threaded, настоящих data races в классическом понимании нет. chrome.storage.sync НЕ имеет {ifVersion} API — это выдуманный код.
+    2.   "6-8 недель рефакторинга" — Паникёрство. Проблемы решаются за 1-2 недели фокусированной работы.
+    3.  : Network-level scraping — Интересно, но это pivot архитектуры, не quick fix. DOM-scraping работает в 90%+ случаев, проблема не в нём.
+    4.   Mutex для scroll-toolkit — Content scripts изолированы per-tab, глобальный mutex между вкладками невозможен в принципе (разные контексты исполнения).
+Что фактически верно и критично:
+Источник	Находка	Моя оценка
+	Нет job/session token для отсечения stale callbacks	✅ КРИТИЧНО — Главная проблема
+ 	Два источника истины (TabMapManager vs jobState.llms[].tabId)	✅ КРИТИЧНО — Архитектурный дефект
+ 	TabMapManager.setTab/removeByName без await	✅ ВЫСОКИЙ — Подтверждено в коде
+	SPA Navigation Zombies	✅ КРИТИЧНО — Нет детекции в content scripts
+ 	Extension Context Invalidated	✅ КРИТИЧНО — Нет защиты
+	Tab Discarding (Memory Saver)	⚠️ СРЕДНИЙ — Уже есть проверка tab.discarded
+ 	Background Tab Throttling	⚠️ СРЕДНИЙ — Частично mitigated
+
+Моё Видение Корневых Проблем
+Проблема #1: Отсутствие Session Boundary (КРИТИЧЕСКАЯ)
+Код:
+// background.js:5248-5254
+setTimeout(() => {
+    const currentTabId = TabMapManager.get(llmName);
+    if (currentTabId !== tabId) {
+        return; // ❌ Проверяется только tabId, НЕ sessionId!
+    }
+    sendMessageSafely(tabId, llmName, message, attempt + 1);
+}, retryDelay);
+Проблема: В коде ЕСТЬ sessionId (строка 569-572), но он не проверяется в retry-логике. Если пользователь запустил новый job пока ретрай ждёт — callback выстрелит в новый job.
+Моё решение:
+// Добавить проверку sessionId в КАЖДЫЙ setTimeout/callback
+const capturedSessionId = jobState?.session?.startTime;
+setTimeout(() => {
+    // Проверяем ОБА условия
+    if (jobState?.session?.startTime !== capturedSessionId) {
+        console.log(`[BACKGROUND] Session changed, aborting stale retry`);
+        return;
+    }
+    const currentTabId = TabMapManager.get(llmName);
+    if (currentTabId !== tabId) return;
+    sendMessageSafely(tabId, llmName, message, attempt + 1);
+}, retryDelay);
+
+Проблема #2: Dual Source of Truth для tabId (КРИТИЧЕСКАЯ)
+Факт: tabId хранится в двух местах:
+    1. TabMapManager (llmTabMap) — async операции 
+    2. jobState.llms[llmName].tabId — sync присваивание 
+Код демонстрирует рассинхрон:
+// background.js:3510 — onRemoved listener
+TabMapManager.removeByName(closedLlmName); // ❌ без await
+// ...потом...
+const remainingLlms = TabMapManager.entries().length; // Снимок может быть stale
+// background.js:3506-3507
+jobState.llms[closedLlmName].tabId = null;      // Sync
+jobState.llms[closedLlmName].messageSent = false; // Sync
+// TabMapManager ещё не обновился!
+Моё решение — Single Source of Truth:
+// ВАРИАНТ A: TabMapManager как единственный источник
+// Удалить jobState.llms[].tabId полностью
+// Везде использовать TabMapManager.get(llmName)
+
+// ВАРИАНТ B: Атомарная транзакция (если нужны оба)
+async function updateTabBinding(llmName, tabId) {
+    // Одна функция обновляет ОБА места атомарно
+    if (tabId === null) {
+        await TabMapManager.removeByName(llmName);
+        if (jobState?.llms?.[llmName]) {
+            jobState.llms[llmName].tabId = null;
+        }
+    } else {
+        await TabMapManager.setTab(llmName, tabId);
+        if (jobState?.llms?.[llmName]) {
+            jobState.llms[llmName].tabId = tabId;
+        }
+    }
+}
+Рекомендую Вариант A — проще, меньше точек сбоя.
+
+Проблема #3: stopAllProcesses() Не Отменяет "Хвосты" (ВЫСОКАЯ)
+Факт (подтверждено в коде):
+// background.js:3098-3123
+function stopAllProcesses(reason, opts = {}) {
+    clearActiveListeners();
+    clearPingState();
+    // ...
+    TabMapManager.clear(); // ❌ Без await
+    // ...
+    jobState = {};
+}
+Что НЕ отменяется:
+    • setTimeout в sendMessageSafely ретраях 
+    • Pending promises от chrome.tabs.create/get/update 
+    • onUpdated listeners созданные в createNewLlmTab 
+Моё решение — AbortController Pattern:
+// Глобальный AbortController для текущей сессии
+let sessionAbortController = new AbortController();
+
+function stopAllProcesses(reason, opts = {}) {
+    // 1. Сигнализируем отмену ВСЕМ операциям
+    sessionAbortController.abort(reason);
+    sessionAbortController = new AbortController(); // Новый для следующей сессии
+    
+    // 2. Остальная очистка...
+}
+
+// В sendMessageSafely и других async операциях:
+function sendMessageSafely(tabId, llmName, message, attempt = 1) {
+    const signal = sessionAbortController.signal;
+    
+    // ...
+    
+    setTimeout(() => {
+        if (signal.aborted) {
+            console.log(`[BACKGROUND] Retry aborted for ${llmName}`);
+            return;
+        }
+        // proceed with retry
+    }, retryDelay);
+}
+
+Проблема #4: SPA Navigation Zombies (КРИТИЧЕСКАЯ)
+Факт: Content scripts не детектируют SPA navigation. При переходе с  .ai/ на  .ai/chat/new:
+    • URL меняется 
+    • DOM полностью пересоздаётся 
+    • Event listeners висят на старых nodes 
+    • MutationObservers наблюдают detached trees 
+Моё решение — добавить в каждый content script:
+// content-*.js — В начало скрипта
+(function initSPANavigationGuard() {
+    let lastUrl = location.href;
+    let lastPathname = location.pathname;
+    
+    // Способ 1: MutationObserver на URL change
+    const urlObserver = new MutationObserver(() => {
+        if (location.href !== lastUrl) {
+            const oldUrl = lastUrl;
+            lastUrl = location.href;
+            
+            // Если только pathname изменился — это SPA navigation
+            if (location.pathname !== lastPathname) {
+                lastPathname = location.pathname;
+                console.log(`[SPA-GUARD] Navigation detected: ${oldUrl} -> ${lastUrl}`);
+                
+                // Cleanup старых ресурсов
+                if (window.HumanoidCleanup?.createScope) {
+                    const scope = window.__currentCleanupScope;
+                    if (scope) scope.cleanup('spa-navigation');
+                }
+                
+                // Signal background
+                try {
+                    chrome.runtime.sendMessage({ 
+                        type: 'SPA_NAVIGATION', 
+                        oldUrl, 
+                        newUrl: lastUrl 
+                    });
+                } catch (e) {
+                    // Extension context invalidated — см. Проблему #5
+                }
+                
+                // Реинициализация через небольшую задержку (дать React отрендериться)
+                setTimeout(() => reinitializeContentScript(), 500);
+            }
+        }
+    });
+    
+    urlObserver.observe(document.body, { childList: true, subtree: true });
+    
+    // Способ 2: History API interception (более надёжный)
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+    
+    history.pushState = function(...args) {
+        originalPushState.apply(this, args);
+        window.dispatchEvent(new Event('spa-navigation'));
+    };
+    
+    history.replaceState = function(...args) {
+        originalReplaceState.apply(this, args);
+        window.dispatchEvent(new Event('spa-navigation'));
+    };
+    
+    window.addEventListener('popstate', () => {
+        window.dispatchEvent(new Event('spa-navigation'));
+    });
+    
+    window.addEventListener('spa-navigation', () => {
+        // Тот же cleanup + reinit
+    });
+})();
+
+Проблема #5: Extension Context Invalidated (КРИТИЧЕСКАЯ)
+Факт: После extension reload/update content script продолжает работать, но все chrome.runtime.* падают.
+Текущий код НЕ защищён.
+Моё решение:
+// content-utils.js — Добавить обёртку
+function safeChromeMessage(message, callback) {
+    try {
+        if (!chrome.runtime?.id) {
+            throw new Error('Extension context invalidated');
+        }
+        chrome.runtime.sendMessage(message, (response) => {
+            if (chrome.runtime.lastError) {
+                const err = chrome.runtime.lastError.message || '';
+                if (err.includes('Extension context invalidated')) {
+                    handleContextInvalidation();
+                    return;
+                }
+            }
+            if (callback) callback(response);
+        });
+    } catch (e) {
+        if (e.message.includes('Extension context invalidated')) {
+            handleContextInvalidation();
+        } else {
+            throw e;
+        }
+    }
+}
+
+function handleContextInvalidation() {
+    console.warn('[ZOMBIE] Extension context invalidated — cleaning up');
+    
+    // 1. Очистить все ресурсы
+    if (window.__currentCleanupScope) {
+        window.__currentCleanupScope.cleanup('extension-invalidated');
+    }
+    
+    // 2. Удалить глобальные маркеры
+    delete window.__llmCodexVersion;
+    delete window.LLMExtension;
+    
+    // 3. Показать пользователю (опционально)
+    console.info('[LLM_Codex] Extension was reloaded. Please refresh this page.');
+}
+
+// Проактивная проверка при старте
+function checkExtensionContext() {
+    try {
+        return !!chrome.runtime?.id;
+    } catch {
+        return false;
+    }
+}
+
+Проблема #6: Multiple Content Script Instances (СРЕДНЯЯ)
+Факт: После extension reload manifest инжектирует НОВЫЙ скрипт, старый ещё в памяти.
+Моё решение — Version-based Singleton:
+// content-bootstrap.js — В самое начало
+const SCRIPT_VERSION = 'v2.70.46'; // Синхронизировать с manifest
+
+(function singletonGuard() {
+    if (window.__llmCodexVersion) {
+        const existing = window.__llmCodexVersion;
+        if (existing >= SCRIPT_VERSION) {
+            console.log(`[SINGLETON] Skipping duplicate injection (existing: ${existing})`);
+            return false; // Не инициализировать повторно
+        }
+        // Новая версия — cleanup старой
+        console.log(`[SINGLETON] Upgrading from ${existing} to ${SCRIPT_VERSION}`);
+        if (window.__llmCodexCleanup) {
+            window.__llmCodexCleanup('version-upgrade');
+        }
+    }
+    window.__llmCodexVersion = SCRIPT_VERSION;
+    return true;
+})();
+
+Приоритизация Исправлений
+P0 — Немедленно (блокеры стабильности)
+#	Проблема	Файлы	Effort
+1	Session boundary checks	background.js	2-3 часа
+2	Single source of truth для tabId	background.js	4-6 часов
+3	SPA Navigation Guard	content-*.js	3-4 часа
+4	Extension Context Invalidated	content-utils.js	2 часа
+P1 — Эта неделя (улучшения надёжности)
+#	Проблема	Файлы	Effort
+5	AbortController для отмены	background.js	3-4 часа
+6	Singleton guard	content-bootstrap.js	1 час
+7	await для TabMapManager операций	background.js	2 часа
+P2 — Следующий спринт
+#	Проблема	Файлы	Effort
+8	State Machine для tab lifecycle	Новый модуль	1-2 дня
+9	Global concurrency limiter	background.js	0.5 дня
+
+Конкретный План Имплементации
+Шаг 1: Session Boundary (2-3 часа)
+// background.js — Добавить в начало файла
+let currentSessionId = 0;
+
+function getSessionId() {
+    return currentSessionId;
+}
+
+function newSession() {
+    currentSessionId = Date.now();
+    return currentSessionId;
+}
+
+// В startProcess():
+function startProcess(prompt, selectedLLMs, resultsTab, opts = {}) {
+    const sessionId = newSession(); // Новая сессия
+    jobState = {
+        session: { startTime: sessionId, /* ... */ },
+        // ...
+    };
+}
+
+// В КАЖДОМ setTimeout/callback:
+const capturedSession = getSessionId();
+setTimeout(() => {
+    if (getSessionId() !== capturedSession) return; // Stale
+    // ... proceed
+}, delay);
+Шаг 2: Single Source of Truth (4-6 часов)
+    1. Grep все jobState.llms[...].tabId (≈15 мест) 
+    2. Заменить на TabMapManager.get(llmName) 
+    3. Удалить поле tabId из jobState.llms[]. 
+    4. Сделать все TabMapManager.setTab/removeByName с await 
+Шаг 3: SPA Guard (3-4 часа)
+Создать /mnt/project/spa-navigation-guard.js и импортировать в каждый content script.
+
+Метрики Успеха
+    1. Zero stale callbacks: После stopAllProcesses() никакие таймеры не должны влиять на новый job 
+    2. Consistent tabId: TabMapManager.get(llmName) === единственный источник 
+    3. SPA resilience: При навигации внутри SPA — автоматическая реинициализация 
+    4. Graceful invalidation: При reload расширения — cleanup без ошибок в консоли 
+
+Заключение
+Race conditions в LLM_Codex — это не "системная архитектурная катастрофа", а набор конкретных, исправимых багов. Ключевые инсайты:
+    1.   дал самый практичный анализ — session token и single source of truth 
+    2.   верно указал на browser-level факторы — throttling, discarding 
+    3.   правильно выделил content script проблемы — SPA, invalidation 
+    4. DeepSeek переусложнил — CAS/mutex для JS не нужны 
+Реалистичный срок: 1-2 недели для P0+P1, не 6-8 недель.
+
+
+
+Практические Патчи для Race Conditions
+Патч #1: Session Boundary Guard
+Файл: background.js
+Добавить в начало файла (после imports):
+// ============================================
+// SESSION BOUNDARY GUARD (Race Condition Fix)
+// ============================================
+let _currentSessionId = 0;
+
+/**
+ * Получить ID текущей сессии
+ * @returns {number} Timestamp начала сессии
+ */
+function getCurrentSessionId() {
+    return _currentSessionId;
+}
+
+/**
+ * Создать новую сессию (вызывать в startProcess)
+ * @returns {number} ID новой сессии
+ */
+function createNewSession() {
+    _currentSessionId = Date.now();
+    console.log(`[SESSION] New session created: ${_currentSessionId}`);
+    return _currentSessionId;
+}
+
+/**
+ * Проверить, что сессия не изменилась
+ * @param {number} capturedSessionId - ID сессии, захваченный в момент создания callback
+ * @returns {boolean} true если сессия та же
+ */
+function isSessionValid(capturedSessionId) {
+    return _currentSessionId === capturedSessionId;
+}
+
+/**
+ * Создать "session-aware" setTimeout
+ * Callback НЕ выполнится, если сессия сменилась
+ */
+function sessionAwareTimeout(callback, delay, label = 'unnamed') {
+    const capturedSession = getCurrentSessionId();
+    return setTimeout(() => {
+        if (!isSessionValid(capturedSession)) {
+            console.log(`[SESSION] Stale timeout skipped (${label}): session ${capturedSession} → ${getCurrentSessionId()}`);
+            return;
+        }
+        callback();
+    }, delay);
+}
+Изменить в startProcess() (примерно строка ~2600):
+async function startProcess(prompt, selectedLLMs, resultsTab, opts = {}) {
+    // ДОБАВИТЬ В НАЧАЛО:
+    const sessionId = createNewSession();
+    
+    // Существующий код с использованием sessionId...
+    jobState = {
+        session: { 
+            startTime: sessionId,  // Использовать новый sessionId
+            // ...остальные поля
+        },
+        // ...
+    };
+Изменить в sendMessageSafely() (строка ~5248):
+// БЫЛО:
+setTimeout(() => {
+    const currentTabId = TabMapManager.get(llmName);
+    if (currentTabId !== tabId) {
+        console.log(`[BACKGROUND] Tab for ${llmName} changed (${tabId} -> ${currentTabId}), aborting retry`);
+        return;
+    }
+    sendMessageSafely(tabId, llmName, message, attempt + 1);
+}, retryDelay);
+
+// СТАЛО:
+const capturedSession = getCurrentSessionId();
+setTimeout(() => {
+    // Проверяем СНАЧАЛА сессию
+    if (!isSessionValid(capturedSession)) {
+        console.log(`[BACKGROUND] Session changed for ${llmName}, aborting stale retry`);
+        return;
+    }
+    const currentTabId = TabMapManager.get(llmName);
+    if (currentTabId !== tabId) {
+        console.log(`[BACKGROUND] Tab for ${llmName} changed (${tabId} -> ${currentTabId}), aborting retry`);
+        return;
+    }
+    sendMessageSafely(tabId, llmName, message, attempt + 1);
+}, retryDelay);
+
+Патч #2: Awaited TabMapManager Operations
+Файл: background.js
+Изменить в onRemoved listener (строка ~3510):
+// БЫЛО:
+TabMapManager.removeByName(closedLlmName);
+
+// СТАЛО (обернуть в async IIFE если нужно):
+await TabMapManager.removeByName(closedLlmName);
+Изменить в stopAllProcesses() (строка ~3103):
+// БЫЛО:
+TabMapManager.clear();
+
+// СТАЛО:
+await TabMapManager.clear();
+Примечание: Если функция не async, обернуть критическую часть:
+(async () => {
+    await TabMapManager.clear();
+    // Код, который зависит от очистки
+})();
+
+Патч #3: SPA Navigation Guard
+Создать новый файл: spa-navigation-guard.js
+/**
+ * SPA Navigation Guard
+ * Детектирует client-side navigation и реинициализирует content script
+ */
+(function initSPANavigationGuard() {
+    'use strict';
+    
+    if (window.__spaGuardInitialized) return;
+    window.__spaGuardInitialized = true;
+    
+    let lastUrl = location.href;
+    let lastPathname = location.pathname;
+    
+    const REINIT_DELAY_MS = 500; // Дать React/Vue отрендериться
+    
+    function handleNavigation(source) {
+        if (location.href === lastUrl) return;
+        
+        const oldUrl = lastUrl;
+        const oldPathname = lastPathname;
+        lastUrl = location.href;
+        lastPathname = location.pathname;
+        
+        // Только pathname change = SPA navigation
+        if (location.pathname === oldPathname) {
+            console.log(`[SPA-GUARD] Hash/query change ignored: ${oldUrl} -> ${lastUrl}`);
+            return;
+        }
+        
+        console.log(`[SPA-GUARD] Navigation detected (${source}): ${oldUrl} -> ${lastUrl}`);
+        
+        // 1. Cleanup старых ресурсов
+        cleanupOldResources();
+        
+        // 2. Notify background
+        notifyBackground(oldUrl, lastUrl);
+        
+        // 3. Reinitialize после задержки
+        setTimeout(reinitializeScript, REINIT_DELAY_MS);
+    }
+    
+    function cleanupOldResources() {
+        // Использовать существующий HumanoidCleanup если есть
+        if (window.__currentCleanupScope?.cleanup) {
+            try {
+                window.__currentCleanupScope.cleanup('spa-navigation');
+            } catch (e) {
+                console.warn('[SPA-GUARD] Cleanup error:', e);
+            }
+        }
+        
+        // Также проверить humanSessionController
+        if (window.humanSessionController?.forceHardStop) {
+            try {
+                window.humanSessionController.forceHardStop('spa-navigation');
+            } catch (e) {}
+        }
+    }
+    
+    function notifyBackground(oldUrl, newUrl) {
+        try {
+            if (!chrome.runtime?.id) return; // Extension invalidated
+            
+            chrome.runtime.sendMessage({
+                type: 'SPA_NAVIGATION',
+                oldUrl,
+                newUrl,
+                timestamp: Date.now()
+            }).catch(() => {
+                // Ignore - extension might be reloading
+            });
+        } catch (e) {
+            // Extension context invalidated
+        }
+    }
+    
+    function reinitializeScript() {
+        console.log('[SPA-GUARD] Reinitializing content script...');
+        
+        // Trigger re-initialization event
+        window.dispatchEvent(new CustomEvent('llm-codex-reinit', {
+            detail: { url: location.href, reason: 'spa-navigation' }
+        }));
+    }
+    
+    // === Detection Methods ===
+    
+    // Method 1: History API interception
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+    
+    history.pushState = function(...args) {
+        originalPushState.apply(this, args);
+        handleNavigation('pushState');
+    };
+    
+    history.replaceState = function(...args) {
+        originalReplaceState.apply(this, args);
+        handleNavigation('replaceState');
+    };
+    
+    // Method 2: popstate (back/forward buttons)
+    window.addEventListener('popstate', () => handleNavigation('popstate'));
+    
+    // Method 3: Fallback MutationObserver (для фреймворков без History API)
+    let checkTimeout = null;
+    const observer = new MutationObserver(() => {
+        if (checkTimeout) return;
+        checkTimeout = setTimeout(() => {
+            checkTimeout = null;
+            if (location.href !== lastUrl) {
+                handleNavigation('mutation');
+            }
+        }, 100);
+    });
+    
+    if (document.body) {
+        observer.observe(document.body, { childList: true, subtree: true });
+    } else {
+        document.addEventListener('DOMContentLoaded', () => {
+            observer.observe(document.body, { childList: true, subtree: true });
+        });
+    }
+    
+    console.log('[SPA-GUARD] Initialized for:', location.hostname);
+})();
+Добавить в manifest.json (в content_scripts):
+{
+  "content_scripts": [
+    {
+      "matches": ["*:// .ai/*", "*://chat.openai.com/*", "..."],
+      "js": [
+        "spa-navigation-guard.js",  // <-- ДОБАВИТЬ ПЕРВЫМ
+        "content-bootstrap.js",
+        "content-*.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
+
+Патч #4: Extension Context Invalidation Guard
+Файл: content-utils.js (добавить)
+/**
+ * Safe Chrome Runtime Messaging
+ * Handles extension context invalidation gracefully
+ */
+
+const ExtensionContext = {
+    _isValid: true,
+    _invalidationCallbacks: [],
+    
+    /**
+     * Check if extension context is still valid
+     */
+    isValid() {
+        if (!this._isValid) return false;
+        try {
+            return !!chrome.runtime?.id;
+        } catch {
+            this._handleInvalidation();
+            return false;
+        }
+    },
+    
+    /**
+     * Register callback for when context becomes invalid
+     */
+    onInvalidated(callback) {
+        if (typeof callback === 'function') {
+            this._invalidationCallbacks.push(callback);
+        }
+    },
+    
+    _handleInvalidation() {
+        if (!this._isValid) return; // Already handled
+        this._isValid = false;
+        
+        console.warn('[EXTENSION] Context invalidated - cleaning up');
+        
+        // Notify all registered callbacks
+        this._invalidationCallbacks.forEach(cb => {
+            try { cb(); } catch (e) { console.error('[EXTENSION] Cleanup error:', e); }
+        });
+        
+        // Global cleanup
+        this._globalCleanup();
+    },
+    
+    _globalCleanup() {
+        // Stop any active sessions
+        if (window.humanSessionController?.forceHardStop) {
+            try { window.humanSessionController.forceHardStop('extension-invalidated'); } catch {}
+        }
+        
+        // Cleanup scopes
+        if (window.__currentCleanupScope?.cleanup) {
+            try { window.__currentCleanupScope.cleanup('extension-invalidated'); } catch {}
+        }
+        
+        // Remove global markers
+        delete window.__llmCodexVersion;
+        delete window.__spaGuardInitialized;
+        
+        // User notification (optional)
+        console.info('[LLM_Codex] Extension was reloaded. Please refresh this page for full functionality.');
+    }
+};
+
+/**
+ * Safe wrapper for chrome.runtime.sendMessage
+ */
+function safeSendMessage(message, callback) {
+    if (!ExtensionContext.isValid()) {
+        console.warn('[EXTENSION] Cannot send message - context invalidated');
+        return false;
+    }
+    
+    try {
+        chrome.runtime.sendMessage(message, (response) => {
+            if (chrome.runtime.lastError) {
+                const err = chrome.runtime.lastError.message || '';
+                if (err.includes('Extension context invalidated') || 
+                    err.includes('Cannot access chrome.runtime')) {
+                    ExtensionContext._handleInvalidation();
+                    return;
+                }
+            }
+            if (callback) callback(response);
+        });
+        return true;
+    } catch (e) {
+        if (e.message?.includes('Extension context invalidated')) {
+            ExtensionContext._handleInvalidation();
+        }
+        return false;
+    }
+}
+
+/**
+ * Safe wrapper for chrome.runtime.connect
+ */
+function safeConnect(connectInfo) {
+    if (!ExtensionContext.isValid()) {
+        return null;
+    }
+    
+    try {
+        const port = chrome.runtime.connect(connectInfo);
+        
+        port.onDisconnect.addListener(() => {
+            if (chrome.runtime.lastError?.message?.includes('Extension context invalidated')) {
+                ExtensionContext._handleInvalidation();
+            }
+        });
+        
+        return port;
+    } catch (e) {
+        if (e.message?.includes('Extension context invalidated')) {
+            ExtensionContext._handleInvalidation();
+        }
+        return null;
+    }
+}
+
+// Periodic health check (every 30 seconds)
+setInterval(() => {
+    ExtensionContext.isValid();
+}, 30000);
+
+// Export for use in content scripts
+window.ExtensionContext = ExtensionContext;
+window.safeSendMessage = safeSendMessage;
+window.safeConnect = safeConnect;
+
+Патч #5: Singleton Guard для Content Scripts
+Файл: content-bootstrap.js (модифицировать начало)
+/* Lightweight bootstrap with singleton guard */
+(function initContentBootstrap() {
+    'use strict';
+    
+    // === SINGLETON GUARD ===
+    const SCRIPT_VERSION = '2.70.46'; // Sync with manifest version
+    
+    if (window.__llmCodexVersion) {
+        const existing = window.__llmCodexVersion;
+        
+        // Простое сравнение версий (можно улучшить)
+        if (existing >= SCRIPT_VERSION) {
+            console.log(`[BOOTSTRAP] Skipping duplicate injection (existing: ${existing}, new: ${SCRIPT_VERSION})`);
+            return; // Не инициализировать повторно
+        }
+        
+        // Новая версия - cleanup старой
+        console.log(`[BOOTSTRAP] Upgrading from ${existing} to ${SCRIPT_VERSION}`);
+        if (typeof window.__llmCodexCleanup === 'function') {
+            try {
+                window.__llmCodexCleanup('version-upgrade');
+            } catch (e) {
+                console.warn('[BOOTSTRAP] Cleanup during upgrade failed:', e);
+            }
+        }
+    }
+    
+    window.__llmCodexVersion = SCRIPT_VERSION;
+    
+    // === ОСТАЛЬНОЙ КОД content-bootstrap.js ===
+    const root = typeof window !== 'undefined' ? window : globalThis;
+    root.LLMExtension = root.LLMExtension || {};
+    // ... остальное без изменений
+})();
+
+Порядок Применения Патчей
+    1. Патч #1 (Session Boundary) — Применить первым, даёт немедленный эффект 
+    2. Патч #5 (Singleton Guard) — Быстрый и безопасный 
+    3. Патч #4 (Context Invalidation) — Добавляет безопасность 
+    4. Патч #3 (SPA Navigation) — Требует тестирования на каждой платформе 
+    5. Патч #2 (Awaited Operations) — Требует grep и внимательных изменений 
+
+Тестовые Сценарии
+Сценарий 1: Быстрый Stop/Start
+    1. Запустить job с 4 моделями 
+    2. Через 2 секунды нажать Stop 
+    3. Сразу запустить новый job 
+    4. Ожидание: Никакие callback'и от старого job не должны влиять на новый 
+Сценарий 2: SPA Navigation
+    1. Открыть  .ai 
+    2. Запустить job 
+    3. Кликнуть "New Chat" (SPA navigation) 
+    4. Ожидание: Автоматическая реинициализация, новый chat работает 
+Сценарий 3: Extension Reload
+    1. Запустить job 
+    2. Перезагрузить расширение в chrome://extensions 
+    3. Ожидание: Чистый cleanup в консоли, без error storms 
+Сценарий 4: Tab Close During Generation
+    1. Запустить job 
+    2. Закрыть одну из LLM вкладок вручную 
+    3. Ожидание: Graceful error для этой модели, остальные продолжают работать 
+
+

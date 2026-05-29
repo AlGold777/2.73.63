@@ -1,0 +1,107 @@
+diff --git a/background/shared-state.js b/background/shared-state.js
+index 2a7b2e1..1b7d010 100644
+--- a/background/shared-state.js
++++ b/background/shared-state.js
+@@
+ let evaluatorTabId = null;
+ const jobMetadata = new Map();
+ const llmRequestMap = {};
+ const pickerRequests = new Map();
+ let cachedApiMode = true;
+ let autoFocusNewTabsEnabled = false;
++let prewarmTabsEnabled = false;
+@@
+ self.pickerRequests = pickerRequests;
+ self.cachedApiMode = cachedApiMode;
+ self.autoFocusNewTabsEnabled = autoFocusNewTabsEnabled;
++self.prewarmTabsEnabled = prewarmTabsEnabled;
+ self.selectorResolutionMetrics = selectorResolutionMetrics;
+ self.selectorFailureMetrics = selectorFailureMetrics;
+ self.selectorHealthMeta = selectorHealthMeta;
+ self.selectorHealthChecks = selectorHealthChecks;
+ self.platformRunHistory = platformRunHistory;
+ self.platformDegradedAt = platformDegradedAt;
+ self.platformDegradedHourlyAt = platformDegradedHourlyAt;
+ self.selectorMetricsDirty = selectorMetricsDirty;
+ self.selectorMetricsFlushTimer = selectorMetricsFlushTimer;
+ self.selectorMetricsFlushInFlight = selectorMetricsFlushInFlight;
+ self.promptDispatchInProgress = promptDispatchInProgress;
+ self.pingWindowByTabId = pingWindowByTabId;
+ self.pingStartByTabId = pingStartByTabId;
+ self.llmActivityMap = llmActivityMap;
+ self.SESSION_TAB_IDS_KEY = SESSION_TAB_IDS_KEY;
+ self.sessionTabIds = sessionTabIds;
+ self.sessionTabsLoaded = sessionTabsLoaded;
+ self.tabVisitTracker = tabVisitTracker;
+ self.SUCCESS_STATUSES = SUCCESS_STATUSES;
+@@
+ diff --git a/background/message-router.js b/background/message-router.js
+index 2435b29..96c4a44 100644
+--- a/background/message-router.js
++++ b/background/message-router.js
+@@
+ const API_MODE_STORAGE_KEY = 'llmComparatorApiModeEnabled';
+ const AUTO_FOCUS_NEW_TABS_KEY = 'autofocus_llm_tabs_enabled';
++const PREWARM_TABS_ENABLED_KEY = 'prewarm_tabs_enabled';
+ const DIAGNOSTICS_EVENTS_KEY = '__diagnostics_events__';
+ const llmStartChains = Object.create(null);
+@@
+ chrome.storage.local.get(AUTO_FOCUS_NEW_TABS_KEY, (data) => {
+     if (typeof data?.[AUTO_FOCUS_NEW_TABS_KEY] === 'boolean') {
+         autoFocusNewTabsEnabled = data[AUTO_FOCUS_NEW_TABS_KEY];
+         self.autoFocusNewTabsEnabled = autoFocusNewTabsEnabled;
+     }
+ });
++
++chrome.storage.local.get(PREWARM_TABS_ENABLED_KEY, (data) => {
++    if (typeof data?.[PREWARM_TABS_ENABLED_KEY] === 'boolean') {
++        prewarmTabsEnabled = data[PREWARM_TABS_ENABLED_KEY];
++        self.prewarmTabsEnabled = prewarmTabsEnabled;
++    }
++});
+@@
+     if (changes[AUTO_FOCUS_NEW_TABS_KEY]) {
+         autoFocusNewTabsEnabled = !!changes[AUTO_FOCUS_NEW_TABS_KEY].newValue;
+         self.autoFocusNewTabsEnabled = autoFocusNewTabsEnabled;
+     }
++    if (changes[PREWARM_TABS_ENABLED_KEY]) {
++        prewarmTabsEnabled = !!changes[PREWARM_TABS_ENABLED_KEY].newValue;
++        self.prewarmTabsEnabled = prewarmTabsEnabled;
++    }
+ });
+
+diff --git a/background/tab-manager.js b/background/tab-manager.js
+index 4b2e2ce..df1e5c4 100644
+--- a/background/tab-manager.js
++++ b/background/tab-manager.js
+@@
+ async function smartPrewarmTabs() {
++  if (!prewarmTabsEnabled) {
++    console.log('[PREWARM] Disabled by settings, skipping');
++    return;
++  }
+   if (!hasEnoughMemoryForPrewarm()) {
+     return;
+   }
+@@
+ diff --git a/manifest.json b/manifest.json
+index 4a5593f..d99f1c2 100644
+--- a/manifest.json
++++ b/manifest.json
+@@
+-  "version": "2.72.23",
++  "version": "2.72.24",
+@@
+ diff --git a/docs/change-log-codex.md b/docs/change-log-codex.md
+index 31e3c96..98b5e9f 100644
+--- a/docs/change-log-codex.md
++++ b/docs/change-log-codex.md
+@@
+ ## 2026-02-02 23:12 — v2.72.23
+ - Round1: исключён пропуск моделей — добавлен обязательный recovery таба и фатализация при невозможности подготовить вкладку, вместо `skip`. Файл: `background/job-orchestrator.js`.
+ - Round1: включена попытка пересоздания вкладки при `tab_not_ready` и `tab_ineligible`, чтобы не терять модели на старте. Файл: `background/job-orchestrator.js`.
+ - Зафиксирован выпуск: версия обновлена до 2.72.23. Файл: `manifest.json`.
++
++## 2026-02-03 07:03 — v2.72.24
++- Prewarm: добавлен флаг `prewarm_tabs_enabled` (по умолчанию выключен), чтобы табы не открывались самопроизвольно. Файлы: `background/message-router.js`, `background/shared-state.js`, `background/tab-manager.js`.
++- Зафиксирован выпуск: версия обновлена до 2.72.24. Файл: `manifest.json`.

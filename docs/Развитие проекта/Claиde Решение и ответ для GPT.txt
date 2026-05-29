@@ -1,0 +1,819 @@
+﻿РЕШЕНИЕ 1: "Session Boundary First" — ДЕТАЛЬНОЕ ТЕХНИЧЕСКОЕ ЗАДАНИЕ
+ОБЗОР
+Цель: Защитить систему от stale callbacks, которые выстреливают после смены job/session и ломают новый запуск.
+Файлы для изменения:
+    1. /mnt/project/dispatch-coordinator.js — 2 изменения 
+    2. /mnt/project/job-orchestrator.js — 3 изменения 
+    3. /mnt/project/message-router.js — 2 изменения 
+    4. /mnt/project/evaluation-manager.js — 1 изменение 
+Общий объём: ~60 строк изменений Время внедрения: 2-4 часа
+
+ЧАСТЬ 1: Глобальный AbortController
+1.1. Добавить AbortController в dispatch-coordinator.js
+Файл: /mnt/project/dispatch-coordinator.js Место: После строки 9 (после var promptDispatchSupervisorTimer = null;)
+ДОБАВИТЬ:
+javascript
+// Session abort controller для отмены stale операций
+var sessionAbortController = new AbortController();
+
+function getSessionAbortSignal() {
+  return sessionAbortController.signal;
+}
+
+function abortCurrentSession(reason = 'session_changed') {
+  console.log(`[DISPATCH] Aborting session: ${reason}`);
+  sessionAbortController.abort(reason);
+  sessionAbortController = new AbortController();
+}
+Поиск (уникальный блок):
+javascript
+var promptDispatchSupervisorTimer = null;
+const PROMPT_SUBMIT_TIMEOUT_MS = TimingConfig.getTiming('promptSubmitTimeoutMs', 20000);
+Замена:
+javascript
+var promptDispatchSupervisorTimer = null;
+
+// Session abort controller для отмены stale операций
+var sessionAbortController = new AbortController();
+
+function getSessionAbortSignal() {
+  return sessionAbortController.signal;
+}
+
+function abortCurrentSession(reason = 'session_changed') {
+  console.log(`[DISPATCH] Aborting session: ${reason}`);
+  sessionAbortController.abort(reason);
+  sessionAbortController = new AbortController();
+}
+
+const PROMPT_SUBMIT_TIMEOUT_MS = TimingConfig.getTiming('promptSubmitTimeoutMs', 20000);
+
+ЧАСТЬ 2: Защита Supervisor setTimeout
+2.1. Добавить session проверку в schedulePromptDispatchSupervisor
+Файл: /mnt/project/dispatch-coordinator.js Место: Строки 312-315
+Поиск (уникальный блок):
+javascript
+  promptDispatchSupervisorTimer = setTimeout(() => {
+    promptDispatchSupervisorTimer = null;
+    runPromptDispatchSupervisor();
+  }, adaptiveTick);
+Замена:
+javascript
+  const capturedSessionId = jobState?.session?.startTime || null;
+  promptDispatchSupervisorTimer = setTimeout(() => {
+    promptDispatchSupervisorTimer = null;
+    // Session boundary check
+    if (capturedSessionId && jobState?.session?.startTime !== capturedSessionId) {
+      console.log('[SUPERVISOR] Session changed, aborting scheduled supervisor tick');
+      return;
+    }
+    if (getSessionAbortSignal().aborted) {
+      console.log('[SUPERVISOR] Session aborted, skipping supervisor tick');
+      return;
+    }
+    runPromptDispatchSupervisor();
+  }, adaptiveTick);
+
+ЧАСТЬ 3: Защита Recovery setTimeout в job-orchestrator.js
+3.1. Добавить session проверку в recovery timeout
+Файл: /mnt/project/job-orchestrator.js Место: Строки 553-586
+Поиск (уникальный блок):
+javascript
+    //-- 5.1. Диагностика: проверяем пропущенные модели --//
+setTimeout(() => {
+  const allModels = selectedLLMs;
+  const activeModels = Object.keys(jobState?.llms || {});
+  const missingModels = allModels.filter(name => !activeModels.includes(name));
+  
+  if (missingModels.length > 0) {
+    console.error(`[ROUNDS] Missing models detected: ${missingModels.join(', ')}`);
+    missingModels.forEach(llmName => {
+      emitTelemetry(llmName, 'MODEL_MISSING', {
+        level: 'error',
+        details: 'Model not found in jobState after rounds',
+        meta: { allModels, activeModels, missingModels }
+      });
+      
+      // Пытаемся восстановить пропущенную модель
+      if (!jobState.llms[llmName]) {
+        jobState.llms[llmName] = {
+          ...(LLM_TARGETS[llmName] || {}),
+          tabId: null,
+          status: 'RECOVERY_PENDING',
+          logs: []
+        };
+        
+        // Запускаем восстановление
+        //-- 1.1. Recovery НЕ создаёт новые вкладки --//
+        startModelForLLM(llmName, prompt, false, attachments, { 
+          sessionId: getActiveSessionId() 
+        }).catch(err => {
+          console.error(`[RECOVERY] Failed to recover ${llmName}:`, err);
+        });
+      }
+    });
+  }
+}, 5000); // Проверка через 5 секунд после завершения rounds
+Замена:
+javascript
+    //-- 5.1. Диагностика: проверяем пропущенные модели --//
+const recoverySessionId = getActiveSessionId();
+setTimeout(() => {
+  // Session boundary check - критически важно!
+  if (recoverySessionId && !isSessionActive(recoverySessionId)) {
+    console.log('[RECOVERY] Session changed, aborting recovery check');
+    return;
+  }
+  
+  const allModels = selectedLLMs;
+  const activeModels = Object.keys(jobState?.llms || {});
+  const missingModels = allModels.filter(name => !activeModels.includes(name));
+  
+  if (missingModels.length > 0) {
+    console.error(`[ROUNDS] Missing models detected: ${missingModels.join(', ')}`);
+    missingModels.forEach(llmName => {
+      // Повторная проверка session перед каждым действием
+      if (!isSessionActive(recoverySessionId)) return;
+      
+      emitTelemetry(llmName, 'MODEL_MISSING', {
+        level: 'error',
+        details: 'Model not found in jobState after rounds',
+        meta: { allModels, activeModels, missingModels }
+      });
+      
+      // Пытаемся восстановить пропущенную модель
+      if (!jobState.llms[llmName]) {
+        jobState.llms[llmName] = {
+          ...(LLM_TARGETS[llmName] || {}),
+          tabId: null,
+          status: 'RECOVERY_PENDING',
+          logs: []
+        };
+        
+        // Запускаем восстановление
+        //-- 1.1. Recovery НЕ создаёт новые вкладки --//
+        startModelForLLM(llmName, prompt, false, attachments, { 
+          sessionId: recoverySessionId 
+        }).catch(err => {
+          console.error(`[RECOVERY] Failed to recover ${llmName}:`, err);
+        });
+      }
+    });
+  }
+}, 5000); // Проверка через 5 секунд после завершения rounds
+
+ЧАСТЬ 4: Очистка Supervisor Timer в stopAllProcesses
+4.1. Добавить очистку timer и вызов abortCurrentSession
+Файл: /mnt/project/job-orchestrator.js Место: Внутри функции stopAllProcesses (строки 56-117)
+Поиск (уникальный блок):
+javascript
+function stopAllProcesses(reason = 'unspecified', { closeTabs = false } = {}) {
+  console.log(`[BACKGROUND] stopAllProcesses: reason=${reason}, closeTabs=${closeTabs}`);
+  stopHumanPresenceLoop();
+  stopHeartbeatMonitor();
+Замена:
+javascript
+function stopAllProcesses(reason = 'unspecified', { closeTabs = false } = {}) {
+  console.log(`[BACKGROUND] stopAllProcesses: reason=${reason}, closeTabs=${closeTabs}`);
+  
+  // 1. Abort all pending operations via AbortController
+  if (typeof abortCurrentSession === 'function') {
+    abortCurrentSession(reason);
+  }
+  
+  // 2. Clear supervisor timer
+  if (typeof promptDispatchSupervisorTimer !== 'undefined' && promptDispatchSupervisorTimer) {
+    clearTimeout(promptDispatchSupervisorTimer);
+    promptDispatchSupervisorTimer = null;
+  }
+  
+  stopHumanPresenceLoop();
+  stopHeartbeatMonitor();
+4.2. Экспорт abortCurrentSession из dispatch-coordinator.js
+Файл: /mnt/project/dispatch-coordinator.js Место: В конце файла, где экспорты
+Поиск где находятся экспорты:
+bash
+grep -n "self\." /mnt/project/dispatch-coordinator.js | tail -20
+Ищу экспорты в dispatch-coordinator.js
+bash
+grep -n "^self\." /mnt/project/dispatch-coordinator.js | tail -20
+Output
+812:self.dispatchMutexManager = dispatchMutexManager; 813:self.promptSubmitWaiters = promptSubmitWaiters; 814:self.getRetryBackoffForModel = getRetryBackoffForModel; 815:self.getConnectionRetryDelaysForModel = getConnectionRetryDelaysForModel; 816:self.withPromptDispatchLock = withPromptDispatchLock; 817:self.withPromptDispatchFocusLock = withPromptDispatchFocusLock; 818:self.resolvePromptSubmitted = resolvePromptSubmitted; 819:self.waitForPromptSubmitted = waitForPromptSubmitted; 820:self.getPromptSubmitTimeoutMs = getPromptSubmitTimeoutMs; 821:self.sendMessageWithTimeout = sendMessageWithTimeout; 822:self.updateTypingStateFromDiagnostic = updateTypingStateFromDiagnostic; 823:self.isTypingGuardActive = isTypingGuardActive; 824:self.hasPendingPromptDispatches = hasPendingPromptDispatches; 825:self.schedulePromptDispatchSupervisor = schedulePromptDispatchSupervisor; 826:self.runPromptDispatchSupervisor = runPromptDispatchSupervisor; 827:self.dispatchPromptToTab = dispatchPromptToTab; 828:self.sendMessageSafely = sendMessageSafely; 829:self.sendPassiveMessageWithRetries = sendPassiveMessageWithRetries; 830:self.DISPATCH_MAX_ATTEMPTS = DISPATCH_MAX_ATTEMPTS; 
+Локализовал экспорты и определил необходимое добавление функции.
+Отлично, нашёл где экспорты. Нужно добавить экспорт abortCurrentSession.
+4.3. Добавить экспорт abortCurrentSession
+Файл: /mnt/project/dispatch-coordinator.js Место: После строки 830
+Поиск (уникальный блок):
+javascript
+self.sendPassiveMessageWithRetries = sendPassiveMessageWithRetries;
+self.DISPATCH_MAX_ATTEMPTS = DISPATCH_MAX_ATTEMPTS;
+Замена:
+javascript
+self.sendPassiveMessageWithRetries = sendPassiveMessageWithRetries;
+self.DISPATCH_MAX_ATTEMPTS = DISPATCH_MAX_ATTEMPTS;
+self.abortCurrentSession = abortCurrentSession;
+self.getSessionAbortSignal = getSessionAbortSignal;
+
+ЧАСТЬ 5: Await для TabMapManager операций
+5.1. job-orchestrator.js строка 95
+Файл: /mnt/project/job-orchestrator.js
+Поиск:
+javascript
+  TabMapManager.clear();
+
+  const timers = Array.from(postSuccessScrollTimers.values());
+Замена:
+javascript
+  // Async clear - не блокируем, но логируем
+  TabMapManager.clear().catch(err => {
+    console.warn('[BACKGROUND] TabMapManager.clear failed:', err);
+  });
+
+  const timers = Array.from(postSuccessScrollTimers.values());
+5.2. message-router.js строка 183
+Файл: /mnt/project/message-router.js
+Поиск:
+javascript
+        if (self.setTabBinding) {
+            void self.setTabBinding(closedLlmName, null);
+        } else {
+            TabMapManager.removeByName(closedLlmName);
+        }
+Замена:
+javascript
+        if (self.setTabBinding) {
+            void self.setTabBinding(closedLlmName, null);
+        } else {
+            // Async remove - не блокируем onRemoved listener
+            TabMapManager.removeByName(closedLlmName).catch(err => {
+                console.warn(`[BACKGROUND] TabMapManager.removeByName(${closedLlmName}) failed:`, err);
+            });
+        }
+5.3. message-router.js строка 1333
+Файл: /mnt/project/message-router.js
+Поиск:
+javascript
+            TabMapManager.clear();
+            jobState = {};
+            clearAllDeferredAnswerTimers();
+Замена:
+javascript
+            // Async clear - не блокируем message handler
+            TabMapManager.clear().catch(err => {
+                console.warn('[BACKGROUND] TabMapManager.clear failed:', err);
+            });
+            jobState = {};
+            clearAllDeferredAnswerTimers();
+5.4. evaluation-manager.js строка 131
+Файл: /mnt/project/evaluation-manager.js
+Смотрю контекст строки 131 в evaluation-manager.js
+Show working file
+Navigated careful code replacement within asynchronous context.
+Это внутри setTimeout - нужно аккуратно заменить.
+Поиск:
+javascript
+    TabMapManager.clear();
+    evaluatorTabId = null;
+    Object.keys(pingWindowByTabId).forEach(tabId => delete pingWindowByTabId[tabId]);
+Замена:
+javascript
+    // Async clear - не блокируем timeout callback
+    TabMapManager.clear().catch(err => {
+      console.warn('[BACKGROUND] TabMapManager.clear failed:', err);
+    });
+    evaluatorTabId = null;
+    Object.keys(pingWindowByTabId).forEach(tabId => delete pingWindowByTabId[tabId]);
+
+ЧАСТЬ 6: Очистка promptDispatchSupervisorTimer - доступ к переменной
+Проблема: promptDispatchSupervisorTimer определена в dispatch-coordinator.js, но stopAllProcesses в job-orchestrator.js.
+6.1. Экспортировать функцию очистки из dispatch-coordinator.js
+Файл: /mnt/project/dispatch-coordinator.js Место: После определения schedulePromptDispatchSupervisor (после строки 316)
+Поиск:
+javascript
+  }, adaptiveTick);
+}
+
+//-- 5.1. Supervisor: защита от конкуренции с Rounds --//
+function runPromptDispatchSupervisor() {
+Замена:
+javascript
+  }, adaptiveTick);
+}
+
+function cancelPromptDispatchSupervisor() {
+  if (promptDispatchSupervisorTimer) {
+    clearTimeout(promptDispatchSupervisorTimer);
+    promptDispatchSupervisorTimer = null;
+    console.log('[SUPERVISOR] Timer cancelled');
+  }
+}
+
+//-- 5.1. Supervisor: защита от конкуренции с Rounds --//
+function runPromptDispatchSupervisor() {
+6.2. Экспортировать cancelPromptDispatchSupervisor
+Файл: /mnt/project/dispatch-coordinator.js Место: В конце файла с экспортами
+Поиск:
+javascript
+self.abortCurrentSession = abortCurrentSession;
+self.getSessionAbortSignal = getSessionAbortSignal;
+Замена:
+javascript
+self.abortCurrentSession = abortCurrentSession;
+self.getSessionAbortSignal = getSessionAbortSignal;
+self.cancelPromptDispatchSupervisor = cancelPromptDispatchSupervisor;
+6.3. Обновить stopAllProcesses для использования cancelPromptDispatchSupervisor
+Файл: /mnt/project/job-orchestrator.js
+Поиск:
+javascript
+  // 1. Abort all pending operations via AbortController
+  if (typeof abortCurrentSession === 'function') {
+    abortCurrentSession(reason);
+  }
+  
+  // 2. Clear supervisor timer
+  if (typeof promptDispatchSupervisorTimer !== 'undefined' && promptDispatchSupervisorTimer) {
+    clearTimeout(promptDispatchSupervisorTimer);
+    promptDispatchSupervisorTimer = null;
+  }
+Замена:
+javascript
+  // 1. Abort all pending operations via AbortController
+  if (typeof abortCurrentSession === 'function') {
+    abortCurrentSession(reason);
+  }
+  
+  // 2. Clear supervisor timer
+  if (typeof cancelPromptDispatchSupervisor === 'function') {
+    cancelPromptDispatchSupervisor();
+  }
+```
+
+---
+
+## ИТОГОВЫЙ ЧЕКЛИСТ ИЗМЕНЕНИЙ
+
+| # | Файл | Строка | Действие | Описание |
+|---|------|--------|----------|----------|
+| 1 | dispatch-coordinator.js | 9 | ДОБАВИТЬ | AbortController + функции |
+| 2 | dispatch-coordinator.js | 312-315 | ЗАМЕНИТЬ | Session check в supervisor setTimeout |
+| 3 | dispatch-coordinator.js | 316 | ДОБАВИТЬ | cancelPromptDispatchSupervisor функция |
+| 4 | dispatch-coordinator.js | 830 | ДОБАВИТЬ | Экспорты новых функций |
+| 5 | job-orchestrator.js | 56-60 | ЗАМЕНИТЬ | Вызов abort + cancel в stopAllProcesses |
+| 6 | job-orchestrator.js | 553-586 | ЗАМЕНИТЬ | Session check в recovery setTimeout |
+| 7 | job-orchestrator.js | 95 | ЗАМЕНИТЬ | TabMapManager.clear() с .catch() |
+| 8 | message-router.js | 183 | ЗАМЕНИТЬ | TabMapManager.removeByName с .catch() |
+| 9 | message-router.js | 1333 | ЗАМЕНИТЬ | TabMapManager.clear() с .catch() |
+| 10 | evaluation-manager.js | 131 | ЗАМЕНИТЬ | TabMapManager.clear() с .catch() |
+
+---
+
+## ТЕСТОВЫЕ СЦЕНАРИИ
+
+### Сценарий 1: Быстрый Stop/Start
+```
+1. Запустить job с 4 моделями
+2. Через 2 секунды нажать Stop
+3. Сразу запустить новый job
+4. Ожидание: В консоли должны появиться логи:
+   - "[DISPATCH] Aborting session: stop_all_command"
+   - "[SUPERVISOR] Timer cancelled"
+   - Никаких "[RECOVERY]" логов от старого job
+```
+
+### Сценарий 2: Recovery не стреляет после Stop
+```
+1. Запустить job
+2. Через 3 секунды нажать Stop
+3. Ждать 5+ секунд
+4. Ожидание: НЕ должно быть логов "[ROUNDS] Missing models detected"
+```
+
+### Сценарий 3: Supervisor не перезапускается после Stop
+```
+1. Запустить job
+2. Нажать Stop
+3. Ожидание: В консоли:
+   - "[SUPERVISOR] Timer cancelled"
+   - НЕТ последующих "[SUPERVISOR]" логов
+
+ПОРЯДОК ПРИМЕНЕНИЯ
+    1. dispatch-coordinator.js — все изменения (части 1, 2, 6.1, 6.2) 
+    2. job-orchestrator.js — все изменения (части 4, 3, 5.1) 
+    3. message-router.js — все изменения (части 5.2, 5.3) 
+    4. evaluation-manager.js — изменение (часть 5.4) 
+
+
+
+
+Отличные вопросы от GPT! Сначала отвечу на них через анализ кода, затем скорректирую Решение 2.ВАЖНОЕ ОТКРЫТИЕ! TabMapManager уже синхронизирует ОБА источника:
+    • llmTabMap[llmName] = tabId — memory 
+    • jobState.llms[llmName].tabId = tabId — jobState 
+Проблема не в dual source — а в том, что код местами обходит TabMapManager и пишет напрямую.Теперь изучу content-utils.js для visibility-aware sleep:Отвечаю на вопросы GPT на основе анализа кода:
+ОТВЕТЫ НА ВОПРОСЫ GPT
+Вопрос	Ответ на основе кода
+Session хранится где?	jobState.session.startTime — только в памяти. При рестарте SW теряется.
+TabMapManager sync/async?	ASYNC — методы используют withLock + saveTabMapToStorage(). Await НЕОБХОДИМ.
+messageSent до доставки?	НЕТ — machine.sent() вызывается только после PROMPT_SUBMITTED от content script (message-router.js:431). Это OK.
+Dual source of truth?	Частично решён! TabMapManager.setTab() уже синхронизирует ОБА места (строка 143-144). Проблема в обходе TabMapManager напрямую.
+
+РЕШЕНИЕ 2: "Single Source + Visibility-Aware" — ДЕТАЛЬНОЕ ТЗ
+ВКЛЮЧАЕТ
+    1. Всё из Решения 1 (session boundary, abort controller, await TabMapManager) 
+    2. Visibility-Aware Sleep — sleep() паузится когда вкладка в фоне 
+    3. NEED_FOCUS протокол — content script запрашивает фокус у background 
+    4. Session validation в NEED_FOCUS — защита от активации старых вкладок 
+    5. Исправление прямой записи в jobState.llms[].tabId — единственное место в message-router.js:175 
+
+ЧАСТЬ 1: ВСЁ ИЗ РЕШЕНИЯ 1
+(Применить все изменения из Решения 1 — ~60 строк)
+
+ЧАСТЬ 2: Visibility-Aware Sleep
+2.1. ПОЛНАЯ ЗАМЕНА sleep() в content-utils.js
+Файл: /mnt/project/content-utils.js Место: Строки 5-12
+Поиск (уникальный блок):
+  const sleep = (ms) => {
+    const baseMs = Number(ms) || 0;
+    const speedMode = !!window.__PRAGMATIST_SPEED_MODE;
+    const factor = speedMode ? 0.35 : 1;
+    const minMs = speedMode ? 25 : 0;
+    const finalMs = Math.max(minMs, baseMs * factor);
+    return new Promise((resolve) => setTimeout(resolve, finalMs));
+  };
+Замена:
+  /**
+   * Visibility-aware sleep that pauses when tab is hidden
+   * and requests focus from background if needed.
+   * Protects against Chrome Background Tab Throttling.
+   */
+  const sleep = (ms) => {
+    const baseMs = Number(ms) || 0;
+    const speedMode = !!window.__PRAGMATIST_SPEED_MODE;
+    const factor = speedMode ? 0.35 : 1;
+    const minMs = speedMode ? 25 : 0;
+    const targetMs = Math.max(minMs, baseMs * factor);
+
+    return new Promise((resolve) => {
+      if (targetMs <= 0) {
+        resolve();
+        return;
+      }
+
+      const startedAt = Date.now();
+      let timerId = null;
+      let pausedAt = null;
+      let resolved = false;
+
+      const cleanup = () => {
+        if (timerId) clearTimeout(timerId);
+        document.removeEventListener('visibilitychange', handleVisibility);
+      };
+
+      const finish = () => {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        resolve();
+      };
+
+      const getActiveTime = () => {
+        if (pausedAt) {
+          // Время до паузы
+          return pausedAt - startedAt;
+        }
+        return Date.now() - startedAt;
+      };
+
+      const scheduleRemaining = () => {
+        if (resolved) return;
+
+        // Если невидимы — ждём без таймера
+        if (document.visibilityState !== 'visible') {
+          if (!pausedAt) {
+            pausedAt = Date.now();
+            requestFocusFromBackground('sleep_paused');
+          }
+          return;
+        }
+
+        // Видимы — сбрасываем паузу
+        pausedAt = null;
+
+        const activeTime = getActiveTime();
+        const remaining = Math.max(0, targetMs - activeTime);
+
+        if (remaining <= 0) {
+          finish();
+          return;
+        }
+
+        timerId = setTimeout(finish, remaining);
+      };
+
+      const handleVisibility = () => {
+        if (resolved) return;
+
+        if (document.visibilityState === 'visible') {
+          // Вернулись — продолжаем
+          scheduleRemaining();
+        } else {
+          // Ушли в фон — останавливаем таймер, запоминаем момент
+          if (timerId) {
+            clearTimeout(timerId);
+            timerId = null;
+          }
+          if (!pausedAt) {
+            pausedAt = Date.now();
+          }
+        }
+      };
+
+      document.addEventListener('visibilitychange', handleVisibility);
+      scheduleRemaining();
+    });
+  };
+
+  /**
+   * Request focus from background (throttled to avoid spam)
+   */
+  let lastFocusRequestAt = 0;
+  const FOCUS_REQUEST_THROTTLE_MS = 3000;
+
+  const requestFocusFromBackground = (reason = 'unknown') => {
+    const now = Date.now();
+    if (now - lastFocusRequestAt < FOCUS_REQUEST_THROTTLE_MS) return;
+    lastFocusRequestAt = now;
+
+    // Проверяем extension context
+    try {
+      if (!chrome.runtime?.id) return;
+    } catch (_) {
+      return;
+    }
+
+    const llmModel = window.__LLM_MODEL__ || window.LLM_MODEL || null;
+    const sessionId = window.__CURRENT_SESSION_ID__ || null;
+
+    try {
+      chrome.runtime.sendMessage({
+        type: 'NEED_FOCUS',
+        model: llmModel,
+        sessionId: sessionId,
+        reason: reason
+      }, () => {
+        // Игнорируем ошибки (extension может быть перезагружен)
+        if (chrome.runtime.lastError) { /* ignore */ }
+      });
+    } catch (_) {
+      // Extension context invalidated
+    }
+  };
+
+ЧАСТЬ 3: Обработчик NEED_FOCUS в background
+3.1. Добавить обработчик NEED_FOCUS в message-router.js
+Файл: /mnt/project/message-router.js Место: Внутри chrome.runtime.onMessage.addListener, найти секцию с case обработчиками
+Сначала найдём где добавить:Поиск (уникальный блок):
+            case 'SPA_NAVIGATION': {
+                const tabId = sender?.tab?.id;
+                const llmName = message.llmName || (tabId ? TabMapManager.getNameByTabId(tabId) : null);
+                if (tabId && typeof cleanupTabResources === 'function') {
+                    cleanupTabResources(tabId, 'spa_navigation');
+                }
+                if (llmName && typeof initRequestMetadata === 'function') {
+                    initRequestMetadata(llmName, tabId || null, message.newUrl || message.newURL || '');
+                }
+                sendResponse({ status: 'spa_navigation_ack' });
+                break;
+            }
+
+            case 'HUMANOID_EVENT': {
+Замена:
+            case 'SPA_NAVIGATION': {
+                const tabId = sender?.tab?.id;
+                const llmName = message.llmName || (tabId ? TabMapManager.getNameByTabId(tabId) : null);
+                if (tabId && typeof cleanupTabResources === 'function') {
+                    cleanupTabResources(tabId, 'spa_navigation');
+                }
+                if (llmName && typeof initRequestMetadata === 'function') {
+                    initRequestMetadata(llmName, tabId || null, message.newUrl || message.newURL || '');
+                }
+                sendResponse({ status: 'spa_navigation_ack' });
+                break;
+            }
+
+            //-- NEED_FOCUS: Content script запрашивает фокус при visibility-aware sleep --//
+            case 'NEED_FOCUS': {
+                const tabId = sender?.tab?.id;
+                const requestedModel = message.model;
+                const requestSessionId = message.sessionId;
+                const reason = message.reason || 'unknown';
+
+                // Валидация session — защита от активации старых вкладок (ответ на критику GPT)
+                const currentSessionId = jobState?.session?.startTime || null;
+                if (requestSessionId && currentSessionId && requestSessionId !== currentSessionId) {
+                    console.log(`[NEED_FOCUS] Ignored stale request: session ${requestSessionId} vs current ${currentSessionId}`);
+                    sendResponse({ status: 'stale_session' });
+                    break;
+                }
+
+                // Определяем LLM name
+                const llmName = requestedModel || (tabId ? TabMapManager.getNameByTabId(tabId) : null);
+                if (!llmName) {
+                    console.log(`[NEED_FOCUS] Ignored: unknown LLM for tab ${tabId}`);
+                    sendResponse({ status: 'unknown_llm' });
+                    break;
+                }
+
+                // Проверяем что это текущая активная вкладка для этой LLM
+                const expectedTabId = TabMapManager.get(llmName);
+                if (expectedTabId && expectedTabId !== tabId) {
+                    console.log(`[NEED_FOCUS] Ignored: tab ${tabId} is not current tab for ${llmName} (expected ${expectedTabId})`);
+                    sendResponse({ status: 'wrong_tab' });
+                    break;
+                }
+
+                // Проверяем что LLM в активном состоянии (не завершён)
+                const entry = jobState?.llms?.[llmName];
+                if (!entry) {
+                    console.log(`[NEED_FOCUS] Ignored: ${llmName} not in jobState`);
+                    sendResponse({ status: 'no_entry' });
+                    break;
+                }
+
+                const terminalStatuses = ['SUCCESS', 'ERROR', 'STOPPED', 'TIMEOUT'];
+                if (terminalStatuses.includes(entry.status)) {
+                    console.log(`[NEED_FOCUS] Ignored: ${llmName} in terminal status ${entry.status}`);
+                    sendResponse({ status: 'terminal_status' });
+                    break;
+                }
+
+                // Всё ОК — активируем вкладку
+                console.log(`[NEED_FOCUS] Activating tab ${tabId} for ${llmName} (reason: ${reason})`);
+                if (typeof activateTabForDispatch === 'function') {
+                    activateTabForDispatch(tabId).catch(err => {
+                        console.warn(`[NEED_FOCUS] Failed to activate tab ${tabId}:`, err);
+                    });
+                } else {
+                    chrome.tabs.update(tabId, { active: true }, () => {
+                        if (chrome.runtime.lastError) {
+                            console.warn(`[NEED_FOCUS] chrome.tabs.update failed:`, chrome.runtime.lastError.message);
+                        }
+                    });
+                }
+
+                sendResponse({ status: 'focus_requested' });
+                break;
+            }
+
+            case 'HUMANOID_EVENT': {
+
+ЧАСТЬ 4: Передача sessionId в content scripts
+4.1. Передавать sessionId при dispatch
+Файл: /mnt/project/dispatch-coordinator.js Место: Функция dispatchPromptToTab, где формируется message для sendMessageSafelysessionId уже передаётся в meta.sessionId. Теперь нужно чтобы content script его сохранял:
+4.2. Сохранять sessionId в content script при получении GET_ANSWER
+Нужно добавить это в каждый content-*.js. Проверим типовую структуру:### 4.3. Добавить функцию сохранения sessionId в content-utils.js
+Файл: /mnt/project/content-utils.js Место: После функции requestFocusFromBackground (которую мы добавили выше)
+Добавить после requestFocusFromBackground:
+  /**
+   * Store current session ID from background for NEED_FOCUS validation
+   */
+  const storeSessionId = (sessionId) => {
+    if (sessionId) {
+      window.__CURRENT_SESSION_ID__ = sessionId;
+    }
+  };
+4.4. Экспортировать storeSessionId в ContentUtils
+Файл: /mnt/project/content-utils.js Место: В конце файла, где формируется window.ContentUtilsПоиск:
+  window.ContentUtils = {
+    sleep,
+    isElementInteractable,
+    withSmartScroll,
+    findAndCacheElement,
+    ensureMainWorldBridge,
+    ensureScrollToolkit: ensureScrollToolkit,
+    ensureHumanoid,
+    observeMutations,
+    cloneElementWithInlineStyles,
+    buildInlineHtml
+  };
+Замена:
+  window.ContentUtils = {
+    sleep,
+    isElementInteractable,
+    withSmartScroll,
+    findAndCacheElement,
+    ensureMainWorldBridge,
+    ensureScrollToolkit: ensureScrollToolkit,
+    ensureHumanoid,
+    observeMutations,
+    cloneElementWithInlineStyles,
+    buildInlineHtml,
+    storeSessionId,
+    requestFocusFromBackground
+  };
+4.5. Вызывать storeSessionId в content scripts
+Для КАЖДОГО content-*.js файла нужно добавить одну строку в начало обработчика GET_ANSWER:
+Пример для content-claude.js, строка ~2159:
+Поиск:
+      if (message?.type === 'GET_ANSWER' || message?.type === 'GET_FINAL_ANSWER') {
+        isEvaluatorMode = Boolean(message.isEvaluator);
+        injectAndGetResponse(message.prompt, message.attachments, message.meta || null)
+Замена:
+      if (message?.type === 'GET_ANSWER' || message?.type === 'GET_FINAL_ANSWER') {
+        // Store session ID for NEED_FOCUS validation
+        if (message.meta?.sessionId && window.ContentUtils?.storeSessionId) {
+          window.ContentUtils.storeSessionId(message.meta.sessionId);
+        }
+        isEvaluatorMode = Boolean(message.isEvaluator);
+        injectAndGetResponse(message.prompt, message.attachments, message.meta || null)
+Файлы для изменения:
+    • /mnt/project/content-claude.js 
+    • /mnt/project/content-chatgpt.js 
+    • /mnt/project/content-gemini.js 
+    • /mnt/project/content-grok.js 
+    • /mnt/project/content-perplexity.js 
+    • /mnt/project/content-qwen.js 
+    • /mnt/project/content-lechat.js 
+    • /mnt/project/content-deepseek.js 
+
+ЧАСТЬ 5: Исправление прямой записи в jobState.llms[].tabId
+5.1. message-router.js строка 175 — использовать setTabBinding
+Файл: /mnt/project/message-router.js
+Поиск:
+        if (jobState?.llms?.[closedLlmName]) {
+            if (typeof updateModelState === 'function') {
+                updateModelState(closedLlmName, 'TAB_CLOSED', { message: 'Tab was closed', meta: { tabId, wasClosedBy: 'user_or_browser' }});
+            }
+            if (jobState.llms[closedLlmName]) {
+                jobState.llms[closedLlmName].tabId = null;
+            }
+        }
+Замена:
+        if (jobState?.llms?.[closedLlmName]) {
+            if (typeof updateModelState === 'function') {
+                updateModelState(closedLlmName, 'TAB_CLOSED', { message: 'Tab was closed', meta: { tabId, wasClosedBy: 'user_or_browser' }});
+            }
+            // Use setTabBinding instead of direct assignment (Single Source of Truth)
+            // Note: setTabBinding already updates BOTH TabMapManager and jobState.llms[].tabId
+        }
+Примечание: Строка jobState.llms[closedLlmName].tabId = null; теперь УДАЛЕНА, потому что TabMapManager.removeByName() (строка 183) уже обновляет jobState.llms[].tabId внутри себя (см. tab-manager.js:152-154).
+
+ИТОГОВЫЙ ЧЕКЛИСТ РЕШЕНИЯ 2
+#	Файл	Строка	Действие	Описание
+ИЗ РЕШЕНИЯ 1				
+1	dispatch-coordinator.js	9	ДОБАВИТЬ	AbortController + функции
+2	dispatch-coordinator.js	312-315	ЗАМЕНИТЬ	Session check в supervisor setTimeout
+3	dispatch-coordinator.js	316	ДОБАВИТЬ	cancelPromptDispatchSupervisor функция
+4	dispatch-coordinator.js	830	ДОБАВИТЬ	Экспорты новых функций
+5	job-orchestrator.js	56-60	ЗАМЕНИТЬ	Вызов abort + cancel в stopAllProcesses
+6	job-orchestrator.js	553-586	ЗАМЕНИТЬ	Session check в recovery setTimeout
+7	job-orchestrator.js	95	ЗАМЕНИТЬ	TabMapManager.clear() с .catch()
+8	message-router.js	183	ЗАМЕНИТЬ	TabMapManager.removeByName с .catch()
+9	message-router.js	1333	ЗАМЕНИТЬ	TabMapManager.clear() с .catch()
+10	evaluation-manager.js	131	ЗАМЕНИТЬ	TabMapManager.clear() с .catch()
+РЕШЕНИЕ 2 ДОПОЛНЕНИЯ				
+11	content-utils.js	5-12	ЗАМЕНИТЬ	Visibility-aware sleep (~90 строк)
+12	content-utils.js	после sleep	ДОБАВИТЬ	storeSessionId функция
+13	content-utils.js	262	ЗАМЕНИТЬ	Экспорты storeSessionId, requestFocusFromBackground
+14	message-router.js	после 536	ДОБАВИТЬ	NEED_FOCUS handler (~60 строк)
+15	message-router.js	175	УДАЛИТЬ	Прямую запись jobState.llms[].tabId = null
+16	content-claude.js	~2159	ДОБАВИТЬ	storeSessionId вызов
+17	content-chatgpt.js	аналог	ДОБАВИТЬ	storeSessionId вызов
+18	content-gemini.js	аналог	ДОБАВИТЬ	storeSessionId вызов
+19	content-grok.js	аналог	ДОБАВИТЬ	storeSessionId вызов
+20	content-perplexity.js	аналог	ДОБАВИТЬ	storeSessionId вызов
+21	content-qwen.js	аналог	ДОБАВИТЬ	storeSessionId вызов
+22	content-lechat.js	аналог	ДОБАВИТЬ	storeSessionId вызов
+23	content-deepseek.js	аналог	ДОБАВИТЬ	storeSessionId вызов
+
+ОБЪЁМ РЕШЕНИЯ 2
+Метрика	Значение
+Файлов изменено	13 файлов
+Строк добавлено	~250 строк
+Строк изменено	~50 строк
+Время внедрения	4-6 часов
+% устранённых проблем	~85%
+
+ТЕСТОВЫЕ СЦЕНАРИИ ДЛЯ РЕШЕНИЯ 2
+Сценарий 1: Visibility-Aware Sleep
+1. Запустить job с Claude
+2. Пока Claude печатает промпт — переключиться на другую вкладку
+3. Ожидание: 
+   - В консоли: "[NEED_FOCUS] Activating tab..."
+   - Claude автоматически получает фокус
+   - sleep() продолжает работать без 188s задержки
+Сценарий 2: Session Validation в NEED_FOCUS
+1. Запустить job #1 с Claude
+2. Нажать Stop
+3. Запустить job #2 с GPT
+4. Ожидание:
+   - Любые NEED_FOCUS от Claude job #1 игнорируются
+   - В консоли: "[NEED_FOCUS] Ignored stale request: session..."
+Сценарий 3: Single Source of Truth
+1. Запустить job
+2. Закрыть одну LLM вкладку вручную
+3. Ожидание:
+   - Нет дублирования записи tabId = null
+   - TabMapManager и jobState синхронизированы
+
+
+

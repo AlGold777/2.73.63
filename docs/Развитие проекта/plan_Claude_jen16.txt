@@ -1,0 +1,1434 @@
+﻿Детальный план для Codex
+
+🔴 КРИТИЧНО
+
+1. DOMPurify для innerHTML
+Проблема: XSS через ответы LLM. Если модель вернёт <img onerror=alert(1)>, код выполнится.
+Файлы:
+    • results.js — основной рендеринг ответов 
+    • results-shared.js — функция stripHtmlToPlainText 
+    • content-*.js — везде где есть innerHTML 
+Реализация:
+// 1. Добавить библиотеку в manifest.json
+"content_scripts": [{
+  "js": ["lib/purify.min.js", ...]
+}]
+
+// 2. Создать обёртку utils/sanitize.js
+const sanitizeHTML = (dirty) => {
+  if (typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(dirty, {
+      ALLOWED_TAGS: ['b', 'i', 'em', 'strong', 'p', 'br', 'ul', 'ol', 'li', 'code', 'pre', 'a'],
+      ALLOWED_ATTR: ['href', 'class']
+    });
+  }
+  // Fallback: strip all tags
+  const temp = document.createElement('div');
+  temp.textContent = dirty;
+  return temp.innerHTML;
+};
+
+// 3. Заменить все вхождения
+// БЫЛО:
+element.innerHTML = htmlContent;
+// СТАЛО:
+element.innerHTML = sanitizeHTML(htmlContent);
+Поиск вхождений:
+grep -rn "innerHTML\s*=" --include="*.js" .
+Критерий готовности: Ни одного прямого присваивания innerHTML без sanitizeHTML.
+
+2. TTLMap для глобальных структур
+Проблема: Map'ы растут бесконечно, memory leak после 100+ сессий.
+Файл: Создать utils/ttl-map.js
+Реализация:
+class TTLMap {
+  constructor(options = {}) {
+    this.ttlMs = options.ttlMs || 30 * 60 * 1000; // 30 минут
+    this.maxSize = options.maxSize || 500;
+    this.cleanupIntervalMs = options.cleanupIntervalMs || 60 * 1000;
+    this._map = new Map();
+    this._timestamps = new Map();
+    this._startCleanupLoop();
+  }
+
+  set(key, value) {
+    // Evict oldest if at capacity
+    if (this._map.size >= this.maxSize && !this._map.has(key)) {
+      this._evictOldest();
+    }
+    this._map.set(key, value);
+    this._timestamps.set(key, Date.now());
+    return this;
+  }
+
+  get(key) {
+    if (!this._map.has(key)) return undefined;
+    const ts = this._timestamps.get(key);
+    if (Date.now() - ts > this.ttlMs) {
+      this.delete(key);
+      return undefined;
+    }
+    // Refresh timestamp on access
+    this._timestamps.set(key, Date.now());
+    return this._map.get(key);
+  }
+
+  delete(key) {
+    this._map.delete(key);
+    this._timestamps.delete(key);
+  }
+
+  has(key) {
+    return this.get(key) !== undefined;
+  }
+
+  clear() {
+    this._map.clear();
+    this._timestamps.clear();
+  }
+
+  get size() {
+    return this._map.size;
+  }
+
+  _evictOldest() {
+    let oldestKey = null;
+    let oldestTs = Infinity;
+    for (const [key, ts] of this._timestamps) {
+      if (ts < oldestTs) {
+        oldestTs = ts;
+        oldestKey = key;
+      }
+    }
+    if (oldestKey) this.delete(oldestKey);
+  }
+
+  _cleanup() {
+    const now = Date.now();
+    for (const [key, ts] of this._timestamps) {
+      if (now - ts > this.ttlMs) {
+        this.delete(key);
+      }
+    }
+  }
+
+  _startCleanupLoop() {
+    setInterval(() => this._cleanup(), this.cleanupIntervalMs);
+  }
+
+  // Совместимость с Map API
+  keys() { return this._map.keys(); }
+  values() { return this._map.values(); }
+  entries() { return this._map.entries(); }
+  forEach(cb) { this._map.forEach(cb); }
+}
+Файл: background.js — заменить объявления
+// БЫЛО:
+const platformRunHistory = new Map();
+const selectorResolutionMetrics = {};
+const telemetrySampleCache = new Map();
+const pingWindowByTabId = {};
+const promptDispatchMutexByLlm = new Map();
+const promptSubmitWaiters = new Map();
+const rateLimitState = new Map();
+const rateLimitTimers = new Map();
+
+// СТАЛО:
+const platformRunHistory = new TTLMap({ ttlMs: 60 * 60 * 1000, maxSize: 200 }); // 1 час
+const selectorResolutionMetrics = new TTLMap({ ttlMs: 30 * 60 * 1000, maxSize: 100 });
+const telemetrySampleCache = new TTLMap({ ttlMs: 10 * 60 * 1000, maxSize: 50 });
+const pingWindowByTabId = new TTLMap({ ttlMs: 5 * 60 * 1000, maxSize: 50 });
+const promptDispatchMutexByLlm = new TTLMap({ ttlMs: 5 * 60 * 1000, maxSize: 20 });
+const promptSubmitWaiters = new TTLMap({ ttlMs: 2 * 60 * 1000, maxSize: 20 });
+const rateLimitState = new TTLMap({ ttlMs: 60 * 60 * 1000, maxSize: 20 });
+const rateLimitTimers = new TTLMap({ ttlMs: 60 * 60 * 1000, maxSize: 20 });
+Критерий готовности: Все глобальные Map/Object для runtime данных заменены на TTLMap.
+
+3. SafeMutex с error propagation
+Проблема: Ошибки в dispatch глотаются, caller не знает о failure.
+Файл: Создать utils/safe-mutex.js
+class SafeMutex {
+  constructor() {
+    this._queue = Promise.resolve();
+  }
+
+  async acquire(fn) {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    
+    const prev = this._queue;
+    this._queue = gate;
+    
+    await prev;
+    
+    try {
+      const result = await fn();
+      return result;
+    } finally {
+      release();
+    }
+  }
+}
+
+// Per-model mutex manager
+class MutexManager {
+  constructor() {
+    this._mutexes = new Map();
+  }
+
+  async withLock(key, fn) {
+    if (!this._mutexes.has(key)) {
+      this._mutexes.set(key, new SafeMutex());
+    }
+    return this._mutexes.get(key).acquire(fn);
+  }
+
+  clear(key) {
+    this._mutexes.delete(key);
+  }
+}
+Файл: background.js — заменить withPromptDispatchLock
+// БЫЛО:
+const withPromptDispatchLock = (llmName, fn) => {
+  const key = llmName || 'global';
+  const current = promptDispatchMutexByLlm.get(key) || Promise.resolve();
+  const next = current.then(() => Promise.resolve(fn())).catch((err) => {
+    console.warn('[DISPATCH] lock fn failed', err);
+    // Ошибка глотается!
+  });
+  promptDispatchMutexByLlm.set(key, next);
+  return next;
+};
+
+// СТАЛО:
+const dispatchMutexManager = new MutexManager();
+
+const withPromptDispatchLock = async (llmName, fn) => {
+  const key = llmName || 'global';
+  try {
+    return await dispatchMutexManager.withLock(key, fn);
+  } catch (err) {
+    console.error('[DISPATCH] lock fn failed', err);
+    throw err; // Пробрасываем ошибку!
+  }
+};
+Критерий готовности: Все catch блоки в mutex логике пробрасывают ошибку после логирования.
+
+4. Cleanup при chrome.tabs.onRemoved
+Проблема: При закрытии вкладки записи в Map остаются, накапливаются зомби.
+Файл: background.js
+Реализация:
+// Создать централизованную функцию очистки
+function cleanupTabResources(tabId) {
+  console.log(`[CLEANUP] Removing resources for tab ${tabId}`);
+  
+  // Очистить все структуры связанные с tabId
+  pingWindowByTabId.delete(tabId);
+  
+  // Найти llmName по tabId и очистить
+  const llmName = TabMapManager.getNameByTabId(tabId);
+  if (llmName) {
+    promptDispatchMutexByLlm.delete(llmName);
+    promptSubmitWaiters.delete(llmName);
+    rateLimitState.delete(llmName);
+    rateLimitTimers.delete(llmName);
+    
+    // Очистить в jobState если есть
+    if (jobState?.llms?.[llmName]) {
+      delete jobState.llms[llmName];
+    }
+  }
+  
+  // Удалить из TabMapManager
+  TabMapManager.removeByTabId(tabId);
+  
+  // Отменить deferred timers
+  clearDeferredAnswerTimer(llmName);
+}
+
+// Подписаться на событие закрытия вкладки
+chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+  cleanupTabResources(tabId);
+});
+
+// Также очищать при навигации на другой домен
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url) {
+    const llmName = TabMapManager.getNameByTabId(tabId);
+    if (llmName && !isEligibleTabForLlm(llmName, tab)) {
+      // Вкладка ушла с LLM сайта
+      cleanupTabResources(tabId);
+    }
+  }
+});
+Критерий готовности: После закрытия вкладки все связанные записи удалены из всех Map/структур.
+
+5. Storage Compression (LZString)
+Проблема: Длинные ответы LLM забивают chrome.storage.local (лимит 5MB).
+Файл: Создать utils/storage-compress.js
+// Использовать LZString (добавить lib/lz-string.min.js)
+
+const CompressedStorage = {
+  async set(key, value) {
+    const json = JSON.stringify(value);
+    const compressed = LZString.compressToUTF16(json);
+    
+    // Логировать экономию
+    const ratio = ((json.length - compressed.length) / json.length * 100).toFixed(1);
+    console.log(`[STORAGE] ${key}: ${json.length} → ${compressed.length} bytes (${ratio}% saved)`);
+    
+    await chrome.storage.local.set({ [key]: compressed });
+  },
+
+  async get(key) {
+    const result = await chrome.storage.local.get(key);
+    if (!result[key]) return null;
+    
+    try {
+      const decompressed = LZString.decompressFromUTF16(result[key]);
+      return JSON.parse(decompressed);
+    } catch (e) {
+      // Fallback: может быть старые несжатые данные
+      console.warn(`[STORAGE] Failed to decompress ${key}, trying raw parse`);
+      return typeof result[key] === 'string' ? JSON.parse(result[key]) : result[key];
+    }
+  },
+
+  async remove(key) {
+    await chrome.storage.local.remove(key);
+  }
+};
+Применение: Заменить прямые вызовы chrome.storage.local.set/get для больших данных:
+    • Results/ответы моделей 
+    • Notes/заметки 
+    • Logs/телеметрия 
+// БЫЛО:
+await chrome.storage.local.set({ results: hugeResultsObject });
+
+// СТАЛО:
+await CompressedStorage.set('results', hugeResultsObject);
+Критерий готовности: Все записи >10KB используют CompressedStorage.
+
+🟠 ВЫСОКИЙ ПРИОРИТЕТ
+
+6. DocumentFragment для results.js
+Проблема: innerHTML = "" + полная перерисовка = мигание UI, лаги на 50+ элементах.
+Файл: results.js — функция render() или аналогичная
+Реализация:
+// БЫЛО (примерный паттерн):
+function render() {
+  container.innerHTML = '';
+  items.forEach(item => {
+    const el = document.createElement('div');
+    el.innerHTML = item.html;
+    container.appendChild(el);
+  });
+}
+
+// СТАЛО:
+function render() {
+  const existingIds = new Set();
+  
+  // Собрать существующие элементы
+  container.querySelectorAll('[data-item-id]').forEach(el => {
+    existingIds.add(el.dataset.itemId);
+  });
+  
+  const fragment = document.createDocumentFragment();
+  const newIds = new Set();
+  
+  items.forEach(item => {
+    newIds.add(item.id);
+    
+    const existing = container.querySelector(`[data-item-id="${item.id}"]`);
+    if (existing) {
+      // Обновить только если изменилось
+      if (existing.dataset.hash !== item.hash) {
+        existing.innerHTML = sanitizeHTML(item.html);
+        existing.dataset.hash = item.hash;
+      }
+    } else {
+      // Создать новый
+      const el = document.createElement('div');
+      el.dataset.itemId = item.id;
+      el.dataset.hash = item.hash;
+      el.innerHTML = sanitizeHTML(item.html);
+      fragment.appendChild(el);
+    }
+  });
+  
+  // Удалить отсутствующие
+  existingIds.forEach(id => {
+    if (!newIds.has(id)) {
+      container.querySelector(`[data-item-id="${id}"]`)?.remove();
+    }
+  });
+  
+  // Добавить новые одной операцией
+  if (fragment.childNodes.length > 0) {
+    container.appendChild(fragment);
+  }
+}
+Критерий готовности: UI не мигает при обновлении, только изменённые элементы перерисовываются.
+
+7. File Attachments модуль
+Проблема: Логика аттачей дублируется и сломана для Claude/Gemini (разные механизмы: Dropzone vs Input).
+Файл: Создать content-scripts/attachment-handler.js
+const AttachmentHandler = {
+  // Определить тип загрузчика на платформе
+  detectUploadType(platform) {
+    const strategies = {
+      GPT: () => document.querySelector('input[type="file"]'),
+      Grok: () => document.querySelector('input[type="file"]'),
+      Claude: () => document.querySelector('[data-dropzone]') || document.querySelector('.upload-area'),
+      Gemini: () => document.querySelector('[role="button"][aria-label*="upload"]'),
+      Perplexity: () => document.querySelector('input[accept*="image"]'),
+    };
+    return strategies[platform]?.();
+  },
+
+  // Конвертировать File в DataTransfer
+  createDataTransfer(files) {
+    const dt = new DataTransfer();
+    files.forEach(file => dt.items.add(file));
+    return dt;
+  },
+
+  // Стратегия для input[type="file"]
+  async attachViaInput(input, files) {
+    const dt = this.createDataTransfer(files);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(100);
+  },
+
+  // Стратегия для Dropzone (Claude, Gemini)
+  async attachViaDropzone(dropzone, files) {
+    const dt = this.createDataTransfer(files);
+    
+    // Симулировать drag-drop последовательность
+    const dragEnter = new DragEvent('dragenter', { bubbles: true, dataTransfer: dt });
+    const dragOver = new DragEvent('dragover', { bubbles: true, dataTransfer: dt });
+    const drop = new DragEvent('drop', { bubbles: true, dataTransfer: dt });
+    
+    dropzone.dispatchEvent(dragEnter);
+    await sleep(50);
+    dropzone.dispatchEvent(dragOver);
+    await sleep(50);
+    dropzone.dispatchEvent(drop);
+    await sleep(200);
+  },
+
+  // Главный метод
+  async attach(platform, files) {
+    const element = this.detectUploadType(platform);
+    if (!element) {
+      console.error(`[ATTACH] No upload element found for ${platform}`);
+      return false;
+    }
+
+    const isDropzone = element.hasAttribute('data-dropzone') || 
+                       element.classList.contains('upload-area') ||
+                       element.getAttribute('role') === 'button';
+
+    if (isDropzone) {
+      await this.attachViaDropzone(element, files);
+    } else {
+      await this.attachViaInput(element, files);
+    }
+    
+    return true;
+  }
+};
+Применение в content-*.js:
+// БЫЛО (дублированный код в каждом файле):
+const input = document.querySelector('input[type="file"]');
+if (input) { ... }
+
+// СТАЛО:
+await AttachmentHandler.attach(MODEL, attachments);
+Критерий готовности: Файлы успешно прикрепляются на всех платформах: GPT, Claude, Gemini, Grok, Perplexity.
+
+8. Retry с exponential backoff + max attempts
+Проблема: Supervisor спамит retries бесконечно при degraded модели.
+Файл: Создать utils/retry-strategy.js
+class RetryStrategy {
+  constructor(options = {}) {
+    this.maxAttempts = options.maxAttempts || 5;
+    this.baseDelayMs = options.baseDelayMs || 1000;
+    this.maxDelayMs = options.maxDelayMs || 30000;
+    this.jitterFactor = options.jitterFactor || 0.3;
+  }
+
+  getDelay(attempt) {
+    // Exponential backoff: 1s, 2s, 4s, 8s, 16s...
+    const exponentialDelay = this.baseDelayMs * Math.pow(2, attempt - 1);
+    const cappedDelay = Math.min(exponentialDelay, this.maxDelayMs);
+    
+    // Add jitter: ±30%
+    const jitter = cappedDelay * this.jitterFactor * (Math.random() * 2 - 1);
+    return Math.round(cappedDelay + jitter);
+  }
+
+  shouldRetry(attempt, error) {
+    if (attempt >= this.maxAttempts) return false;
+    
+    // Не ретраить определённые ошибки
+    const nonRetryableErrors = ['AUTH_FAILED', 'RATE_LIMITED', 'BANNED'];
+    if (error?.code && nonRetryableErrors.includes(error.code)) {
+      return false;
+    }
+    
+    return true;
+  }
+}
+
+// Circuit Breaker
+class CircuitBreaker {
+  constructor(options = {}) {
+    this.failureThreshold = options.failureThreshold || 5;
+    this.recoveryTimeMs = options.recoveryTimeMs || 60000;
+    this.failures = 0;
+    this.lastFailureTime = 0;
+    this.state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
+  }
+
+  recordFailure() {
+    this.failures++;
+    this.lastFailureTime = Date.now();
+    if (this.failures >= this.failureThreshold) {
+      this.state = 'OPEN';
+      console.warn(`[CIRCUIT] Opened after ${this.failures} failures`);
+    }
+  }
+
+  recordSuccess() {
+    this.failures = 0;
+    this.state = 'CLOSED';
+  }
+
+  canExecute() {
+    if (this.state === 'CLOSED') return true;
+    
+    if (this.state === 'OPEN') {
+      if (Date.now() - this.lastFailureTime > this.recoveryTimeMs) {
+        this.state = 'HALF_OPEN';
+        console.log('[CIRCUIT] Half-open, allowing test request');
+        return true;
+      }
+      return false;
+    }
+    
+    return true; // HALF_OPEN
+  }
+}
+Применение в background.js:
+const llmCircuitBreakers = new Map(); // llmName → CircuitBreaker
+const retryStrategy = new RetryStrategy({ maxAttempts: 4 });
+
+async function dispatchWithRetry(llmName, tabId, prompt, attachments) {
+  // Проверить circuit breaker
+  if (!llmCircuitBreakers.has(llmName)) {
+    llmCircuitBreakers.set(llmName, new CircuitBreaker());
+  }
+  const circuit = llmCircuitBreakers.get(llmName);
+  
+  if (!circuit.canExecute()) {
+    console.warn(`[DISPATCH] ${llmName} circuit open, skipping`);
+    return { success: false, reason: 'CIRCUIT_OPEN' };
+  }
+
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      const result = await dispatchPromptToTab(llmName, tabId, prompt, attachments);
+      circuit.recordSuccess();
+      return result;
+    } catch (error) {
+      circuit.recordFailure();
+      
+      if (!retryStrategy.shouldRetry(attempt, error)) {
+        console.error(`[DISPATCH] ${llmName} giving up after ${attempt} attempts`);
+        throw error;
+      }
+      
+      const delay = retryStrategy.getDelay(attempt);
+      console.log(`[DISPATCH] ${llmName} attempt ${attempt} failed, retry in ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+}
+Критерий готовности: После 5 неудачных попыток модель переходит в circuit OPEN на 60 секунд, не спамит.
+
+9. Focus минимизация
+Проблема: Расширение "ворует" фокус у пользователя при dispatch в каждую модель.
+Файл: background.js
+Реализация:
+// Проверить, активен ли браузер у пользователя
+async function isBrowserInForeground() {
+  const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+  return windows.some(w => w.focused);
+}
+
+// Оптимизированная активация вкладки
+async function activateTabMinimal(tabId, llmName) {
+  const tab = await chrome.tabs.get(tabId);
+  
+  // Если браузер не в фокусе — можно переключать вкладки незаметно
+  const browserFocused = await isBrowserInForeground();
+  
+  if (!browserFocused) {
+    // Пользователь в другом приложении — переключаем тихо
+    await chrome.tabs.update(tabId, { active: true });
+  } else {
+    // Браузер в фокусе — минимизируем disruption
+    // Активируем только если это единственная вкладка требующая dispatch
+    const pendingDispatches = countPendingDispatches();
+    
+    if (pendingDispatches <= 1) {
+      await chrome.tabs.update(tabId, { active: true });
+    } else {
+      // Много pending — работаем с неактивной вкладкой
+      // Некоторые платформы требуют фокус для ввода
+      // Делаем быстрый switch: focus → type → unfocus
+      const currentTab = await getCurrentActiveTab();
+      
+      await chrome.tabs.update(tabId, { active: true });
+      // Минимальная задержка для dispatch
+      await sleep(300);
+      // Вернуть фокус
+      if (currentTab) {
+        await chrome.tabs.update(currentTab.id, { active: true });
+      }
+    }
+  }
+}
+
+// Batch dispatch — все модели за один проход
+async function batchDispatch(prompt, attachments, llmNames) {
+  const browserFocused = await isBrowserInForeground();
+  
+  if (browserFocused) {
+    // Предупредить пользователя
+    console.log('[DISPATCH] Browser focused, will switch tabs briefly');
+  }
+  
+  for (const llmName of llmNames) {
+    const tabId = TabMapManager.get(llmName);
+    if (tabId) {
+      await activateTabMinimal(tabId, llmName);
+      await dispatchPromptToTab(llmName, tabId, prompt, attachments);
+      // Небольшая пауза между моделями
+      await sleep(200);
+    }
+  }
+}
+Критерий готовности: При dispatch в 8 моделей пользователь видит минимум переключений (1-2 вместо 8).
+
+10. Selector cache — убрать cleanup на каждый read
+Проблема: cleanupExpiredCache() вызывается при каждом чтении, сканирует всё хранилище.
+Файл: selector-manager.js
+Реализация:
+// БЫЛО:
+const readCache = async (modelName, elementType) => {
+  await cleanupExpiredCache(); // На КАЖДЫЙ read!
+  const key = getCacheKey(modelName, elementType);
+  // ...
+};
+
+// СТАЛО:
+let lastCacheCleanup = 0;
+const CACHE_CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 минут
+
+const readCache = async (modelName, elementType) => {
+  // Cleanup только раз в 5 минут
+  const now = Date.now();
+  if (now - lastCacheCleanup > CACHE_CLEANUP_INTERVAL) {
+    lastCacheCleanup = now;
+    // Запустить асинхронно, не блокировать read
+    cleanupExpiredCache().catch(err => console.warn('[CACHE] Cleanup failed', err));
+  }
+  
+  const key = getCacheKey(modelName, elementType);
+  // ...
+};
+
+// Также зарегистрировать alarm для периодической очистки
+chrome.alarms.create('selector-cache-cleanup', { periodInMinutes: 10 });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'selector-cache-cleanup') {
+    cleanupExpiredCache();
+  }
+});
+Критерий готовности: cleanupExpiredCache вызывается максимум раз в 5 минут, не на каждый read.
+
+🟡 СРЕДНИЙ ПРИОРИТЕТ
+
+11. Split background.js на модули
+Проблема: 6800+ строк в одном файле — невозможно поддерживать.
+Целевая структура:
+background/
+├── index.js              # Entry point, регистрация listeners
+├── job-orchestrator.js   # jobState, runModelThroughTabs
+├── tab-manager.js        # TabMapManager, createNewLlmTab, activateTab
+├── dispatch-coordinator.js # withPromptDispatchLock, dispatchPromptToTab
+├── selector-metrics.js   # health metrics, degradation tracking
+├── session-tracker.js    # humanVisit, tabVisitTracker
+├── storage-manager.js    # cleanup, budgets, compression
+└── message-router.js     # chrome.runtime.onMessage handlers
+Порядок выделения:
+    1. Сначала выделить чистые утилиты (не зависят от других) 
+    2. Затем модули с минимальными зависимостями 
+    3. В конце — оркестраторы которые используют остальные модули 
+Пример выделения tab-manager.js:
+// background/tab-manager.js
+
+const TAB_MAP_STORAGE_KEY = 'llmTabMap';
+
+export const TabMapManager = {
+  _cache: new Map(),
+  
+  async load() {
+    const stored = await chrome.storage.local.get(TAB_MAP_STORAGE_KEY);
+    const data = stored[TAB_MAP_STORAGE_KEY] || {};
+    this._cache = new Map(Object.entries(data));
+  },
+  
+  async save() {
+    const data = Object.fromEntries(this._cache);
+    await chrome.storage.local.set({ [TAB_MAP_STORAGE_KEY]: data });
+  },
+  
+  get(llmName) {
+    return this._cache.get(llmName);
+  },
+  
+  async setTab(llmName, tabId) {
+    this._cache.set(llmName, tabId);
+    await this.save();
+  },
+  
+  getNameByTabId(tabId) {
+    for (const [name, id] of this._cache) {
+      if (id === tabId) return name;
+    }
+    return null;
+  },
+  
+  async removeByTabId(tabId) {
+    const name = this.getNameByTabId(tabId);
+    if (name) {
+      this._cache.delete(name);
+      await this.save();
+    }
+  }
+};
+
+export async function createNewLlmTab(llmName, url, options = {}) {
+  const tab = await chrome.tabs.create({
+    url,
+    active: options.autoFocus ?? false
+  });
+  await TabMapManager.setTab(llmName, tab.id);
+  return tab;
+}
+
+export async function isValidTab(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return tab && !tab.discarded;
+  } catch {
+    return false;
+  }
+}
+index.js собирает всё:
+// background/index.js
+import { TabMapManager } from './tab-manager.js';
+import { JobOrchestrator } from './job-orchestrator.js';
+import { DispatchCoordinator } from './dispatch-coordinator.js';
+import { MessageRouter } from './message-router.js';
+
+// Инициализация
+TabMapManager.load();
+
+// Регистрация listeners
+chrome.runtime.onMessage.addListener(MessageRouter.handle);
+chrome.tabs.onRemoved.addListener(TabMapManager.removeByTabId);
+// ...
+Критерий готовности: background.js < 500 строк, только imports и регистрация listeners.
+
+12. Базовый класс для content scripts
+Проблема: 80% кода дублируется между content-chatgpt.js, content-claude.js, content-grok.js...
+Файл: Создать content-scripts/base-adapter.js
+class BaseLLMAdapter {
+  constructor(config) {
+    this.MODEL = config.model;
+    this.SELECTORS = config.selectors;
+    this.TIMEOUTS = config.timeouts || {};
+    
+    // Guard от дублей
+    if (window[`${this.MODEL}ContentScriptLoaded`]) {
+      throw new Error(`Duplicate ${this.MODEL} script load prevented`);
+    }
+    window[`${this.MODEL}ContentScriptLoaded`] = true;
+  }
+
+  // Общие методы
+  async waitForElement(selector, timeout = 10000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const el = document.querySelector(selector);
+      if (el) return el;
+      await sleep(100);
+    }
+    throw new Error(`Element not found: ${selector}`);
+  }
+
+  async humanType(element, text, options = {}) {
+    const wpm = options.wpm || 120;
+    const msPerChar = 60000 / (wpm * 5);
+    
+    for (const char of text) {
+      element.value += char;
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(msPerChar + Math.random() * 20);
+    }
+  }
+
+  async clickButton(selector) {
+    const button = await this.waitForElement(selector);
+    button.click();
+  }
+
+  async getResponse(selector) {
+    // Базовая реализация — ждать стабилизации текста
+    const element = await this.waitForElement(selector);
+    let lastText = '';
+    let stableCount = 0;
+    
+    while (stableCount < 3) {
+      await sleep(1000);
+      const currentText = element.textContent;
+      if (currentText === lastText) {
+        stableCount++;
+      } else {
+        stableCount = 0;
+        lastText = currentText;
+      }
+    }
+    
+    return lastText;
+  }
+
+  // Message handler — общий
+  handleMessage(message, sender, sendResponse) {
+    if (message.type === 'GET_ANSWER') {
+      this.processPrompt(message.prompt, message.attachments)
+        .then(result => sendResponse({ success: true, data: result }))
+        .catch(err => sendResponse({ success: false, error: err.message }));
+      return true; // async response
+    }
+    
+    if (message.type === 'HEALTH_CHECK_PING') {
+      sendResponse({ alive: true, model: this.MODEL });
+      return;
+    }
+  }
+
+  // Абстрактные методы — переопределить в наследниках
+  async processPrompt(prompt, attachments) {
+    throw new Error('processPrompt must be implemented');
+  }
+
+  async injectPrompt(prompt) {
+    const input = await this.waitForElement(this.SELECTORS.input);
+    await this.humanType(input, prompt);
+  }
+
+  async submitPrompt() {
+    await this.clickButton(this.SELECTORS.sendButton);
+  }
+}
+Пример наследника content-chatgpt.js:
+class ChatGPTAdapter extends BaseLLMAdapter {
+  constructor() {
+    super({
+      model: 'GPT',
+      selectors: {
+        input: '#prompt-textarea',
+        sendButton: 'button[data-testid="send-button"]',
+        response: '.markdown.prose'
+      },
+      timeouts: {
+        ready: 5000,
+        response: 120000
+      }
+    });
+  }
+
+  // Переопределить только специфичное для GPT
+  async processPrompt(prompt, attachments) {
+    if (attachments?.length) {
+      await AttachmentHandler.attach('GPT', attachments);
+    }
+    
+    await this.injectPrompt(prompt);
+    await this.submitPrompt();
+    
+    // GPT-специфичное ожидание (streaming)
+    return await this.waitForGPTResponse();
+  }
+
+  async waitForGPTResponse() {
+    // Специфичная логика для ChatGPT streaming
+    // ...
+  }
+}
+
+// Инициализация
+const adapter = new ChatGPTAdapter();
+chrome.runtime.onMessage.addListener((msg, sender, resp) => adapter.handleMessage(msg, sender, resp));
+Критерий готовности: Все content-*.js наследуют BaseLLMAdapter, дублирование < 20%.
+
+13. Zombie content scripts cleanup
+Проблема: При SPA навигации (ChatGPT меняет URL без перезагрузки) старый скрипт остаётся.
+Файл: content-scripts/base-adapter.js — добавить в конструктор
+class BaseLLMAdapter {
+  constructor(config) {
+    // ... existing code ...
+    
+    // Отслеживать навигацию
+    this._setupNavigationWatcher();
+  }
+
+  _setupNavigationWatcher() {
+    // Сохранить начальный URL
+    this._initialUrl = window.location.href;
+    this._observers = [];
+    this._intervals = [];
+    
+    // Отслеживать popstate (history navigation)
+    window.addEventListener('popstate', () => this._checkNavigation());
+    
+    // Отслеживать SPA navigation через MutationObserver
+    const urlObserver = new MutationObserver(() => {
+      if (window.location.href !== this._currentUrl) {
+        this._currentUrl = window.location.href;
+        this._checkNavigation();
+      }
+    });
+    urlObserver.observe(document.body, { childList: true, subtree: true });
+    this._observers.push(urlObserver);
+    
+    this._currentUrl = window.location.href;
+    
+    // Cleanup при unload
+    window.addEventListener('pagehide', () => this._cleanup('pagehide'));
+    window.addEventListener('beforeunload', () => this._cleanup('beforeunload'));
+  }
+
+  _checkNavigation() {
+    // Если ушли с целевого домена/пути — cleanup
+    const isStillOnPlatform = this._isValidPlatformUrl(window.location.href);
+    if (!isStillOnPlatform) {
+      console.log(`[${this.MODEL}] Navigated away from platform, cleaning up`);
+      this._cleanup('navigation');
+    }
+  }
+
+  _isValidPlatformUrl(url) {
+    // Переопределить в наследниках
+    return true;
+  }
+
+  // Регистрировать observers/intervals для cleanup
+  registerObserver(observer) {
+    this._observers.push(observer);
+  }
+
+  registerInterval(intervalId) {
+    this._intervals.push(intervalId);
+  }
+
+  _cleanup(reason) {
+    console.log(`[${this.MODEL}] Cleanup triggered: ${reason}`);
+    
+    // Отключить все observers
+    this._observers.forEach(obs => {
+      try { obs.disconnect(); } catch (e) {}
+    });
+    this._observers = [];
+    
+    // Очистить все intervals
+    this._intervals.forEach(id => clearInterval(id));
+    this._intervals = [];
+    
+    // Сообщить background
+    chrome.runtime.sendMessage({
+      type: 'CONTENT_SCRIPT_UNLOADED',
+      model: this.MODEL,
+      reason
+    }).catch(() => {}); // Ignore if background not available
+    
+    // Сбросить флаг загрузки
+    window[`${this.MODEL}ContentScriptLoaded`] = false;
+  }
+}
+Критерий готовности: При навигации внутри SPA все observers отключаются, память освобождается.
+
+14. Magic numbers → config
+Проблема: Таймауты, delays разбросаны по коду как await sleep(120), timeout: 45000.
+Файл: Создать config/timing.js
+export const TIMING = {
+  // Dispatch
+  DISPATCH_READY_TIMEOUT_MS: 5000,
+  DISPATCH_FOCUS_DELAY_MS: 300,
+  DISPATCH_BETWEEN_MODELS_MS: 200,
+  
+  // Typing simulation
+  TYPING_WPM: 120,
+  TYPING_CHAR_VARIANCE_MS: 20,
+  
+  // Response waiting
+  RESPONSE_STABILITY_CHECKS: 3,
+  RESPONSE_STABILITY_INTERVAL_MS: 1000,
+  RESPONSE_MAX_WAIT_MS: 300000, // 5 min
+  
+  // Retry
+  RETRY_BASE_DELAY_MS: 1000,
+  RETRY_MAX_DELAY_MS: 30000,
+  RETRY_MAX_ATTEMPTS: 5,
+  
+  // Circuit breaker
+  CIRCUIT_FAILURE_THRESHOLD: 5,
+  CIRCUIT_RECOVERY_MS: 60000,
+  
+  // Cache
+  SELECTOR_CACHE_TTL_MS: 30 * 24 * 60 * 60 * 1000, // 30 days
+  CACHE_CLEANUP_INTERVAL_MS: 5 * 60 * 1000, // 5 min
+  
+  // Health check
+  PING_INTERVAL_MS: 30000,
+  PING_TIMEOUT_MS: 5000,
+  
+  // Human simulation
+  HUMAN_DWELL_MIN_MS: 2000,
+  HUMAN_DWELL_MAX_MS: 5000,
+  HUMAN_SCROLL_DURATION_MS: 1500,
+  
+  // Per-model overrides
+  MODELS: {
+    GPT: {
+      DISPATCH_READY_TIMEOUT_MS: 8000,
+      RESPONSE_MAX_WAIT_MS: 180000
+    },
+    Claude: {
+      TYPING_WPM: 100, // Claude детектит быстрый ввод
+      DISPATCH_READY_TIMEOUT_MS: 6000
+    },
+    Grok: {
+      DISPATCH_READY_TIMEOUT_MS: 10000
+    }
+  }
+};
+
+// Helper для получения timing с учётом модели
+export function getTiming(key, model = null) {
+  if (model && TIMING.MODELS[model]?.[key] !== undefined) {
+    return TIMING.MODELS[model][key];
+  }
+  return TIMING[key];
+}
+Применение:
+// БЫЛО:
+await sleep(120);
+const timeout = 45000;
+
+// СТАЛО:
+import { getTiming } from '../config/timing.js';
+
+await sleep(getTiming('DISPATCH_FOCUS_DELAY_MS'));
+const timeout = getTiming('RESPONSE_MAX_WAIT_MS', 'GPT');
+Критерий готовности: Ни одного числового литерала для timing в бизнес-логике.
+
+15. Remote selectors SHA256 verification
+Проблема: Remote selectors загружаются без проверки — вектор для supply chain attack.
+Файл: background.js или selector-manager.js
+const REMOTE_SELECTORS_URL = 'https://algold777.github.io/llm-selectors-override/selectors-override.json';
+
+// Ожидаемый hash — обновлять при каждом релизе selectors
+const REMOTE_SELECTORS_EXPECTED_SHA256 = 'a1b2c3d4e5f6...'; // Реальный hash
+
+async function fetchRemoteSelectors() {
+  try {
+    const response = await fetch(REMOTE_SELECTORS_URL);
+    const text = await response.text();
+    
+    // Вычислить SHA256
+    const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    
+    // Сверить с ожидаемым
+    if (hashHex !== REMOTE_SELECTORS_EXPECTED_SHA256) {
+      console.error(`[SELECTORS] Integrity check failed!`);
+      console.error(`  Expected: ${REMOTE_SELECTORS_EXPECTED_SHA256}`);
+      console.error(`  Got:      ${hashHex}`);
+      return null;
+    }
+    
+    console.log('[SELECTORS] Integrity check passed');
+    return JSON.parse(text);
+  } catch (err) {
+    console.error('[SELECTORS] Failed to fetch remote selectors', err);
+    return null;
+  }
+}
+Процесс обновления:
+    1. Maintainer обновляет selectors-override.json 
+    2. Вычисляет SHA256: shasum -a 256 selectors-override.json 
+    3. Обновляет REMOTE_SELECTORS_EXPECTED_SHA256 в коде 
+    4. Релизит новую версию расширения 
+Критерий готовности: Remote selectors не применяются если hash не совпадает.
+
+16. API ключи — шифрование
+Проблема: API ключи в plaintext — любое расширение с storage permission прочитает.
+Файл: Создать utils/secure-storage.js
+const SecureStorage = {
+  // Генерировать ключ шифрования из extension ID (уникален для установки)
+  async _getEncryptionKey() {
+    const extensionId = chrome.runtime.id;
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(extensionId),
+      'PBKDF2',
+      false,
+      ['deriveKey']
+    );
+    
+    return crypto.subtle.deriveKey(
+      {
+        name: 'PBKDF2',
+        salt: new TextEncoder().encode('llm-codex-salt'),
+        iterations: 100000,
+        hash: 'SHA-256'
+      },
+      keyMaterial,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  },
+
+  async setSecure(key, value) {
+    const encKey = await this._getEncryptionKey();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    
+    const encrypted = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv },
+      encKey,
+      new TextEncoder().encode(JSON.stringify(value))
+    );
+    
+    // Сохранить IV + encrypted data
+    const combined = new Uint8Array(iv.length + encrypted.byteLength);
+    combined.set(iv);
+    combined.set(new Uint8Array(encrypted), iv.length);
+    
+    // Конвертировать в base64 для storage
+    const base64 = btoa(String.fromCharCode(...combined));
+    await chrome.storage.local.set({ [`secure_${key}`]: base64 });
+  },
+
+  async getSecure(key) {
+    const result = await chrome.storage.local.get(`secure_${key}`);
+    const base64 = result[`secure_${key}`];
+    if (!base64) return null;
+    
+    try {
+      const combined = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+      const iv = combined.slice(0, 12);
+      const encrypted = combined.slice(12);
+      
+      const encKey = await this._getEncryptionKey();
+      const decrypted = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv },
+        encKey,
+        encrypted
+      );
+      
+      return JSON.parse(new TextDecoder().decode(decrypted));
+    } catch (err) {
+      console.error('[SECURE] Decryption failed', err);
+      return null;
+    }
+  },
+
+  async removeSecure(key) {
+    await chrome.storage.local.remove(`secure_${key}`);
+  }
+};
+Применение:
+// БЫЛО:
+await chrome.storage.local.set({ apiKey: 'sk-xxx' });
+const { apiKey } = await chrome.storage.local.get('apiKey');
+
+// СТАЛО:
+await SecureStorage.setSecure('apiKey', 'sk-xxx');
+const apiKey = await SecureStorage.getSecure('apiKey');
+Критерий готовности: API ключи не читаются напрямую из storage, только через SecureStorage.
+
+🟢 АРХИТЕКТУРНЫЕ УЛУЧШЕНИЯ
+
+17. Semantic selectors как fallback
+Проблема: CSS селекторы ломаются при обновлениях UI.
+Файл: Добавить в selector-manager.js
+const SemanticFinder = {
+  // Поиск по ARIA
+  findByAriaLabel(pattern, root = document) {
+    const regex = new RegExp(pattern, 'i');
+    const elements = root.querySelectorAll('[aria-label]');
+    return Array.from(elements).find(el => regex.test(el.getAttribute('aria-label')));
+  },
+
+  // Поиск по тексту
+  findByText(text, tagName = '*', root = document) {
+    const xpath = `//${tagName}[contains(text(), "${text}")]`;
+    const result = document.evaluate(xpath, root, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+    return result.singleNodeValue;
+  },
+
+  // Поиск по placeholder
+  findByPlaceholder(pattern, root = document) {
+    const regex = new RegExp(pattern, 'i');
+    const inputs = root.querySelectorAll('input, textarea');
+    return Array.from(inputs).find(el => regex.test(el.placeholder));
+  },
+
+  // Поиск по роли + proximity к другому элементу
+  findButtonNear(targetElement, buttonText) {
+    const parent = targetElement.closest('form') || targetElement.parentElement?.parentElement;
+    if (!parent) return null;
+    return this.findByText(buttonText, 'button', parent);
+  },
+
+  // Комбо: попробовать несколько стратегий
+  findSendButton(platform) {
+    const strategies = [
+      // По aria-label
+      () => this.findByAriaLabel('send|submit|отправить'),
+      // По тексту
+      () => this.findByText('Send', 'button'),
+      () => this.findByText('Submit', 'button'),
+      // По иконке (SVG path)
+      () => document.querySelector('button svg path[d*="M2.01"]'), // Send icon path
+      // По позиции относительно input
+      () => {
+        const input = document.querySelector('textarea');
+        return input ? this.findButtonNear(input, '') : null;
+      }
+    ];
+
+    for (const strategy of strategies) {
+      const result = strategy();
+      if (result) return result;
+    }
+    return null;
+  }
+};
+
+// Интеграция в основной resolver
+async function resolveSelector(platform, elementType) {
+  // 1. Попробовать кэш
+  const cached = await readCache(platform, elementType);
+  if (cached) return cached;
+  
+  // 2. Попробовать versioned config
+  const config = SelectorConfigRegistry[platform];
+  if (config?.[elementType]) {
+    const el = document.querySelector(config[elementType]);
+    if (el) {
+      await writeCache(platform, elementType, config[elementType]);
+      return config[elementType];
+    }
+  }
+  
+  // 3. Semantic fallback
+  console.log(`[SELECTOR] CSS failed for ${platform}.${elementType}, trying semantic`);
+  
+  if (elementType === 'sendButton') {
+    const el = SemanticFinder.findSendButton(platform);
+    if (el) {
+      // Сгенерировать selector для кэша
+      const generatedSelector = generateUniqueSelector(el);
+      await writeCache(platform, elementType, generatedSelector);
+      return generatedSelector;
+    }
+  }
+  
+  // 4. Emergency fallback
+  return EMERGENCY_SELECTORS[elementType];
+}
+Критерий готовности: При поломке CSS селектора система автоматически находит элемент по ARIA/тексту.
+
+18. State Machine для dispatch lifecycle
+Проблема: Куча флагов messageSent, dispatchInFlight, status — легко рассинхронизировать.
+Файл: Создать utils/dispatch-state-machine.js
+const STATES = {
+  IDLE: 'IDLE',
+  QUEUED: 'QUEUED',
+  ACTIVATING: 'ACTIVATING',
+  TYPING: 'TYPING',
+  SUBMITTING: 'SUBMITTING',
+  WAITING: 'WAITING',
+  STREAMING: 'STREAMING',
+  DONE: 'DONE',
+  ERROR: 'ERROR'
+};
+
+const TRANSITIONS = {
+  [STATES.IDLE]: [STATES.QUEUED],
+  [STATES.QUEUED]: [STATES.ACTIVATING, STATES.ERROR],
+  [STATES.ACTIVATING]: [STATES.TYPING, STATES.ERROR],
+  [STATES.TYPING]: [STATES.SUBMITTING, STATES.ERROR],
+  [STATES.SUBMITTING]: [STATES.WAITING, STATES.ERROR],
+  [STATES.WAITING]: [STATES.STREAMING, STATES.DONE, STATES.ERROR],
+  [STATES.STREAMING]: [STATES.DONE, STATES.ERROR],
+  [STATES.DONE]: [STATES.IDLE],
+  [STATES.ERROR]: [STATES.IDLE, STATES.QUEUED] // retry
+};
+
+class DispatchStateMachine {
+  constructor(llmName) {
+    this.llmName = llmName;
+    this.state = STATES.IDLE;
+    this.history = [];
+    this.data = {};
+    this.listeners = [];
+  }
+
+  canTransition(newState) {
+    return TRANSITIONS[this.state]?.includes(newState);
+  }
+
+  transition(newState, data = {}) {
+    if (!this.canTransition(newState)) {
+      console.error(`[STATE] Invalid transition: ${this.state} → ${newState}`);
+      return false;
+    }
+
+    const prev = this.state;
+    this.state = newState;
+    this.data = { ...this.data, ...data };
+    this.history.push({
+      from: prev,
+      to: newState,
+      timestamp: Date.now(),
+      data
+    });
+
+    console.log(`[STATE] ${this.llmName}: ${prev} → ${newState}`);
+    this.listeners.forEach(fn => fn(this.state, prev, data));
+    return true;
+  }
+
+  onTransition(callback) {
+    this.listeners.push(callback);
+  }
+
+  is(state) {
+    return this.state === state;
+  }
+
+  isTerminal() {
+    return this.state === STATES.DONE || this.state === STATES.ERROR;
+  }
+
+  reset() {
+    this.state = STATES.IDLE;
+    this.data = {};
+  }
+}
+
+// Manager для всех моделей
+const dispatchMachines = new Map();
+
+function getDispatchMachine(llmName) {
+  if (!dispatchMachines.has(llmName)) {
+    dispatchMachines.set(llmName, new DispatchStateMachine(llmName));
+  }
+  return dispatchMachines.get(llmName);
+}
+Применение:
+// БЫЛО:
+entry.dispatchInFlight = true;
+entry.status = 'sending';
+// ... куча флагов ...
+
+// СТАЛО:
+const machine = getDispatchMachine(llmName);
+
+machine.transition(STATES.QUEUED, { prompt, attachments });
+// ...
+machine.transition(STATES.ACTIVATING, { tabId });
+// ...
+machine.transition(STATES.TYPING);
+// ...
+if (success) {
+  machine.transition(STATES.DONE, { response });
+} else {
+  machine.transition(STATES.ERROR, { error });
+}
+Критерий готовности: Все состояния dispatch управляются через StateMachine, нет отдельных флагов.
+
+19-22. Event-driven, Circuit Breaker persistence, TypeScript, Build system
+Эти пункты описаны выше достаточно детально. Основные критерии:
+19. Event-driven: Content Script отправляет SCRIPT_READY сам, Background не polling.
+20. Circuit Breaker persistence:
+// При старте Service Worker
+const stored = await chrome.storage.session.get('circuitBreakers');
+if (stored.circuitBreakers) {
+  Object.entries(stored.circuitBreakers).forEach(([llm, state]) => {
+    llmCircuitBreakers.set(llm, Object.assign(new CircuitBreaker(), state));
+  });
+}
+
+// При изменении состояния
+async function persistCircuitBreakers() {
+  const data = {};
+  llmCircuitBreakers.forEach((cb, llm) => {
+    data[llm] = { failures: cb.failures, lastFailureTime: cb.lastFailureTime, state: cb.state };
+  });
+  await chrome.storage.session.set({ circuitBreakers: data });
+}
+21. TypeScript: Начать с utils/ и config/, постепенно покрывать остальное. Использовать strict mode.
+22. Build system: Vite config:
+// vite.config.js
+export default {
+  build: {
+    rollupOptions: {
+      input: {
+        background: 'src/background/index.js',
+        content: 'src/content-scripts/index.js',
+        popup: 'src/popup/index.js'
+      },
+      output: {
+        entryFileNames: '[name].js'
+      }
+    },
+    minify: 'terser',
+    sourcemap: true
+  }
+};
+
+🔵 ОТЛОЖЕНО
+23. Hybrid Mode (API + Web)
+Отдельный проект. Требования:
+    • UI для ввода/хранения API ключей разных провайдеров 
+    • Fallback логика: API → Web если ключа нет 
+    • Обработка ошибок API (rate limits, billing) 
+    • Разные форматы ответов (streaming vs batch) 
+Не смешивать с текущим рефакторингом.
+

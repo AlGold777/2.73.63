@@ -1,0 +1,92 @@
+﻿Да, ты абсолютно прав. Я слишком быстро согласился с "гениальностью" решения, не проверив его на **граничные случаи (Edge Cases)**, которые GPT справедливо подсветил.
+
+Я прошел по коду (`job-orchestrator.js`, `tab-manager.js`, `dispatch-coordinator.js`) еще раз, держа в уме критику GPT. Вот **реальные дыры**, которые мы бы получили, если бы внедрили решение Claude "в лоб":
+
+### 1. Иллюзия AbortController (Самый опасный момент)
+GPT прав: `stopAllProcesses()` с `AbortController` **не остановит** текущие `setTimeout` или `orchestratorSleepMs`.
+*   **В коде:** `orchestratorSleepMs` — это просто обертка над `setTimeout`.
+*   **Проблема:** Если мы вызовем `abort()`, промис `sleep` не реджектится. Код "проснется" через 10 секунд и продолжит выполнение следующей строки, даже если мы нажали "Стоп".
+*   **Решение:** Нам нужен не просто `AbortController`, а кастомный `CancellableSleep`, который принимает `signal` и реджектит промис моментально при отмене.
+
+### 2. Амнезия Service Worker'а (Session ID)
+GPT попал в точку с `Date.now()`.
+*   **В коде:** `jobState` сохраняется в `CompressedStorage` (`saveJobState`).
+*   **Проблема:** Если мы введем переменную `let currentSessionId` в `job-orchestrator.js` (как предлагал Claude в Решении 1), то при засыпании и пробуждении Service Worker'а (а это происходит постоянно) эта переменная **обнулится**.
+*   **Сценарий:**
+    1. SW заснул посреди Round 1.
+    2. SW проснулся от события (например, `onMessage`).
+    3. `currentSessionId` исчез.
+    4. Все проверки `if (session !== current)` начнут фейлиться или, хуже того, мы создадим *новую* сессию, и старые вкладки станут "чужими".
+*   **Решение:** Session ID должен храниться **только** в `jobState.session.startTime` и восстанавливаться из `loadJobState()`. Никаких `let` переменных для состояния.
+
+### 3. Дыра в безопасности NEED_FOCUS
+GPT прав: `NEED_FOCUS` без проверки — это хаос.
+*   **Сценарий:** У пользователя осталась открыта вкладка с *вчерашней* сессии. Скрипт там все еще жив (мы не перезагружали страницу). Он просыпается, видит, что он неактивен, и шлет `NEED_FOCUS`.
+*   **Результат:** Background переключает фокус на старую, ненужную вкладку посреди работы новой сессии.
+*   **Решение:** В сообщении `NEED_FOCUS` должен передаваться `sessionId`. Background сверяет его с текущим `jobState.session.startTime`. Если не совпал — шлет команду `DIE` (отключить скрипт).
+
+### 4. TabMapManager: Синхронный или Асинхронный?
+GPT усомнился, а я проверил код (`tab-manager.js`).
+*   **Код:**
+    ```javascript
+    const TabMapManager = (() => {
+      // ...
+      const setTab = (llmName, tabId) => withLock(async () => { ... });
+      // ...
+    })();
+    ```
+*   **Вердикт:** Метод использует `withLock`, который возвращает Promise. Значит, он **100% асинхронный**.
+*   **Критика:** GPT был прав, что `await` ничего не решит, *если* метод синхронный. Но так как он асинхронный, отсутствие `await` в текущем коде — это **гарантированный Race Condition**. Вызов уходит в "никуда", и код идет дальше, думая, что запись создана.
+*   **Вывод:** Тут Claude был прав насчет необходимости `await`, а GPT прав в том, что надо проверить реализацию.
+
+---
+
+### Итоговый "Железобетонный" План (с учетом критики GPT)
+
+Мы не просто берем вариант Claude, мы его патчим.
+
+#### 1. Session Identity (Исправлено)
+Не используем локальные переменные.
+*   **Source of Truth:** `jobState.session.startTime` (загружается из storage).
+*   При каждом `setTimeout` внутри передаем `sessionId` аргументом, а не берем из замыкания.
+
+#### 2. Smart Sleep + Abort (Исправлено)
+Создаем утилиту `orchestratorSleep(ms, signal)`.
+```javascript
+function orchestratorSleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('Aborted'));
+    
+    const timer = setTimeout(() => resolve(), ms);
+    
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(new Error('Aborted'));
+    });
+  });
+}
+```
+*Без этого `stopAllProcesses` — фикция.*
+
+#### 3. Strict Focus Handshake (Исправлено)
+В `message-router.js`:
+```javascript
+case 'NEED_FOCUS':
+  // 1. Получаем ID сессии от вкладки
+  const tabSessionId = message.sessionId; 
+  // 2. Сверяем с текущей
+  if (tabSessionId !== jobState?.session?.startTime) {
+     // Игнорируем или шлем команду на отключение
+     return;
+  }
+  // 3. Только теперь активируем
+  activateTabForDispatch(sender.tab.id);
+```
+
+#### 4. Round 2: Active Rescue (Принято)
+Оставляем идею "Активного спасения" из моего предыдущего ответа. Если сообщение не ушло — кликаем еще раз. Это покрывает критику GPT насчет "premature messageSent". Мы не верим флагу, мы проверяем DOM (через `atomic-verify` скрипты).
+
+---
+
+**Вопрос к тебе:**
+Готов ли ты сейчас внедрить **эти 4 исправленных пункта**, или мы сначала хотим починить `await TabMapManager` (самый очевидный баг), чтобы посмотреть, исчезнут ли "призрачные" переключения вкладок?
