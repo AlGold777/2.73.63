@@ -561,16 +561,14 @@ const textStabilityMonitor = setInterval(() => {
     return;
   }
   
-  // Ð•ÑÐ»Ð¸ Ñ‚ÐµÐºÑÑ‚ Ð½Ðµ Ð¼ÐµÐ½ÑÐ»ÑÑ 2 ÑÐµÐºÑƒÐ½Ð´Ñ‹ Ð˜ Ð´Ð»Ð¸Ð½Ð° > 100 ÑÐ¸Ð¼Ð²Ð¾Ð»Ð¾Ð² â†’ ÑÑ‡Ð¸Ñ‚Ð°ÐµÐ¼ Ð·Ð°Ð²ÐµÑ€ÑˆÑ‘Ð½Ð½Ñ‹Ð¼
+  // Text stability is weak evidence only; final completion is decided by the watcher/finalization phases.
   if (currentLength === this._lastAnswerLength) {
     const stableMs = Date.now() - this._lastAnswerChangeAt;
     if (stableMs >= 2000 && currentLength > 100) {
-      console.log(`[Pipeline] Text stable for ${stableMs}ms, length=${currentLength} â†’ completion detected`);
+      console.log(`[Pipeline] Text stable evidence for ${stableMs}ms, length=${currentLength}`);
       clearInterval(textStabilityMonitor);
-      this.streamingTimedOut = false; // ÐžÑ‚Ð¼ÐµÐ½ÑÐµÐ¼ timeout
-      // Ð¢Ñ€Ð¸Ð³Ð³ÐµÑ€Ð¸Ð¼ Ð·Ð°Ð²ÐµÑ€ÑˆÐµÐ½Ð¸Ðµ Ñ‡ÐµÑ€ÐµÐ· custom event
       window.dispatchEvent(new CustomEvent('LLM_ANSWER_STABLE', { 
-        detail: { platform: this.platform, length: currentLength } 
+        detail: { platform: this.platform, length: currentLength, stableMs, evidenceOnly: true } 
       }));
     }
   } else {

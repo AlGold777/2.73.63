@@ -244,8 +244,7 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
         clearDeferredAnswerTimer(closedLlmName);
         llmTabClosed = true;
         if (jobState?.llms?.[closedLlmName]) {
-            const status = jobState.llms[closedLlmName].status;
-            const alreadyFinished = status === 'COPY_SUCCESS' || status === 'ERROR';
+            const alreadyFinished = isTerminalRouterEntry(jobState.llms[closedLlmName]);
             if (!alreadyFinished) {
                 handleLLMResponse(closedLlmName, 'Error: Tab closed during generation', {
                     type: 'tab_closed_prematurely'
@@ -717,8 +716,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     break;
                 }
 
-                const terminalStatuses = ['SUCCESS', 'ERROR', 'STOPPED', 'TIMEOUT'];
-                if (terminalStatuses.includes(entry.status)) {
+                if (isTerminalRouterEntry(entry)) {
                     console.log(`[NEED_FOCUS] Ignored: ${llmName} is in terminal status ${entry.status}`);
                     sendResponse({ status: 'focus_denied_terminal' });
                     break;

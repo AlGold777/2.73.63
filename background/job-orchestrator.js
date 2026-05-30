@@ -1425,10 +1425,39 @@ function maybeDeferEarlyTerminalSuccess(llmName, entry, options = {}) {
     && Number(existing.answerLength || 0) === answerLength
     && (now - Number(existing.lastSeenAt || startedAt)) >= EARLY_TERMINAL_GUARD_STABLE_MS;
   const waitedMs = Math.max(0, now - startedAt);
-  const allowTerminalSuccess = sameObservation
-    && (answerLength >= EARLY_TERMINAL_GUARD_FORCE_SUCCESS_CHARS || waitedMs >= EARLY_TERMINAL_GUARD_MAX_WAIT_MS);
+  const forceLongAnswerAfterMaxWait = Boolean(
+    existing
+    && answerLength >= EARLY_TERMINAL_GUARD_FORCE_SUCCESS_CHARS
+    && waitedMs >= EARLY_TERMINAL_GUARD_MAX_WAIT_MS
+  );
+  const forceAnyAnswerAfterExtendedWait = Boolean(
+    existing
+    && answerLength >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+    && waitedMs >= (EARLY_TERMINAL_GUARD_MAX_WAIT_MS * 3)
+  );
+  const allowTerminalSuccess = (
+    sameObservation
+    && (answerLength >= EARLY_TERMINAL_GUARD_FORCE_SUCCESS_CHARS || waitedMs >= EARLY_TERMINAL_GUARD_MAX_WAIT_MS)
+  ) || forceLongAnswerAfterMaxWait || forceAnyAnswerAfterExtendedWait;
 
   if (allowTerminalSuccess) {
+    if (!sameObservation) {
+      appendLogEntry(llmName, {
+        type: 'RESPONSE',
+        label: 'Terminal success guard max wait elapsed',
+        details: `len=${answerLength} waited=${waitedMs}ms`,
+        level: 'warning',
+        meta: {
+          dispatchId,
+          answerLength,
+          waitedMs,
+          forceLongAnswerAfterMaxWait,
+          forceAnyAnswerAfterExtendedWait,
+          responseSource,
+          completionReason
+        }
+      });
+    }
     entry.earlyTerminalGuard = null;
     return false;
   }
@@ -2740,7 +2769,7 @@ function runModelThroughTabs(llmName, prompt, forceNewTabs, attachments = [], op
 
   // Prefer the most recently used eligible tab whenever "New pages" is disabled.
   // This prevents stale TabMap bindings from hijacking dispatch (notably for GPT).
-  tryAttachExistingTab(llmName, prompt, attachments, options).then((attached) => {
+  tryAttachExistingTab(llmName, prompt, attachments, { ...options, allowGlobalReuse: true }).then((attached) => {
     if (attached) return;
     reuseMappedTabOrCreate();
   }).catch((err) => {

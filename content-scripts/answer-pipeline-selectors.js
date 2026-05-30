@@ -14,6 +14,19 @@
     return 'generic';
   };
 
+  const COPY_BUTTON_SELECTORS = [
+    'button[aria-label*="Copy" i]',
+    'button[title*="Copy" i]',
+    'button[data-testid*="copy" i]',
+    '[role="button"][aria-label*="Copy" i]',
+    '[role="button"][title*="Copy" i]',
+    '[data-testid*="copy" i]',
+    '[aria-label*="Copy response" i]',
+    '[aria-label*="Copy answer" i]',
+    '[aria-label*="Копировать" i]',
+    'button[class*="copy" i]'
+  ];
+
   const PLATFORM_SELECTORS = {
     chatgpt: {
       answerContainer: '[data-testid=\"conversation-panel\"], [data-testid=\"conversation-container\"], main, [data-testid=\"conversation-turn\"]',
@@ -49,7 +62,8 @@
         'button[data-testid*=\"send-button\"]:not([disabled]):not([aria-disabled=\"true\"])',
         'button[aria-label*=\"Send\" i]:not([disabled]):not([aria-disabled=\"true\"])'
       ],
-      stopButton: 'button[aria-label*=\"Stop\" i], button[data-testid=\"stop-button\"], button[data-testid*=\"stop\"]'
+      stopButton: 'button[aria-label*=\"Stop\" i], button[data-testid=\"stop-button\"], button[data-testid*=\"stop\"]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     claude: {
       answerContainer: '[data-testid=\"conversation-content\"], [data-testid*=\"conversation\"], [class*=\"conversation\" i], main, [role=\"main\"]',
@@ -95,7 +109,8 @@
         'button[data-testid*=\"retry\"]',
         'button[data-testid*=\"continue\"]'
       ],
-      stopButton: 'button[aria-label*=\"Stop\" i], button[data-testid*=\"stop\"]'
+      stopButton: 'button[aria-label*=\"Stop\" i], button[data-testid*=\"stop\"]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     gemini: {
       answerContainer: 'main, [role=\"main\"], [class*=\"conversation\" i]',
@@ -111,7 +126,8 @@
       streamStart: ['[data-test-id*=\"model-response\"]', '[data-testid*=\"model-response\"]', '.model-response', 'model-response', 'message-content', '[data-message-author-role=\"assistant\"]', '[data-role=\"assistant\"]'],
       generatingIndicators: ['.loading', '[aria-busy=\"true\"]', '[data-is-loading=\"true\"]', '[data-loading=\"true\"]', '[data-streaming=\"true\"]'],
       completionIndicators: ['rich-textarea', 'textarea[aria-label*=\"Prompt\" i]', 'textarea[aria-label*=\"Message\" i]', 'textarea[aria-label*=\"Ask\" i]'],
-      stopButton: 'button[aria-label*=\"Stop\" i]'
+      stopButton: 'button[aria-label*=\"Stop\" i]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     grok: {
       answerContainer: 'main[role=\"main\"], [data-testid=\"conversation-container\"], [data-testid*=\"conversation\"], [role=\"log\"], main',
@@ -132,7 +148,8 @@
       streamStart: ['div.message-bubble div.response-content-markdown', 'div.relative.response-content-markdown', '[data-testid=\"grok-response\"]', '[data-testid*=\"response\"]', '[data-message-author-role=\"assistant\"]', '[data-role=\"assistant\"]', 'article[data-role=\"assistant\"]'],
       generatingIndicators: ['.animate-pulse', '[aria-busy=\"true\"]', '[data-streaming=\"true\"]', '[data-generating=\"true\"]', '[class*=\"typing\" i]', '[class*=\"streaming\" i]', '.typing-indicator', 'button[aria-label*=\"Stop\" i]', '[data-testid*=\"loading\"]'],
       completionIndicators: ['[data-testid=\"grok-send-button\"]', 'button[data-testid=\"grok-send-button\"]:not([disabled])', 'button[aria-label*=\"Send\" i]:not([disabled])', 'textarea[role=\"textbox\"]'],
-      stopButton: 'button[aria-label*=\"Stop\" i], button[data-testid=\"grok-stop-button\"]'
+      stopButton: 'button[aria-label*=\"Stop\" i], button[data-testid=\"grok-stop-button\"]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     perplexity: {
       answerContainer: 'main, [role=\"main\"], [data-testid=\"conversation-container\"], [data-testid=\"layout-wrapper\"], [class*=\"answer-container\" i], [data-testid*=\"answer\"], [data-testid*=\"response\"], article',
@@ -163,7 +180,8 @@
       ],
       generatingIndicators: ['.loading-indicator', '[data-testid=\"loading-indicator\"]', '[aria-busy=\"true\"]', '[data-generating=\"true\"]', '[class*=\"streaming\" i]', 'button[aria-label*=\"Stop\" i]', '[data-testid=\"stop-button\"]'],
       completionIndicators: ['textarea[aria-label*=\"Ask\" i]', 'textarea[aria-label*=\"Search\" i]', 'textarea[aria-label*=\"Message\" i]', 'button[aria-label*=\"Ask\" i]', 'button[data-testid=\"send-button\"]:not([disabled])', 'button[type=\"submit\"]:not([disabled])'],
-      stopButton: 'button[aria-label*=\"Stop\" i], button[data-testid=\"stop-button\"]'
+      stopButton: 'button[aria-label*=\"Stop\" i], button[data-testid=\"stop-button\"]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     qwen: {
       answerContainer: 'main, article',
@@ -215,7 +233,8 @@
       ],
       generatingIndicators: ['[data-testid=\"chat-loader\"]', '[aria-busy=\"true\"]', '.loading', '.spinner', '[data-streaming=\"true\"]', '[class*=\"streaming\" i]', '.typing-indicator', 'button[aria-label*=\"Stop\" i]'],
       completionIndicators: ['button[data-testid*=\"send\"]:not([disabled])', 'textarea[role=\"textbox\"]:not([disabled])'],
-      stopButton: 'button[aria-label*=\"Stop\" i]'
+      stopButton: 'button[aria-label*=\"Stop\" i]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     deepseek: {
       answerContainer: 'main, [role=\"main\"], .chat-content, [class*=\"conversation\" i], [class*=\"chat\" i], article',
@@ -238,7 +257,8 @@
       streamStart: ['.message-item[data-role=\"assistant\"]', 'div[class*=\"assistant\" i]', '[data-role=\"assistant\"]', '[data-testid*=\"assistant\"]', '[data-testid*=\"chat-response\"]', '[data-testid*=\"message\"]', '.assistant-message', '.message-content', '.markdown-body', '[class*=\"message\" i][class*=\"assistant\" i]', '[class*=\"response\" i]', 'div[role=\"article\"]', 'article', '.prose'],
       generatingIndicators: ['[aria-busy=\"true\"]', '.loading', '[data-generating=\"true\"]', '[data-streaming=\"true\"]', '.typing-indicator', '.spinner', '.loader', '.animate-pulse', '[class*=\"streaming\" i]', '[data-testid*=\"loading\"]', 'button[aria-label*=\"Stop\" i]'],
       completionIndicators: ['textarea:not([disabled])', 'textarea[role=\"textbox\"]:not([disabled])', 'button[type=\"submit\"]:not([disabled])', 'button[aria-label*=\"Send\" i]:not([disabled])', 'button[data-testid*=\"send\"]:not([disabled])'],
-      stopButton: 'button[aria-label*=\"Stop\" i]'
+      stopButton: 'button[aria-label*=\"Stop\" i]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     lechat: {
       answerContainer: 'main, article',
@@ -257,7 +277,8 @@
       generatingIndicators: ['[aria-busy=\"true\"]', '.loading', '.animate-pulse', '.typing-indicator', '[class*=\"streaming\" i]', '[data-testid=\"generation\"]', '[data-testid*=\"loading\"]'],
       completionIndicators: ['button[type=\"submit\"]:not([disabled])', '[data-testid*=\"send\"]:not([disabled])', '[aria-label*=\"Send\" i]:not([disabled])', 'textarea[role=\"textbox\"]:not([disabled])'],
       stopButton: 'button[aria-label*=\"Stop\" i], button[aria-label*=\"Stop generation\" i], button[data-testid*=\"stop\" i], button[class*=\"stop\" i]',
-      regenerateButton: 'button[aria-label*=\"Regenerate\" i], button[aria-label*=\"Try again\" i], button[data-testid*=\"regenerate\" i], button[class*=\"regenerate\" i], button:has-text(\"Regenerate\"), button:has-text(\"Try again\")'
+      regenerateButton: 'button[aria-label*=\"Regenerate\" i], button[aria-label*=\"Try again\" i], button[data-testid*=\"regenerate\" i], button[class*=\"regenerate\" i], button:has-text(\"Regenerate\"), button:has-text(\"Try again\")',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     generic: {
       answerContainer: 'main, [role=\"main\"], article',
@@ -265,7 +286,8 @@
       streamStart: ['.prose', 'article', '[role=\"log\"]'],
       generatingIndicators: ['.loading', '.spinner', '[aria-busy=\"true\"]'],
       completionIndicators: ['textarea:not([disabled])', 'button[type=\"submit\"]:not([disabled])'],
-      stopButton: 'button[aria-label*=\"Stop\" i]'
+      stopButton: 'button[aria-label*=\"Stop\" i]',
+      copyButton: COPY_BUTTON_SELECTORS
     }
   };
 

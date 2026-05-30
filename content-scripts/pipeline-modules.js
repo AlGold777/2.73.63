@@ -942,7 +942,8 @@
         mutationIdle: 1500,
         scrollStable: 2000,
         contentStable: 1500,
-        completionSignalEnabled: true
+        completionSignalEnabled: true,
+        copyButtonSignalEnabled: true
       };
       this.config = Object.assign({}, defaults, customConfig);
       this.criteria = {
@@ -951,7 +952,8 @@
         typingGone: { met: false },
         sentinelVisible: { met: false },
         contentStable: { threshold: this.config.contentStable, met: false },
-        completionSignal: { enabled: this.config.completionSignalEnabled !== false, met: false }
+        completionSignal: { enabled: this.config.completionSignalEnabled !== false, met: false },
+        copyButtonVisible: { enabled: this.config.copyButtonSignalEnabled !== false, met: false }
       };
     }
 

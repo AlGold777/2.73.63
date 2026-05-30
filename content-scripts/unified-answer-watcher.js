@@ -138,6 +138,7 @@
       this.selectors = PLATFORM_SELECTORS[this.platform] || PLATFORM_SELECTORS.generic || {};
       const completionConfig = Object.assign({}, Config.streaming?.completionCriteria || {}, options.completionCriteria || {});
       const adaptiveConfig = Object.assign({}, Config.streaming?.adaptiveTimeout || {}, options.adaptiveTimeout || {});
+      this.config = completionConfig;
       this.humanSession = options.humanSession || null;
       this.criteria = new UniversalCompletionCriteria(completionConfig);
       this.timeoutManager = new AdaptiveTimeoutManager(adaptiveConfig);
@@ -159,6 +160,10 @@
       this.lastStopSelectorAttempt = null;
       this.lastRegenerateSelector = null;
       this.lastRegenerateSelectorAttempt = null;
+      this.lastCopySelector = null;
+      this.lastCopySelectorAttempt = null;
+      this.lastCopyButtonMeta = null;
+      this.lastCopySignalLogKey = '';
       this.autoDiscoveredSelectors = this.initAutoDiscoveredSelectors();
       this.autoDiscoveryInFlight = new Set();
       this.contentStableStreak = 0;
@@ -169,11 +174,12 @@
       this.lastContentChangeAt = 0;
       this.scoreThreshold = completionConfig.scoring?.threshold || 0.6;
       this.scoreWeights = Object.assign({
-        typingGone: 0.4,
+        typingGone: 0.35,
         contentStable: 0.3,
         mutationIdle: 0.2,
         scrollStable: 0.05,
-        sentinelVisible: 0.05
+        sentinelVisible: 0.05,
+        copyButtonVisible: 0.15
       }, completionConfig.scoring?.weights || {});
       this.fingerprintBonus = typeof completionConfig.scoring?.fingerprintBonus === 'number'
         ? completionConfig.scoring.fingerprintBonus
@@ -181,6 +187,10 @@
       this.scoringEnabled = completionConfig.scoring?.enabled !== false;
       this.contentStableChecks = Number(completionConfig.contentStableChecks || 3);
       this.contentStableDelta = Number(completionConfig.contentStableDelta || 5);
+      this.copyButtonSignalEnabled = completionConfig.copyButtonSignalEnabled !== false;
+      this.copyButtonRequiresStableText = completionConfig.copyButtonRequiresStableText !== false;
+      this.copyButtonMinAnswerLength = Number(completionConfig.copyButtonMinAnswerLength || 80);
+      this.copyButtonMaxDistancePx = Number(completionConfig.copyButtonMaxDistancePx || 900);
       this.fingerprintStableChecks = Number(completionConfig.fingerprintStableChecks || 3);
       this.fingerprintSampleLength = Number(completionConfig.fingerprintSampleLength || 100);
       this.detectorWindowMs = Number(Config.telemetry?.detectorTickWindowMs || 5000);
@@ -342,16 +352,21 @@
               this.metrics.stopDisappeared = true;
               this.state.lastChangeTime = changeTs;
               this.stopDisappearedAt = changeTs;
-              cleanup(this.buildResult('stop_disappeared', 0.9, typingActive, getRecentGrowth(), true));
-              return;
             }
           }
-          // v2.54.24 (2025-12-22 23:14 UTC): stop_disappeared detection (Purpose: finalize when stop vanishes).
+          // stop_disappeared is evidence only; final completion needs corroborating signals below.
           const stopVisible = this.getStopVisible();
           const stopDisappeared = Boolean(this.stopDisappearedAt) && !stopVisible;
           const regenerateVisible = this.detectRegenerateVisible();
           const completionSignal = this.detectCompletionIndicator();
+          const copyButtonReady = this.copyButtonSignalEnabled ? this.detectCopyButtonNearLatestAnswer() : false;
+          const copyButtonMeta = this.lastCopyButtonMeta || {};
+          const copyButtonStable = copyButtonReady
+            && !stopVisible
+            && this.latestContentLength >= this.copyButtonMinAnswerLength
+            && (!this.copyButtonRequiresStableText || this.criteria.criteria.contentStable?.met || this.fingerprintStable);
           this.criteria.mark('completionSignal', completionSignal);
+          this.criteria.mark('copyButtonVisible', copyButtonStable);
           const expiration = this.timeoutManager.checkExpiration();
           if (stopVisible && !expiration.softExpired && !expiration.hardExpired) {
             return;
@@ -364,6 +379,10 @@
             cleanup(this.buildResult('completion_signal', 1, typingActive, getRecentGrowth(), true));
             return;
           }
+          if (copyButtonStable && this.criteria.criteria.copyButtonVisible?.enabled) {
+            cleanup(this.buildResult('copy_button_stable', 0.92, typingActive, getRecentGrowth(), true));
+            return;
+          }
           const metCount = this.criteria.metCount();
           const criteriaTotal = Object.values(this.criteria.criteria).filter((c) => c.enabled !== false).length || 5;
           const snapshot = {
@@ -371,6 +390,11 @@
               stopVisible,
               regenerateVisible,
               completionSignal,
+              copyButtonPresent: !!copyButtonMeta.present,
+              copyButtonVisible: !!copyButtonMeta.visible,
+              copyButtonInteractable: !!copyButtonMeta.interactable,
+              copyButtonStable,
+              copyType: copyButtonMeta.copyType || null,
               stopDisappeared,
               typingActive
             },
@@ -396,7 +420,16 @@
           };
           this.lastDetectorSnapshot = snapshot;
           this.maybeEmitDetectorTick(snapshot);
-          this.maybeLogCriteria({ stopVisible, regenerateVisible, completionSignal, stopDisappeared, metCount, criteriaTotal });
+          this.maybeLogCriteria({
+            stopVisible,
+            regenerateVisible,
+            completionSignal,
+            copyButtonVisible: !!copyButtonMeta.visible,
+            copyButtonStable,
+            stopDisappeared,
+            metCount,
+            criteriaTotal
+          });
           const contentMutationStable = this.criteria.criteria.contentStable?.met && this.criteria.criteria.mutationIdle?.met;
           if (contentMutationStable) {
             cleanup(this.buildResult('content_mutation_stable', 0.85, typingActive, getRecentGrowth(), true));
@@ -534,6 +567,31 @@
         stableChecksUsed: this.contentStableStreak || 0,
         lastChangeMsAgo
       }, snapshot || {}));
+    }
+
+    emitCopyCompletionSignal(meta = {}) {
+      const safeMeta = Object.assign({
+        found: false,
+        valid: false,
+        present: false,
+        visible: false,
+        interactable: false,
+        copyType: 'rejected'
+      }, meta || {});
+      const key = [
+        safeMeta.found ? 1 : 0,
+        safeMeta.valid ? 1 : 0,
+        safeMeta.present ? 1 : 0,
+        safeMeta.visible ? 1 : 0,
+        safeMeta.interactable ? 1 : 0,
+        safeMeta.copyType || '',
+        safeMeta.selector || '',
+        safeMeta.rejectedReason || safeMeta.reason || '',
+        safeMeta.answerHash || ''
+      ].join('|');
+      if (key === this.lastCopySignalLogKey) return;
+      this.lastCopySignalLogKey = key;
+      this.emitDetectorEvent('COPY_COMPLETION_SIGNAL', safeMeta);
     }
 
     emitSelectorMiss(targetType, selector, meta = {}) {
@@ -688,6 +746,25 @@
       return this.mergeSelectors(discovered, filtered);
     }
 
+    getCopyButtonSelectors() {
+      const base = this.normalizeSelectorList(this.selectors.copyButton || this.selectors.copyButtons);
+      const fallback = base.length ? base : this.normalizeSelectorList([
+        'button[aria-label*="Copy" i]',
+        'button[title*="Copy" i]',
+        'button[data-testid*="copy" i]',
+        '[role="button"][aria-label*="Copy" i]',
+        '[role="button"][title*="Copy" i]',
+        '[data-testid*="copy" i]',
+        '[aria-label*="Copy response" i]',
+        '[aria-label*="Copy answer" i]',
+        '[aria-label*="Копировать"]',
+        'button[class*="copy" i]'
+      ]);
+      const filtered = this.filterSelectors(fallback, 'copyButton');
+      const discovered = this.getAutoDiscoveredSelectors('copyButton');
+      return this.mergeSelectors(discovered, filtered);
+    }
+
     detectStopButtonVisible() {
       const stopSelectors = this.getStopSelectors();
       let stopButton = null;
@@ -773,6 +850,266 @@
       });
     }
 
+    getAnswerScopes(answerEl) {
+      if (!answerEl) return [];
+      const scopes = [];
+      const closest = answerEl.closest?.([
+        '[data-testid*="conversation-turn" i]',
+        '[data-testid*="message" i]',
+        '[data-message-author-role="assistant"]',
+        '[data-author-role="assistant"]',
+        '[data-role="assistant"]',
+        '[data-is-response="true"]',
+        '.qwen-chat-message-assistant',
+        '[class*="assistant" i]',
+        '[role="article"]',
+        'article',
+        'section'
+      ].join(', '));
+      if (closest) scopes.push(closest);
+      scopes.push(answerEl);
+      let node = closest || answerEl;
+      for (let depth = 0; depth < 3 && node?.parentElement; depth += 1) {
+        node = node.parentElement;
+        if (!node || node === document.body || node === document.documentElement) break;
+        scopes.push(node);
+      }
+      return Array.from(new Set(scopes.filter(Boolean)));
+    }
+
+    querySelectorAllWithin(scope, selector) {
+      try {
+        return scope?.querySelectorAll?.(selector) || [];
+      } catch (err) {
+        if (!this.invalidSelectors.has(selector)) {
+          this.invalidSelectors.add(selector);
+          console.warn('[AnswerWatcher] Invalid scoped selector', selector, err);
+        }
+        window.SelectorCircuit?.report(selector, this.platform, 'copyButton', false);
+        return [];
+      }
+    }
+
+    getElementLabel(el) {
+      if (!el) return '';
+      return [
+        el.getAttribute?.('aria-label'),
+        el.getAttribute?.('title'),
+        el.getAttribute?.('data-testid'),
+        el.getAttribute?.('class'),
+        el.textContent
+      ].filter(Boolean).join(' ').trim();
+    }
+
+    isDisabledControl(el) {
+      return !!(el?.disabled
+        || el?.getAttribute?.('aria-disabled') === 'true'
+        || el?.getAttribute?.('data-disabled') === 'true'
+        || (typeof el?.getAttribute === 'function' && el.getAttribute('disabled') !== null));
+    }
+
+    getElementVisibilityState(el) {
+      const present = !!el;
+      const rawVisible = present ? this.isElementVisible(el) : false;
+      let pointerEvents = '';
+      let opacity = '';
+      try {
+        const style = present ? window.getComputedStyle(el) : null;
+        pointerEvents = style?.pointerEvents || '';
+        opacity = style?.opacity || '';
+      } catch (_) {
+        pointerEvents = '';
+        opacity = '';
+      }
+      const visible = rawVisible && opacity !== '0';
+      const disabled = this.isDisabledControl(el);
+      return {
+        present,
+        visible,
+        disabled,
+        interactable: present && visible && !disabled && pointerEvents !== 'none'
+      };
+    }
+
+    isAssistantScope(scope, answerEl = null) {
+      const nodes = [scope, answerEl].filter(Boolean);
+      const attrText = nodes.map((node) => [
+        node.getAttribute?.('data-message-author-role'),
+        node.getAttribute?.('data-author-role'),
+        node.getAttribute?.('data-role'),
+        node.getAttribute?.('role'),
+        node.getAttribute?.('data-testid'),
+        node.getAttribute?.('class')
+      ].filter(Boolean).join(' ')).join(' ').toLowerCase();
+      const htmlHint = nodes.map((node) => {
+        try {
+          return String(node.outerHTML || '').split('>')[0].slice(0, 700).toLowerCase();
+        } catch (_) {
+          return '';
+        }
+      }).join(' ');
+      const haystack = `${attrText} ${htmlHint}`;
+      const explicitAssistant = /(assistant|model-response|bot|response|answer|qwen-chat-message-assistant|claude-response)/i.test(haystack);
+      const explicitUser = /(data-message-author-role=["']?user|data-author-role=["']?user|data-role=["']?user|\buser-message\b|\bhuman\b|\bprompt\b)/i.test(haystack);
+      if (explicitAssistant && !explicitUser) {
+        return { ok: true, confidence: attrText.includes('assistant') ? 'explicit' : 'inferred' };
+      }
+      return {
+        ok: false,
+        confidence: explicitUser ? 'rejected_user_scope' : 'unknown',
+        reason: explicitUser ? 'user_scope' : 'not_assistant_scope'
+      };
+    }
+
+    classifyCopyButton(button, answerEl, scope, selector, answerRect) {
+      const state = this.getElementVisibilityState(button);
+      const label = this.getElementLabel(button).toLowerCase();
+      const assistantScope = this.isAssistantScope(scope, answerEl);
+      const inCodeBlock = !!button?.closest?.('pre, code, [data-testid*="code" i], [class*="code" i]');
+      const rect = button?.getBoundingClientRect?.() || null;
+      const distancePx = this.getVerticalDistance(answerRect, rect);
+      const hasCopyLabel = /(copy|clipboard|копир)/i.test(label);
+      const misleadingLabel = /(share|link|url)/i.test(label) && !/(copy|clipboard|response|answer|message|code|копир)/i.test(label);
+      let copyType = 'rejected';
+      if (hasCopyLabel && assistantScope.ok && !inCodeBlock) {
+        copyType = state.interactable ? 'message_toolbar' : 'answer_scope';
+      } else if (hasCopyLabel && assistantScope.ok && inCodeBlock) {
+        copyType = 'code_block';
+      }
+      const reasons = [];
+      if (!hasCopyLabel) reasons.push('missing_copy_label');
+      if (misleadingLabel) reasons.push('misleading_label');
+      if (!assistantScope.ok) reasons.push(assistantScope.reason || 'not_assistant_scope');
+      if (distancePx > this.copyButtonMaxDistancePx) reasons.push('too_far_from_answer');
+      if (state.disabled) reasons.push('disabled');
+      if (!state.present) reasons.push('not_present');
+      if (!state.visible) reasons.push('not_visible');
+      if (!state.interactable) reasons.push('not_interactable');
+      if (inCodeBlock) reasons.push('code_block_only');
+      const valid = hasCopyLabel
+        && !misleadingLabel
+        && assistantScope.ok
+        && state.interactable
+        && !inCodeBlock
+        && distancePx <= this.copyButtonMaxDistancePx;
+      return {
+        valid,
+        present: state.present,
+        visible: state.visible,
+        interactable: state.interactable,
+        disabled: state.disabled,
+        selector,
+        label: label.slice(0, 120),
+        copyType,
+        inCodeBlock,
+        assistantScope: assistantScope.ok,
+        assistantScopeConfidence: assistantScope.confidence,
+        distancePx,
+        rejectedReason: valid ? null : (reasons[0] || 'rejected'),
+        rejectedReasons: reasons
+      };
+    }
+
+    getVerticalDistance(a, b) {
+      if (!a || !b) return 0;
+      if (a.bottom < b.top) return b.top - a.bottom;
+      if (b.bottom < a.top) return a.top - b.bottom;
+      return 0;
+    }
+
+    detectCopyButtonNearLatestAnswer() {
+      this.lastCopyButtonMeta = { found: false, valid: false, present: false, visible: false, interactable: false, copyType: 'rejected', reason: 'not_checked' };
+      const answerEl = this.getAnswerElement();
+      if (!answerEl) {
+        this.lastCopyButtonMeta = { found: false, valid: false, present: false, visible: false, interactable: false, copyType: 'rejected', reason: 'no_answer_element' };
+        this.emitCopyCompletionSignal(this.lastCopyButtonMeta);
+        return false;
+      }
+      const textLength = (answerEl.textContent || '').trim().length;
+      const answerHash = this.hashString((answerEl.textContent || '').slice(-500));
+      if (textLength < this.copyButtonMinAnswerLength) {
+        this.lastCopyButtonMeta = { found: false, valid: false, present: false, visible: false, interactable: false, copyType: 'rejected', reason: 'answer_too_short', textLength, answerHash };
+        this.emitCopyCompletionSignal(this.lastCopyButtonMeta);
+        return false;
+      }
+      const selectors = this.getCopyButtonSelectors();
+      if (!selectors.length) {
+        this.lastCopyButtonMeta = { found: false, valid: false, present: false, visible: false, interactable: false, copyType: 'rejected', reason: 'no_copy_selectors', textLength, answerHash };
+        this.emitCopyCompletionSignal(this.lastCopyButtonMeta);
+        return false;
+      }
+      const answerRect = answerEl.getBoundingClientRect?.() || null;
+      const scopes = this.getAnswerScopes(answerEl);
+      let best = null;
+      for (const scope of scopes) {
+        for (const selector of selectors) {
+          this.lastCopySelectorAttempt = selector;
+          const nodes = Array.from(this.querySelectorAllWithin(scope, selector));
+          const classifications = [];
+          for (const node of nodes) {
+            const classified = this.classifyCopyButton(node, answerEl, scope, selector, answerRect);
+            classifications.push(classified);
+            const score = (classified.valid ? 100 : 0)
+              + (classified.copyType === 'message_toolbar' ? 20 : 0)
+              + (classified.copyType === 'answer_scope' ? 10 : 0)
+              + (classified.copyType === 'code_block' ? 3 : 0)
+              + (classified.present ? 2 : 0)
+              + (classified.visible ? 2 : 0)
+              + (classified.interactable ? 2 : 0);
+            if (!best || score > best.score) {
+              best = Object.assign({}, classified, {
+                score,
+                found: classified.present && /copy|clipboard|копир/i.test(classified.label || ''),
+                textLength,
+                answerHash,
+                scopeTag: scope.tagName || null,
+                scopeRole: scope.getAttribute?.('role') || null,
+                candidateCount: nodes.length
+              });
+            }
+          }
+          const valid = classifications.find((item) => item.valid);
+          if (valid) {
+            this.lastCopySelector = selector;
+            this.lastCopyButtonMeta = Object.assign({}, valid, {
+              found: true,
+              textLength,
+              answerHash,
+              scopeTag: scope.tagName || null,
+              scopeRole: scope.getAttribute?.('role') || null,
+              candidateCount: nodes.length,
+              rejectedCount: classifications.filter((item) => !item.valid).length
+            });
+            window.SelectorCircuit?.report(selector, this.platform, 'copyButton', true);
+            this.recordSelectorHit('copyButton', selector, this.lastCopyButtonMeta);
+            this.emitCopyCompletionSignal(this.lastCopyButtonMeta);
+            return true;
+          }
+          this.emitSelectorMiss('copyButton', selector, {
+            visible: false,
+            textLength,
+            candidateCount: nodes.length,
+            rejectedCount: classifications.length,
+            scopeTag: scope.tagName || null
+          });
+        }
+      }
+      this.lastCopyButtonMeta = Object.assign({
+        found: false,
+        valid: false,
+        present: false,
+        visible: false,
+        interactable: false,
+        copyType: 'rejected',
+        reason: best?.rejectedReason || 'no_visible_answer_copy_button',
+        textLength,
+        answerHash,
+        scopeCount: scopes.length
+      }, best || {});
+      this.emitCopyCompletionSignal(this.lastCopyButtonMeta);
+      return false;
+    }
+
     detectRegenerateVisible() {
       const regenSelectors = this.getRegenerateSelectors();
       if (!regenSelectors.length) return false;
@@ -853,12 +1190,15 @@
           criteriaSnapshot,
           completionSelectors: {
             stopButton: this.lastStopSelector || null,
-            regenerateButton: this.lastRegenerateSelector || null
+            regenerateButton: this.lastRegenerateSelector || null,
+            copyButton: this.lastCopySelector || null
           },
           selectorAttempts: {
             stopButton: this.lastStopSelectorAttempt || null,
-            regenerateButton: this.lastRegenerateSelectorAttempt || null
-          }
+            regenerateButton: this.lastRegenerateSelectorAttempt || null,
+            copyButton: this.lastCopySelectorAttempt || null
+          },
+          copyButton: this.lastCopyButtonMeta || null
         }
       };
     }
@@ -891,15 +1231,15 @@
       }).join(' ');
     }
 
-    maybeLogCriteria({ stopVisible, regenerateVisible, completionSignal, stopDisappeared, metCount, criteriaTotal }) {
+    maybeLogCriteria({ stopVisible, regenerateVisible, completionSignal, copyButtonVisible, copyButtonStable, stopDisappeared, metCount, criteriaTotal }) {
       if (!this.verboseCriteria) return;
       const status = this.buildCriteriaStatus();
       const score = this.calculateScore();
-      const key = `${stopVisible ? 1 : 0}|${regenerateVisible ? 1 : 0}|${completionSignal ? 1 : 0}|${stopDisappeared ? 1 : 0}|${metCount}|${status}|${score.toFixed(2)}`;
+      const key = `${stopVisible ? 1 : 0}|${regenerateVisible ? 1 : 0}|${completionSignal ? 1 : 0}|${copyButtonVisible ? 1 : 0}|${copyButtonStable ? 1 : 0}|${stopDisappeared ? 1 : 0}|${metCount}|${status}|${score.toFixed(2)}`;
       if (key === this.lastCriteriaLogKey) return;
       this.lastCriteriaLogKey = key;
       const prefix = this.llmName ? `[AnswerWatcher:${this.llmName}]` : '[AnswerWatcher]';
-      console.log(`${prefix} stop=${stopVisible ? '1' : '0'} regen=${regenerateVisible ? '1' : '0'} completion=${completionSignal ? '1' : '0'} stopGone=${stopDisappeared ? '1' : '0'} met=${metCount}/${criteriaTotal} score=${score.toFixed(2)} | ${status}`);
+      console.log(`${prefix} stop=${stopVisible ? '1' : '0'} regen=${regenerateVisible ? '1' : '0'} completion=${completionSignal ? '1' : '0'} copy=${copyButtonVisible ? '1' : '0'} copyStable=${copyButtonStable ? '1' : '0'} stopGone=${stopDisappeared ? '1' : '0'} met=${metCount}/${criteriaTotal} score=${score.toFixed(2)} | ${status}`);
     }
 
     hashString(value = '') {

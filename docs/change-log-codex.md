@@ -1,5 +1,46 @@
 ## Change Log — Codex
 
+### 2026-05-30 10:56 CEST — v2.73.69
+
+- Для чего: восстановить ожидаемое поведение `New Pages = off`, когда запросы должны идти в последние уже открытые вкладки моделей, включая вкладки из прошлых сессий. Изменение: первичное подключение существующей вкладки теперь допускает global reuse через `allowGlobalReuse`, после чего выбранная вкладка привязывается к текущему run scope; scoped resolver при этом остаётся защищённым от чужих вкладок. Файлы: `background/job-orchestrator.js`, `background/tab-manager.js`.
+- Для чего: не считать cached `tabId` доказательством рабочей вкладки. Изменение: добавлен `validateReusableTab()`, который проверяет существование/готовность вкладки, соответствие модели и run-scope перед dispatch/reuse; stale cached binding очищается и не используется вслепую. Файлы: `background/tab-manager.js`, `tests/tab-manager-session-scope.test.js`.
+- Для чего: убрать расхождение terminal-логики между закрытием вкладок, фокусом, human visits и health checks. Изменение: terminal decisions переведены на общий `ModelRunState`/router helper вместо локальных списков статусов; health monitor теперь учитывает `modelRunState.terminalState` даже при устаревшем legacy `status`. Файлы: `background/message-router.js`, `background/lifecycle-runtime.js`, `background/human-presence.js`, `background/health-monitor.js`, `tests/health-monitor-terminal-state.test.js`.
+- Для чего: снизить риск преждевременного terminal success от DOM-сигналов. Изменение: исчезновение stop-кнопки и стабильность текста 2 секунды теперь трактуются как completion evidence, а не как самостоятельное финальное решение. Файлы: `content-scripts/unified-answer-watcher.js`, `content-scripts/unified-answer-pipeline.js`.
+- Для чего: закрепить регрессию тестами. Изменение: добавлены проверки session-scope reuse для старых вкладок, revalidation cached binding и terminal-state health monitor. Файлы: `tests/tab-manager-session-scope.test.js`, `tests/health-monitor-terminal-state.test.js`.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.73.69`. Файл: `manifest.json`.
+
+### 2026-05-30 08:31 CEST — v2.73.68
+
+- Для чего: исправить сценарий из `All Logs 20260530_08-28.md`, где Qwen уже материализовал ответ в панели (`textLen=11632`), но stale lifecycle продолжал слать `ANSWER_GENERATING textLength=6067` и блокировал terminal success до `ANSWER_COMPLETE_TIMEOUT`. Изменение: `maybeDeferEarlyTerminalSuccess()` больше не требует `sameObservation`, если длинный ответ (`>= EARLY_TERMINAL_GUARD_FORCE_SUCCESS_CHARS`) ждёт guard дольше `EARLY_TERMINAL_GUARD_MAX_WAIT_MS`; для коротких, но достаточных ответов добавлен extended wait `MAX_WAIT * 3`. Файл: `background/job-orchestrator.js`.
+- Для чего: сделать такие случаи видимыми в логах. Изменение: при принудительном выходе из guard после max wait добавлен log `Terminal success guard max wait elapsed` с длиной ответа, временем ожидания и причиной. Файл: `background/job-orchestrator.js`.
+- Для чего: закрепить регрессию тестом. Изменение: добавлен тест, где Qwen имеет длинный ответ, изменившийся signature и stale lifecycle lock; guard теперь пропускает terminal success после max wait. Файл: `tests/early-terminal-guard.test.js`.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.73.68`. Файл: `manifest.json`.
+
+### 2026-05-30 07:45 CEST — v2.73.67
+
+- Для чего: сделать copy-button completion signal пригодным для диагностики hover/hidden toolbar. Изменение: классификация copy-кнопки теперь различает `present`, `visible`, `interactable`, `disabled` и сохраняет эти поля в `metrics.copyButton`/detector signal. Файл: `content-scripts/unified-answer-watcher.js`.
+- Для чего: не принимать copy-кнопку из пользовательского сообщения или неподтверждённого scope. Изменение: добавлен `isAssistantScope()` guard с явной/эвристической проверкой assistant/model/response scope и отклонением user-scope candidate. Файл: `content-scripts/unified-answer-watcher.js`.
+- Для чего: различать тип copy-кнопки без преждевременной финализации code-only/code-block сценариев. Изменение: `classifyCopyButton()` теперь возвращает `copyType: message_toolbar | answer_scope | code_block | rejected`; `code_block` логируется как найденный, но не считается валидным completion evidence. Файл: `content-scripts/unified-answer-watcher.js`.
+- Для чего: сделать сигнал видимым в общем telemetry export как отдельное событие. Изменение: добавлен dedupe-emitter `COPY_COMPLETION_SIGNAL` с `found/valid/present/visible/interactable/copyType/answerHash/rejectedReason`, без сохранения полного текста ответа. Файл: `content-scripts/unified-answer-watcher.js`.
+- Для чего: закрепить новые edge-cases тестами. Изменение: copy-button smoke tests расширены сценариями hidden-toolbar, user-scope rejection и проверки `COPY_COMPLETION_SIGNAL` telemetry. Файл: `tests/copy-button-completion.test.js`.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.73.67`. Файл: `manifest.json`.
+
+### 2026-05-30 07:36 CEST — v2.73.66
+
+- Для чего: добавить более надёжный признак окончания генерации, когда модель показывает toolbar ответа после завершения стрима. Изменение: `UnifiedAnswerCompletionWatcher` теперь определяет видимую copy-кнопку рядом с последним assistant answer и учитывает её как `copyButtonVisible` criterion только при отсутствии stop-кнопки и стабильном тексте/fingerprint. Файл: `content-scripts/unified-answer-watcher.js`.
+- Для чего: не ловить ложные copy-сигналы от старых сообщений или кнопок копирования кода. Изменение: copy-кнопка ищется только в scope последнего ответа/близких контейнеров, disabled/hidden controls игнорируются, copy внутри `pre/code` не считается evidence завершения ответа. Файл: `content-scripts/unified-answer-watcher.js`.
+- Для чего: сделать новый сигнал диагностируемым в `All Logs` и result metrics. Изменение: `copyButtonVisible` добавлен в `UniversalCompletionCriteria`, scoring, detector snapshots, verbose criteria log, `completionSelectors`, `selectorAttempts` и `metrics.copyButton`. Файлы: `content-scripts/pipeline-modules.js`, `content-scripts/unified-answer-watcher.js`.
+- Для чего: дать watcher платформенные CSS-кандидаты copy-кнопки. Изменение: добавлены общие copy selectors в основной и fallback selector bundles. Файлы: `content-scripts/answer-pipeline-selectors.js`, `content-scripts/platform-selectors.js`.
+- Для чего: сделать поведение управляемым конфигом и покрыть smoke-тестами. Изменение: добавлены `copyButtonSignalEnabled`, `copyButtonRequiresStableText`, `copyButtonMinAnswerLength`, `copyButtonMaxDistancePx`, а также тесты положительного/отрицательного сценариев copy-button completion. Файлы: `content-scripts/pipeline-config.js`, `tests/copy-button-completion.test.js`.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.73.66`. Файл: `manifest.json`.
+
+### 2026-05-29 23:48 CEST — v2.73.65
+
+- Для чего: исправить сценарий из `All Logs 20260529_23-44.md`, где Gemini получил terminal `PARTIAL` с ответом, но статус-индикатор оставался жёлтым как будто генерация не завершена. Изменение: в results UI статусы `PARTIAL` и `STREAM_TIMEOUT_HIDDEN` теперь отображаются зелёным terminal-success индикатором, tooltip сохраняет уточнение о partial/timeout. Файл: `results.js`.
+- Для чего: убрать ложный жёлтый статус, если панель ответа уже получила непустой текст, но UI-состояние застряло в `GENERATING/RECEIVING/RECOVERABLE_ERROR`. Изменение: `updateLLMPanelOutput()` теперь при валидном непустом ответе поднимает индикатор минимум до `PARTIAL`, если текущий статус ещё не success-like. Файл: `results.js`.
+- Для чего: покрыть новый visual-contract smoke-проверкой. Изменение: status indicator smoke test теперь также проверяет `PARTIAL` и `STREAM_TIMEOUT_HIDDEN`. Файл: `results.js`.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.73.65`. Файл: `manifest.json`.
+
 ### 2026-05-29 21:53 CEST — v2.73.64
 
 - Для чего: исправить сценарий из `All Logs 20260529_21-48.md`, где Le Chat возвращал текст в панель, но оставался жёлтым и продолжал получать `getResponses`/human visits. Изменение: `content-lechat.js` теперь прокидывает `msg.meta` в `LLM_RESPONSE` при manual `getResponses`, поэтому background видит `manualRecovery/lateCollectFinal/forceTerminalSuccess` и может финализировать ответ вместо повторного streaming defer. Файл: `content-scripts/content-lechat.js`.

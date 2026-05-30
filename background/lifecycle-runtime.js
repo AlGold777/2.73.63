@@ -45,8 +45,11 @@ function getLlmNameByTabId(tabId) {
 function isTabSessionCompleted(tabId) {
   const llmName = getLlmNameByTabId(tabId);
   if (!llmName) return false;
-  const status = jobState?.llms?.[llmName]?.status;
-  return status === 'COPY_SUCCESS' || status === 'SUCCESS' || status === 'DONE';
+  const entry = jobState?.llms?.[llmName];
+  if (!entry) return false;
+  if (self.ModelRunState?.isTerminalRunState?.(entry)) return true;
+  const status = String(entry.status || entry.finalStatus || '').toUpperCase();
+  return Boolean(entry.finalStatusRecorded || entry.finalStatus || TERMINAL_STATUSES.includes(status));
 }
 
 async function cleanupStorageBudgets() {

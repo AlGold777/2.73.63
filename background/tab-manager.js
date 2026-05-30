@@ -438,6 +438,29 @@ function getAllOpenTabs() {
   });
 }
 
+async function validateReusableTab(llmName, tabId, options = {}) {
+  const reason = options.reason || 'validate_reusable_tab';
+  const allowGlobalReuse = options.allowGlobalReuse === true;
+  const runBoundSet = getRunBoundTabIdSet();
+  if (!isValidTabId(tabId)) {
+    return { ok: false, reason: 'invalid_tab_id', tab: null, snapshot: null };
+  }
+  if (runBoundSet && !runBoundSet.has(tabId) && !allowGlobalReuse) {
+    const snapshot = await captureTabSnapshot(tabId);
+    emitTelemetry(llmName, 'TAB_REUSE_REJECTED', {
+      details: 'run_scope_mismatch',
+      level: 'warning',
+      meta: {
+        snapshot,
+        reason,
+        runScope: 'bound'
+      }
+    });
+    return { ok: false, reason: 'run_scope_mismatch', snapshot };
+  }
+  return ensureTabReadyForDispatch(tabId, llmName, { reason });
+}
+
 async function findReusableTabsForLlm(llmName) {
   const tabs = await getAllOpenTabs();
   if (!tabs.length) return [];
@@ -450,7 +473,19 @@ async function findReusableTabsForLlm(llmName) {
 function resolveTabForLlmName(llmName, done) {
   const cached = TabMapManager.get(llmName);
   if (cached) {
-    done(cached);
+    validateReusableTab(llmName, cached, { reason: 'resolve_cached' })
+      .then(async (result) => {
+        if (result?.ok) {
+          done(cached);
+          return;
+        }
+        await setTabBinding(llmName, null);
+        done(null);
+      })
+      .catch(async () => {
+        await setTabBinding(llmName, null);
+        done(null);
+      });
     return;
   }
   const entry = LLM_TARGETS[llmName];
@@ -649,6 +684,7 @@ function createNewLlmTab(llmName, prompt, attachments = [], options = {}) {
 function tryAttachExistingTab(llmName, prompt, attachments = [], options = {}) {
   return new Promise((resolve) => {
     const attachSessionId = options.sessionId || jobState?.session?.startTime || null;
+    const allowGlobalReuse = options.allowGlobalReuse === true;
     const patterns = getQueryPatternsForLLM(llmName);
     if (!patterns || !patterns.length) {
       resolve(false);
@@ -661,7 +697,7 @@ function tryAttachExistingTab(llmName, prompt, attachments = [], options = {}) {
       }
       const runBoundSet = getRunBoundTabIdSet();
       let eligibleTabs = tabs.slice();
-      if (runBoundSet) {
+      if (runBoundSet && !allowGlobalReuse) {
         const scopedTabs = eligibleTabs.filter((tab) => runBoundSet.has(tab.id));
         if (scopedTabs.length) {
           eligibleTabs = scopedTabs;
@@ -693,15 +729,26 @@ function tryAttachExistingTab(llmName, prompt, attachments = [], options = {}) {
         const candidateSnapshot = await captureTabSnapshot(candidate.id);
         emitTelemetry(llmName, 'ATTACH_CANDIDATE', {
           details: candidate?.url || '',
-          meta: { snapshot: candidateSnapshot || null, reason: 'attach_existing', runScope: runBoundSet ? 'bound' : 'global' },
+          meta: {
+            snapshot: candidateSnapshot || null,
+            reason: 'attach_existing',
+            runScope: runBoundSet && !allowGlobalReuse ? 'bound' : 'global'
+          },
           force: true
         });
-        const readiness = await ensureTabReadyForDispatch(candidate.id, llmName, { reason: 'attach_existing' });
+        const readiness = await validateReusableTab(llmName, candidate.id, {
+          reason: 'attach_existing',
+          allowGlobalReuse
+        });
         if (!readiness.ok) {
           emitTelemetry(llmName, 'ATTACH_REJECTED', {
             details: readiness.reason || 'unknown',
             level: 'warning',
-            meta: { snapshot: readiness.snapshot || null, reason: 'attach_existing', runScope: runBoundSet ? 'bound' : 'global' },
+            meta: {
+              snapshot: readiness.snapshot || null,
+              reason: 'attach_existing',
+              runScope: runBoundSet && !allowGlobalReuse ? 'bound' : 'global'
+            },
             force: true
           });
           resolve(false);
@@ -716,7 +763,11 @@ function tryAttachExistingTab(llmName, prompt, attachments = [], options = {}) {
         initRequestMetadata(llmName, candidate.id, readiness.tab?.url || candidate?.url || (LLM_TARGETS[llmName]?.url) || '');
         emitTelemetry(llmName, 'TAB_ATTACHED', {
           details: readiness.tab?.url || candidate?.url || '',
-          meta: { snapshot: readiness.snapshot || candidateSnapshot || null, reason: 'attach_existing', runScope: runBoundSet ? 'bound' : 'global' },
+          meta: {
+            snapshot: readiness.snapshot || candidateSnapshot || null,
+            reason: 'attach_existing',
+            runScope: runBoundSet && !allowGlobalReuse ? 'bound' : 'global'
+          },
           force: true
         });
         if (!options.deferDispatch) {
@@ -1172,6 +1223,8 @@ self.normalizePatternToPrefix = normalizePatternToPrefix;
 self.matchesUrlPrefix = matchesUrlPrefix;
 self.resolveTabForLlmName = resolveTabForLlmName;
 self.resolveTabForLlmNameAsync = resolveTabForLlmNameAsync;
+self.findReusableTabsForLlm = findReusableTabsForLlm;
+self.validateReusableTab = validateReusableTab;
 self.getAttachAllowPrefixes = getAttachAllowPrefixes;
 self.getAttachDenyPrefixes = getAttachDenyPrefixes;
 self.isEligibleTabForLlm = isEligibleTabForLlm;

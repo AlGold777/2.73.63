@@ -1,0 +1,1693 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta http-equiv="content-type" content="text/html; charset=utf-8"/>
+	<title>LLM Responses Export</title>
+	<meta name="generator" content="LibreOffice 25.8.1.1 (MacOSX)"/>
+	<meta name="created" content="00:00:00"/>
+	<meta name="changed" content="2026-05-30T00:07:11.200107000"/>
+	<meta name="" content=""/>
+	<style type="text/css">
+		td p { line-height: 150%; font-family: "Arial", sans-serif; color: #111111 }
+		h1 { line-height: 150%; color: #111111 }
+		h1.cjk { font-family: "Arial", sans-serif }
+		h1.ctl { font-family: "Arial", sans-serif }
+		p { line-height: 150%; font-family: "Arial", sans-serif; color: #111111 }
+		h2 { line-height: 150%; font-size: 15pt; color: #111111; margin-bottom: 0.32cm }
+		pre { background: #f6f8fa; line-height: 150%; border: none; padding: 0cm; color: #111111 }
+		p.response-meta { margin-bottom: 0.32cm; font-family: "Arial", sans-serif; font-size: 10pt; color: #555555 }
+		h3 { line-height: 150%; color: #111111 }
+		th p { line-height: 150%; color: #111111; font-family: "Arial", sans-serif }
+		h4 { line-height: 150%; color: #111111 }
+		blockquote { line-height: 150%; font-family: "Arial", sans-serif; color: #111111 }
+	</style>
+</head>
+<body lang="ru-RU" text="#111111" bgcolor="#ffffff" dir="ltr" style="border: none; padding: 0cm"><h2>
+Prompt</h2>
+<pre>&lt;Prompt&gt;
+All Logs 20260529_23-44.md
+Ответы вернули все модели (ответы успешно ставились в журналы модели  на странице расширения) , но при этом Gemini , GPT  имели жёлтый статус.
+
+Проанализируй причины
+&lt;/Prompt&gt;</pre>
+<hr/>
+
+<h2>LLM Responses<br/>
+Claude
+<br/>
+<a href="https://claude.ai/chat/8fef56ec-9583-4c5d-b3f5-d9537a9f6928"><span style="font-weight: normal">https://claude.ai/chat/8fef56ec-9583-4c5d-b3f5-d9537a9f6928</span></a></h2>
+<p style="font-weight: normal"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt">Логи
+детально прочитаны. Вот анализ:</font></font></p>
+<hr/>
+
+<h2 style="font-weight: normal">Причины жёлтого статуса
+GPT и Gemini</h2>
+<h3 style="margin-top: 0.35cm; margin-bottom: 0.32cm; font-weight: normal">
+🟡 <font size="4" style="font-size: 15pt">GPT — основная
+причина: полный провал всех DOM-селекторов</font></h3>
+<p style="margin-top: 0.35cm; margin-bottom: 0.32cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt">Из
+<code>SELECTOR_STATS</code> видно, что <strong>абсолютно
+все</strong> селекторы для GPT отработали с
+hit=0%:</font></font></p>
+<pre style="margin-top: 0.35cm; margin-bottom: 0.32cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><code>stopButton:        button[data-testid=&quot;stop-button&quot;]       hit=0 miss=6 (0%)</code></font></font>
+<font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><code>stopButton:        button[data-testid*=&quot;stop&quot;]             hit=0 miss=6 (0%)</code></font></font>
+<font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><code>stopButton:        button[aria-label*=&quot;Stop&quot; i]            hit=0 miss=6 (0%)</code></font></font>
+<font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><code>regenerateButton:  button[data-testid=&quot;regenerate-button&quot;] hit=0 miss=6 (0%)</code></font></font>
+<font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><code>regenerateButton:  button[aria-label*=&quot;Regenerate&quot; i]      hit=0 miss=6 (0%)</code></font></font>
+<font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><code>regenerateButton:  button[data-testid*=&quot;send-button&quot;]...   hit=0 miss=6 (0%)</code></font></font>
+<font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><code>... и т.д.</code></font></font></pre><p style="margin-top: 0.35cm; margin-bottom: 0.32cm">
+<font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><strong>Следствие</strong>:
+pipeline не мог отслеживать состояние
+генерации через DOM. Ответ в итоге был
+получен только через <strong><code>manual_ping_late_collect</code></strong>
+— аварийный путь сбора. R4 занял <strong>170
+секунд</strong> — почти 3 минуты, потребовалось
+несколько ручных пингов.</font></font></p>
+<p style="margin-top: 0.35cm; margin-bottom: 0.32cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><strong>Диагноз</strong>:
+ChatGPT обновил разметку интерфейса —
+<code>data-testid</code> атрибуты у кнопок изменились
+или исчезли. Селекторы в конфиге устарели.</font></font></p>
+<hr/>
+
+<h3 style="margin-top: 0.35cm; margin-bottom: 0.32cm; font-weight: normal">
+🟡 <font size="4" style="font-size: 15pt">Gemini — основная
+причина: ошибки passive ping + сбор из
+snapshot-кеша</font></h3>
+<p style="margin-top: 0.35cm; margin-bottom: 0.32cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt">В
+логах отчётливо видна цепочка:</font></font></p>
+<pre style="margin-top: 0.35cm; margin-bottom: 0.32cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><code>LATE_COLLECT_DECISION_TRACE: passive_ping_error:adaptive_round2:partial_from_snapshot:snapshot_cache</code></font></font>
+<font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><code>LATE_COLLECT_DECISION_TRACE: passive_ping_error:finalization_deferred_generation_active:...</code></font></font>
+<font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><code>LATE_COLLECT_DECISION_TRACE: passive_ping_error:adaptive_round2:success:inline_executeScript</code></font></font></pre>
+<ul>
+	<li><p style="margin-top: 0.35cm; margin-bottom: 0cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><strong><code>passive_ping_error</code></strong>
+	— пассивные пинги (основной механизм
+	сбора) постоянно падали с ошибкой </font></font>
+	</p></li>
+	<li><p style="margin-top: 0.35cm; margin-bottom: 0cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><strong><code>finalization_deferred_generation_active</code></strong>
+	— финализация откладывалась, потому
+	что Gemini ещё генерировал в момент пинга
+	</font></font>
+	</p></li>
+	<li><p style="margin-top: 0.35cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><strong><code>partial_from_snapshot:snapshot_cache</code></strong>
+	— ответ был взят из кеша снапшота, а не
+	из живого DOM </font></font>
+	</p></li>
+</ul>
+<p style="margin-top: 0.35cm; margin-bottom: 0.32cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><strong>Интересный
+факт</strong>: R4 у Gemini завершился в <code>21:46:17</code>,
+а R3 — в <code>21:46:19</code> (R4 <strong>раньше</strong>
+R3). Это значит финализация прошла через
+ранний exit по lifecycle-детектору, а не через
+обычный визит коллекции.</font></font></p>
+<p style="margin-top: 0.35cm; margin-bottom: 0.32cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><strong>Диагноз</strong>:
+Gemini не даёт stable DOM-доступ в момент активной
+генерации, пинги перехватываются
+ошибкой. Ответ получен, но через
+fallback-цепочку.</font></font></p>
+<hr/>
+
+<h2 style="font-weight: normal">Итоговая таблица</h2>
+<table cellpadding="2" cellspacing="2">
+	<thead>
+		<tr>
+			<th style="border: none; padding: 0cm"><p>Платформа</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>Причина жёлтого</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>Механизм сбора
+				ответа</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>Время R4</p>
+			</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td style="border: none; padding: 0cm"><p><strong>GPT</strong></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>Все DOM-селекторы
+				0% попаданий — интерфейс обновился</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>manual_ping_late_collect</code>
+				(аварийный)</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>170 сек</p>
+			</td>
+		</tr>
+		<tr>
+			<td style="border: none; padding: 0cm"><p><strong>Gemini</strong></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>passive_ping_error</code>
+				+ ответ из snapshot-кеша</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>inline_executeScript</code>
+				fallback</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>75 сек</p>
+			</td>
+		</tr>
+	</tbody>
+</table>
+<hr/>
+
+<h2 style="font-weight: normal">Что делать</h2>
+<p style="margin-top: 0.35cm; margin-bottom: 0.32cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><strong>Для
+GPT</strong>: обновить селекторы в
+<code>selectors-config.js</code> / <code>selectors-override.json</code>
+для <code>stopButton</code> и <code>regenerateButton</code>.
+Нужно инспектировать актуальный DOM
+ChatGPT и найти новые <code>data-testid</code> или
+<code>aria-label</code> у кнопок.</font></font></p>
+<p style="margin-top: 0.35cm; margin-bottom: 0.32cm"><font face="Liberation Serif, serif"><font size="4" style="font-size: 15pt"><strong>Для
+Gemini</strong>: разобраться почему <code>passive_ping</code>
+падает с ошибкой. Вероятно, Gemini изменил
+политику доступа к контексту страницы
+или структуру shadow DOM. Возможно, стоит
+увеличить задержку пинга или перейти
+на <code>snapshot</code>-first стратегию для Gemini.</font></font></p>
+<h2 style="font-weight: normal"><br/>
+<br/>
+<br/>
+
+</h2>
+<h2>GPT</h2>
+<p class="response-meta">2026-05-29 23-54
+https://chatgpt.com/g/g-p-697dbbf30edc8191bd6951c8899dd8b6-2-72-15/c/6a08b776-d050-83eb-8908-b2f8b9484644</p>
+<p>Да, мнение Claude <strong>в целом хорошее и
+ближе к вашему реальному коду</strong>, чем
+предыдущая более широкая архитектура.
+Но я бы его <strong>усилил и немного поправил</strong>.</p>
+<h2>Вердикт</h2>
+<p>Оценка: <strong>8/10</strong>.</p>
+<p>Claude правильно увидел два ключевых
+момента:</p>
+<ol>
+	<li><p>У вас уже есть <code>MANUAL_RESPONSE_PING</code> /
+	<code>REQUEST_LLM_RESPONSE</code>, которые вызывают
+	<code>handleManualResponsePing</code>. Это уже правильная
+	точка входа для кнопки ручного добора
+	ответа.</p></li>
+	<li><p><code>handleManualResponsePing</code> действительно
+	умеет fallback-ом найти открытую вкладку
+	по URL-паттернам модели, выбрать eligible
+	tab, привязать её через <code>setTabBinding</code>,
+	расширить ping window и отправить <code>getResponses</code>.
+		</p>
+	<p>job-orchestrator</p></li>
+</ol>
+<p>Но в предложении Claude есть два слабых
+места:</p>
+<ul>
+	<li><p><code>Map</code> для <code>selectorRotationState</code> в
+	MV3 background service worker — плохое durable-хранилище;</p></li>
+	<li><p>ротация “failedSelectors” не должна
+	строиться только вокруг сырых selectors.
+	Лучше ротировать <strong>strategyId</strong>, потому
+	что один selector может участвовать в разных
+	стратегиях: last visible, longest, bottom-most,
+	assistant-role-only, markdown-only и т.д.</p></li>
+</ul>
+<hr/>
+
+<h1 class="western">1. Пункт 1 Claude — почти полностью
+верный</h1>
+<h2>Что верно</h2>
+<p>Claude правильно говорит: если <code>jobState</code>
+уже очищен, но вкладка ещё открыта,
+текущий <code>handleManualResponsePing</code> уже частично
+спасает ситуацию.</p>
+<p>По коду:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>const queryList = getQueryPatternsForLLM(llmName)</code>
+<code>chrome.tabs.query({ url: queryList })</code>
+<code>eligibleTabs.sort((a, b) =&gt; (b.lastAccessed || 0) - (a.lastAccessed || 0))</code>
+<code>tabId = eligibleTabs[0].id</code>
+<code>await setTabBinding(llmName, tabId)</code></pre><p>
+То есть он действительно может найти
+открытую вкладку модели даже после
+потери прежней привязки. 
+</p>
+<p>job-orchestrator</p>
+<h2>Где Claude прав про <code>jobState</code></h2>
+<p>Да, если <code>jobState.llms[llmName]</code> отсутствует,
+входящий ответ может быть потерян.
+<code>handleLLMResponse</code> в начале проверяет
+наличие <code>jobState.llms</code>; если <code>jobState</code>
+невалиден, он логирует <code>Invalid state for
+response</code> и возвращается. 
+</p>
+<p>job-orchestrator</p>
+<p>Но ещё важнее: даже если <code>jobState.llms</code>
+существует, но <strong>конкретной записи
+модели нет</strong>, <code>entry</code> будет
+отсутствовать, а дальше часть логики
+response handling станет нестабильной/неполной.
+Поэтому минимальная запись действительно
+нужна.</p>
+<h3>Мой вариант патча</h3>
+<p>Не вставлять кусок прямо в
+<code>handleManualResponsePing</code>, а сделать helper:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>function ensureRecoveryModelEntry(llmName, tabId, reason = 'manual_ping') {</code>
+<code>  if (!llmName) return null;</code>
+<code>  jobState = jobState || {};</code>
+<code>  jobState.llms = jobState.llms || {};</code>
+<code>  let entry = jobState.llms[llmName];</code>
+<code>  if (!entry) {</code>
+<code>    entry = {</code>
+<code>      ...(LLM_TARGETS[llmName] || {}),</code>
+<code>      tabId: isValidTabId(tabId) ? tabId : null,</code>
+<code>      status: 'RECOVERY_PING',</code>
+<code>      answer: null,</code>
+<code>      answerHtml: '',</code>
+<code>      logs: [],</code>
+<code>      manualRecovery: {</code>
+<code>        attempt: 0,</code>
+<code>        strategyIndex: 0,</code>
+<code>        failedStrategyIds: [],</code>
+<code>        failedSelectors: [],</code>
+<code>        candidates: [],</code>
+<code>        startedAt: Date.now(),</code>
+<code>        reason</code>
+<code>      }</code>
+<code>    };</code>
+<code>    jobState.llms[llmName] = entry;</code>
+<code>  } else {</code>
+<code>    if (isValidTabId(tabId)) entry.tabId = tabId;</code>
+<code>    entry.manualRecovery = entry.manualRecovery || {</code>
+<code>      attempt: 0,</code>
+<code>      strategyIndex: 0,</code>
+<code>      failedStrategyIds: [],</code>
+<code>      failedSelectors: [],</code>
+<code>      candidates: []</code>
+<code>    };</code>
+<code>  }</code>
+<code>  if (!jobState.session) {</code>
+<code>    jobState.session = {</code>
+<code>      startTime: Date.now(),</code>
+<code>      totalModels: Object.keys(jobState.llms).length,</code>
+<code>      completed: 0,</code>
+<code>      failed: 0,</code>
+<code>      recoveryOnly: true</code>
+<code>    };</code>
+<code>  }</code>
+<code>  saveJobState(jobState);</code>
+<code>  return entry;</code>
+<code>}</code></pre><p>
+Вставить после определения <code>tabId</code>
+и до <code>extendPingWindowForLLM</code> /
+<code>sendPassiveMessageWithRetries</code>.</p>
+<hr/>
+
+<h1 class="western">2. Пункт 2 Claude — направление
+верное, реализация слишком простая</h1>
+<h2>Что верно</h2>
+<p>Идея правильная:</p>
+<pre style="margin-bottom: 0.5cm"><code>повторный клик = следующая попытка извлечения</code></pre><p>
+И да, background должен передавать в content
+script metadata:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>meta: {</code>
+<code>  source: 'manual_ping',</code>
+<code>  selectorAttempt,</code>
+<code>  skipSelectors</code>
+<code>}</code></pre><p>
+Это хороший минимальный протокол.</p>
+<h2>Что надо изменить</h2>
+<h3>2.1. Не <code>Map</code>, а <code>jobState</code> /
+<code>chrome.storage.session</code></h3>
+<p>Claude предлагает:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>const selectorRotationState = new Map();</code></pre><p>
+Для MV3 это ненадёжно. Background service worker может
+быть выгружен; <code>Map</code> пропадёт. У вас
+уже есть <code>saveJobState()</code> через
+<code>CompressedStorage</code>, и <code>jobState</code> поднимается
+из storage при старте. 
+</p>
+<p>job-orchestrator</p>
+<p>Правильнее:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>jobState.llms[llmName].manualRecovery = {</code>
+<code>  attempt,</code>
+<code>  strategyIndex,</code>
+<code>  failedStrategyIds,</code>
+<code>  failedSelectors,</code>
+<code>  candidates,</code>
+<code>  lastSelectorUsed,</code>
+<code>  lastStrategyId</code>
+<code>};</code></pre><h3>
+2.2. Ротировать не selector, а strategy</h3>
+<p>Плохой вариант:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>failedSelectors: ['.markdown']</code></pre><p>
+Почему плохо:</p>
+<ul>
+	<li><p><code>.markdown</code> может быть правильным
+	selector, но неправильной была стратегия
+	выбора “последний markdown”;</p></li>
+	<li><p>один selector может вернуть много
+	candidates;</p></li>
+	<li><p>проблема может быть не в selector, а в
+	scoring: взяли самый длинный блок, а надо
+	было bottom-most assistant block.</p></li>
+</ul>
+<p>Лучше:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>failedStrategyIds: [</code>
+<code>  'primary_adapter',</code>
+<code>  'last_assistant_role',</code>
+<code>  'last_markdown_visible',</code>
+<code>  'bottom_large_block',</code>
+<code>  'longest_assistant_block'</code>
+<code>]</code></pre><p>
+<code>selectorUsed</code> тоже сохранять, но как
+diagnostic metadata.</p>
+<hr/>
+
+<h1 class="western">3. Уточнённый протокол</h1>
+<h2>Background → content script</h2>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>sendPassiveMessageWithRetries(tabId, llmName, {</code>
+<code>  action: 'getResponses',</code>
+<code>  meta: {</code>
+<code>    source: 'manual_ping',</code>
+<code>    manualRecovery: true,</code>
+<code>    selectorAttempt: recovery.attempt,</code>
+<code>    strategyIndex: recovery.strategyIndex,</code>
+<code>    strategyId: strategy.id,</code>
+<code>    skipStrategyIds: recovery.failedStrategyIds,</code>
+<code>    skipSelectors: recovery.failedSelectors</code>
+<code>  }</code>
+<code>});</code></pre><p>
+<code>sendPassiveMessageWithRetries</code> уже есть и умеет
+проверять вкладку через <code>chrome.tabs.get</code>,
+отправлять сообщение, retry-ить <code>Could not
+establish connection</code> и вызывать <code>onSuccess/onError</code>.
+</p>
+<p>dispatch-coordinator</p>
+<h2>Content script → background</h2>
+<p>Content script должен вернуть не только
+текст, но и metadata:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>{</code>
+<code>  status: 'success',</code>
+<code>  text,</code>
+<code>  html,</code>
+<code>  selectorUsed,</code>
+<code>  strategyId,</code>
+<code>  strategyIndex,</code>
+<code>  candidateCount,</code>
+<code>  textHash,</code>
+<code>  confidence,</code>
+<code>  source: 'manual_selector_recovery'</code>
+<code>}</code></pre><p>
+А при отправке <code>LLM_RESPONSE</code>:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>chrome.runtime.sendMessage({</code>
+<code>  type: 'LLM_RESPONSE',</code>
+<code>  llmName: MODEL,</code>
+<code>  answer: payload.text,</code>
+<code>  answerHtml: payload.html,</code>
+<code>  meta: {</code>
+<code>    ...message.meta,</code>
+<code>    manualRecovery: true,</code>
+<code>    strategyId,</code>
+<code>    selectorUsed,</code>
+<code>    candidateCount,</code>
+<code>    textHash</code>
+<code>  }</code>
+<code>});</code></pre>
+<hr/>
+
+<h1 class="western">4. Как обновлять failed selectors</h1>
+<p>Claude пишет:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>// Когда приходит ответ — сохранить selectorUsed</code>
+<code>// При следующем нажатии кнопки — добавить его в failedSelectors</code></pre><p>
+Я бы изменил:</p>
+<pre><code>Не считать предыдущий selector failed автоматически при получении ответа.</code>
+<code>Считать его rejected только если пользователь нажал Try next / Wrong answer.</code></pre><p>
+То есть нужны две разные кнопки/состояния:</p>
+<pre><code>Recover answer</code>
+<code>Try next selector</code>
+<code>Accept recovered answer</code></pre><p>
+Если пользователь нажал <code>Try next selector</code>,
+тогда:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>function markLastManualCandidateRejected(llmName) {</code>
+<code>  const entry = jobState?.llms?.[llmName];</code>
+<code>  const recovery = entry?.manualRecovery;</code>
+<code>  const last = recovery?.candidates?.at(-1);</code>
+<code>  if (!last) return;</code>
+<code>  if (last.strategyId &amp;&amp; !recovery.failedStrategyIds.includes(last.strategyId)) {</code>
+<code>    recovery.failedStrategyIds.push(last.strategyId);</code>
+<code>  }</code>
+<code>  if (last.selectorUsed &amp;&amp; !recovery.failedSelectors.includes(last.selectorUsed)) {</code>
+<code>    recovery.failedSelectors.push(last.selectorUsed);</code>
+<code>  }</code>
+<code>  recovery.strategyIndex += 1;</code>
+<code>  recovery.attempt += 1;</code>
+<code>  saveJobState(jobState);</code>
+<code>}</code></pre>
+<hr/>
+
+<h1 class="western">5. Минимальный рабочий вариант</h1>
+<p>Если делать быстро, я бы взял предложение
+Claude, но в такой редакции:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>function getManualRecoveryState(llmName) {</code>
+<code>  const entry = jobState?.llms?.[llmName];</code>
+<code>  if (!entry) return null;</code>
+<code>  entry.manualRecovery = entry.manualRecovery || {</code>
+<code>    attempt: 0,</code>
+<code>    strategyIndex: 0,</code>
+<code>    failedStrategyIds: [],</code>
+<code>    failedSelectors: [],</code>
+<code>    candidates: []</code>
+<code>  };</code>
+<code>  return entry.manualRecovery;</code>
+<code>}</code></pre><p>
+В <code>handleManualResponsePing</code>:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>async function handleManualResponsePing(llmName, options = {}) {</code>
+<code>  // existing logic: resolve tabId or find fallback tab</code>
+<code>  const entry = ensureRecoveryModelEntry(llmName, tabId, 'manual_ping');</code>
+<code>  const recovery = getManualRecoveryState(llmName);</code>
+<code>  if (options.advanceSelector === true) {</code>
+<code>    const last = recovery.candidates.at(-1);</code>
+<code>    if (last?.strategyId) {</code>
+<code>      recovery.failedStrategyIds.push(last.strategyId);</code>
+<code>    }</code>
+<code>    if (last?.selectorUsed) {</code>
+<code>      recovery.failedSelectors.push(last.selectorUsed);</code>
+<code>    }</code>
+<code>    recovery.strategyIndex += 1;</code>
+<code>    recovery.attempt += 1;</code>
+<code>  }</code>
+<code>  const strategy = getManualExtractionStrategy(llmName, recovery.strategyIndex);</code>
+<code>  if (!strategy) {</code>
+<code>    return {</code>
+<code>      status: 'manual_ping_exhausted',</code>
+<code>      error: 'All selector strategies exhausted',</code>
+<code>      attempted: recovery.strategyIndex</code>
+<code>    };</code>
+<code>  }</code>
+<code>  extendPingWindowForLLM(llmName, MANUAL_PING_WINDOW_MS);</code>
+<code>  sendPassiveMessageWithRetries(tabId, llmName, {</code>
+<code>    action: 'getResponses',</code>
+<code>    meta: {</code>
+<code>      source: 'manual_ping',</code>
+<code>      manualRecovery: true,</code>
+<code>      strategyId: strategy.id,</code>
+<code>      strategyIndex: recovery.strategyIndex,</code>
+<code>      skipStrategyIds: recovery.failedStrategyIds,</code>
+<code>      skipSelectors: recovery.failedSelectors</code>
+<code>    }</code>
+<code>  }, {</code>
+<code>    onSuccess: (response) =&gt; {</code>
+<code>      const selectorUsed = response?.selectorUsed || response?.meta?.selectorUsed || null;</code>
+<code>      const text = response?.text || response?.answer || '';</code>
+<code>      const textHash = text ? simpleHash(text) : null;</code>
+<code>      recovery.candidates.push({</code>
+<code>        strategyId: strategy.id,</code>
+<code>        strategyIndex: recovery.strategyIndex,</code>
+<code>        selectorUsed,</code>
+<code>        textHash,</code>
+<code>        length: text.length,</code>
+<code>        collectedAt: Date.now()</code>
+<code>      });</code>
+<code>      saveJobState(jobState);</code>
+<code>      broadcastDiagnostic(llmName, {</code>
+<code>        type: 'PING',</code>
+<code>        label: 'Manual recovery response collected',</code>
+<code>        details: `strategy=${strategy.id} selector=${selectorUsed || 'n/a'}`,</code>
+<code>        level: 'success'</code>
+<code>      });</code>
+<code>    },</code>
+<code>    onError: (errMsg) =&gt; {</code>
+<code>      broadcastDiagnostic(llmName, {</code>
+<code>        type: 'PING_ERROR',</code>
+<code>        label: 'MANUAL_RECOVERY_ERROR',</code>
+<code>        details: errMsg,</code>
+<code>        level: 'error'</code>
+<code>      });</code>
+<code>      chrome.runtime.sendMessage({</code>
+<code>        type: 'MANUAL_PING_RESULT',</code>
+<code>        llmName,</code>
+<code>        status: 'failed',</code>
+<code>        error: errMsg</code>
+<code>      });</code>
+<code>    }</code>
+<code>  });</code>
+<code>  saveJobState(jobState);</code>
+<code>  return {</code>
+<code>    status: 'manual_ping_sent',</code>
+<code>    strategyId: strategy.id,</code>
+<code>    strategyIndex: recovery.strategyIndex</code>
+<code>  };</code>
+<code>}</code></pre>
+<hr/>
+
+<h1 class="western">6. Что ещё нужно добавить в
+message-router</h1>
+<p>Сейчас <code>MANUAL_RESPONSE_PING</code> просто
+вызывает:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>handleManualResponsePing(message.llmName)</code></pre><p>
+message-router</p>
+<p>Нужно расширить:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>case 'MANUAL_RESPONSE_PING': {</code>
+<code>  (async () =&gt; {</code>
+<code>    try {</code>
+<code>      const result = await handleManualResponsePing(message.llmName, {</code>
+<code>        advanceSelector: message.advanceSelector === true,</code>
+<code>        reason: message.reason || 'manual_button'</code>
+<code>      });</code>
+<code>      sendResponse(result);</code>
+<code>    } catch (err) {</code>
+<code>      sendResponse({</code>
+<code>        status: 'manual_ping_failed',</code>
+<code>        error: err?.message || 'Ping error'</code>
+<code>      });</code>
+<code>    }</code>
+<code>  })();</code>
+<code>  return true;</code>
+<code>}</code></pre><p>
+UI:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>chrome.runtime.sendMessage({</code>
+<code>  type: 'MANUAL_RESPONSE_PING',</code>
+<code>  llmName,</code>
+<code>  advanceSelector: true</code>
+<code>});</code></pre>
+<hr/>
+
+<h1 class="western">7. Что не хватает в мнении
+Claude</h1>
+<h2>7.1. Не описан inline fallback</h2>
+<p>Если content script умер, <code>getResponses</code> не
+дойдёт. <code>sendPassiveMessageWithRetries</code> сейчас
+retry-ит отправку, но не делает <code>executeScript</code>
+read-only extractor. 
+</p>
+<p>dispatch-coordinator</p>
+<p>Для настоящего manual recovery лучше добавить
+fallback:</p>
+<pre style="margin-bottom: 0.5cm"><code>sendPassiveMessageWithRetries failed → chrome.scripting.executeScript(strategy runner)</code></pre><p>
+Иначе ротация селекторов поможет только
+если content script жив.</p>
+<h2>7.2. Не описана защита от terminal status</h2>
+<p>Если модель уже <code>SUCCESS</code>, но
+пользователь жмёт “Try next selector”, не надо
+блокировать по terminal status. Это ручная
+override-операция. Но при этом ответ надо
+помечать:</p>
+<pre style="margin-bottom: 0.5cm">JavaScript
+<code>status: 'MANUAL_RECOVERED'</code>
+<code>manualOverride: true</code></pre><h2>
+7.3. Не описан UX принятия/отклонения</h2>
+<p>Без явного <code>Accept</code> / <code>Try next</code> вы
+не знаете, предыдущий selector был плохой
+или хороший.</p>
+<hr/>
+
+<h1 class="western">8. Финальный вариант решения</h1>
+<p>Я бы сформулировал для Codex так:</p>
+<pre><code>Enhance existing MANUAL_RESPONSE_PING into Manual Selector Recovery.</code>
+<code>1. Keep handleManualResponsePing as the entry point.</code>
+<code>2. Before sending getResponses, ensure a minimal jobState.llms[llmName] entry exists.</code>
+<code>3. Store recovery state in jobState.llms[llmName].manualRecovery, not in a Map.</code>
+<code>4. On normal button click, try current strategy.</code>
+<code>5. On “Try next selector”, mark the last candidate rejected and advance strategyIndex.</code>
+<code>6. Pass manualRecovery metadata into getResponses:</code>
+<code>   - strategyId</code>
+<code>   - strategyIndex</code>
+<code>   - skipStrategyIds</code>
+<code>   - skipSelectors</code>
+<code>7. Content script must use that metadata to select an alternative extraction strategy.</code>
+<code>8. Content script must return selectorUsed, strategyId, candidateCount, textHash.</code>
+<code>9. Background saves candidate metadata.</code>
+<code>10. If content script is unavailable, fallback to read-only chrome.scripting.executeScript inline extractor.</code>
+<code>11. Stop when strategies are exhausted.</code>
+<code>12. Never reload tab.</code>
+<code>13. Never resend prompt.</code>
+<code>14. Never call dispatchPromptToTab from manual recovery.</code></pre><h2>
+Итог</h2>
+<p>Claude дал <strong>правильный практический
+вектор</strong>: не строить новую большую
+систему, а доработать уже существующий
+<code>handleManualResponsePing</code>.</p>
+<p>Но финальная версия должна быть жёстче:</p>
+<pre><code>Да — восстановить минимальный jobState entry перед ping.</code>
+<code>Да — передавать selectorAttempt/skipSelectors.</code>
+<code>Нет — не хранить rotation в Map.</code>
+<code>Нет — не ограничиваться сырыми selectors.</code>
+<code>Да — хранить manualRecovery в jobState.</code>
+<code>Да — добавить inline executeScript fallback.</code>
+<code>Да — различать Recover / Try next / Accept.</code></pre><p>
+Это будет наиболее совместимо с вашим
+текущим кодом и не сломает dispatch pipeline.</p>
+<h2>Gemini</h2>
+<p class="response-meta">2026-05-29 23-54
+https://gemini.google.com/app/f63b8f7ff0d8c25f</p>
+<p>Я ознакомился с содержимым репозитория
+<b>AlGold777/2.73.63</b>.</p>
+<p>Судя по структуре файлов и директорий,
+это исходный код <b>браузерного расширения</b>
+(на это указывают файлы <code>manifest.json</code>,
+<code>popup.html</code>, <code>popup.js</code>, а также папки
+<code>background</code> и <code>content-scripts</code>). Проект
+написан преимущественно на JavaScript
+(91.3%).</p>
+<p>Архитектура проекта явно указывает
+на то, что это продвинутый инструмент
+для <b>парсинга веб-страниц, автоматизации
+и взаимодействия с DOM-элементами</b>, при
+этом, скорее всего, с использованием
+искусственного интеллекта.</p>
+<p>Вот основные блоки и компоненты,
+которые можно выделить в репозитории:</p>
+<ol>
+	<li><p><b>Работа с селекторами (DOM-парсинг):</b></p>
+	<ul>
+		<li><p>В проекте есть целый ряд файлов,
+		отвечающих за поиск и выборку элементов
+		на странице: <code>selector-manager.js</code>,
+		<code>selector-manager-strategies.js</code>, <code>selectors-config.js</code>,
+		<code>selectors-override.json</code>.</p></li>
+		<li><p>Папки <code>SelectorPicker</code> и <code>selectors</code>.</p></li>
+		<li><p>Интересный файл — <code>Technical
+		Specification for Codex SelectorResolverV2.txt</code>, который
+		указывает на некую систему второй
+		версии для разрешения (нахождения)
+		нужных селекторов.</p></li>
+	</ul>
+	<li><p><b>Интеграция с ИИ (GPT/Codex):</b></p>
+	<ul>
+		<li><p>Папка <code>sidebar_gpt</code> и файл <code>prompts.json</code>
+		говорят о том, что расширение имеет
+		боковую панель с чатом или ассистентом,
+		который использует промпты для анализа
+		контента.</p></li>
+		<li><p>Папка <code>system_templates</code> может
+		содержать системные инструкции для
+		языковой модели.</p></li>
+	</ul>
+	<li><p><b>Эмуляция поведения пользователя:</b></p>
+	<ul>
+		<li><p>Файлы <code>humanoid.js</code> и <code>humanoid.css</code>,
+		а также <code>scroll-toolkit.js</code> намекают на
+		попытки обойти антифрод-системы или
+		сделать автоматизированные действия
+		(скроллинг, клики) максимально похожими
+		на действия живого человека.</p></li>
+	</ul>
+	<li><p><b>Отображение результатов и UI:</b></p>
+	<ul>
+		<li><p><code>pipeline_panel.html</code>, <code>result_new.html</code>,
+		<code>results.js</code>, <code>results-devtools.js</code> —
+		страницы и скрипты для вывода собранных
+		или обработанных данных.</p></li>
+	</ul>
+	<li><p><b>Стандартная инфраструктура
+	разработки:</b></p>
+	<ul>
+		<li><p>Тесты: директория <code>tests/</code> и файл
+		<code>jest.config.js</code>.</p></li>
+		<li><p>Зависимости и сборка: <code>package.json</code>,
+		<code>package-lock.json</code>, директория <code>dist/</code>.</p></li>
+		<li><p>Логирование: <code>logs.json</code>, <code>All
+		Logs 20260529_21-48.md</code>.</p></li>
+	</ul>
+</ol>
+<p>Есть ли какой-то конкретный файл или
+модуль в этом репозитории (например,
+логика работы селекторов, промпты или
+<code>humanoid.js</code>), код которого вы хотели
+бы разобрать подробнее? Я могу прочитать
+его содержимое и объяснить, как он
+работает.</p>
+<h2>Claude</h2>
+<p class="response-meta">2026-05-29 23-54
+https://claude.ai/chat/8fef56ec-9583-4c5d-b3f5-d9537a9f6928</p>
+<p>Логи детально прочитаны. Вот анализ:</p>
+<hr/>
+
+<h2>Причины жёлтого статуса GPT и Gemini</h2>
+<h3>🟡 GPT — основная причина: полный провал
+всех DOM-селекторов</h3>
+<p>Из <code>SELECTOR_STATS</code> видно, что <strong>абсолютно
+все</strong> селекторы для GPT отработали с
+hit=0%:</p>
+<pre><code>stopButton:        button[data-testid=&quot;stop-button&quot;]       hit=0 miss=6 (0%)</code>
+<code>stopButton:        button[data-testid*=&quot;stop&quot;]             hit=0 miss=6 (0%)</code>
+<code>stopButton:        button[aria-label*=&quot;Stop&quot; i]            hit=0 miss=6 (0%)</code>
+<code>regenerateButton:  button[data-testid=&quot;regenerate-button&quot;] hit=0 miss=6 (0%)</code>
+<code>regenerateButton:  button[aria-label*=&quot;Regenerate&quot; i]      hit=0 miss=6 (0%)</code>
+<code>regenerateButton:  button[data-testid*=&quot;send-button&quot;]...   hit=0 miss=6 (0%)</code>
+<code>... и т.д.</code></pre><p>
+<strong>Следствие</strong>: pipeline не мог отслеживать
+состояние генерации через DOM. Ответ в
+итоге был получен только через
+<strong><code>manual_ping_late_collect</code></strong> — аварийный
+путь сбора. R4 занял <strong>170 секунд</strong>
+— почти 3 минуты, потребовалось несколько
+ручных пингов.</p>
+<p><strong>Диагноз</strong>: ChatGPT обновил разметку
+интерфейса — <code>data-testid</code> атрибуты у
+кнопок изменились или исчезли. Селекторы
+в конфиге устарели.</p>
+<hr/>
+
+<h3>🟡 Gemini — основная причина: ошибки
+passive ping + сбор из snapshot-кеша</h3>
+<p>В логах отчётливо видна цепочка:</p>
+<pre><code>LATE_COLLECT_DECISION_TRACE: passive_ping_error:adaptive_round2:partial_from_snapshot:snapshot_cache</code>
+<code>LATE_COLLECT_DECISION_TRACE: passive_ping_error:finalization_deferred_generation_active:...</code>
+<code>LATE_COLLECT_DECISION_TRACE: passive_ping_error:adaptive_round2:success:inline_executeScript</code></pre>
+<ul>
+	<li><p style="margin-bottom: 0cm"><strong><code>passive_ping_error</code></strong>
+	— пассивные пинги (основной механизм
+	сбора) постоянно падали с ошибкой 
+	</p></li>
+	<li><p style="margin-bottom: 0cm"><strong><code>finalization_deferred_generation_active</code></strong>
+	— финализация откладывалась, потому
+	что Gemini ещё генерировал в момент пинга
+		</p></li>
+	<li><p><strong><code>partial_from_snapshot:snapshot_cache</code></strong>
+	— ответ был взят из кеша снапшота, а не
+	из живого DOM 
+	</p></li>
+</ul>
+<p><strong>Интересный факт</strong>: R4 у Gemini
+завершился в <code>21:46:17</code>, а R3 — в <code>21:46:19</code>
+(R4 <strong>раньше</strong> R3). Это значит
+финализация прошла через ранний exit по
+lifecycle-детектору, а не через обычный визит
+коллекции.</p>
+<p><strong>Диагноз</strong>: Gemini не даёт stable
+DOM-доступ в момент активной генерации,
+пинги перехватываются ошибкой. Ответ
+получен, но через fallback-цепочку.</p>
+<hr/>
+
+<h2>Итоговая таблица</h2>
+<table cellpadding="2" cellspacing="2">
+	<thead>
+		<tr>
+			<th style="border: none; padding: 0cm"><p>Платформа</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>Причина жёлтого</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>Механизм сбора
+				ответа</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>Время R4</p>
+			</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td style="border: none; padding: 0cm"><p><strong>GPT</strong></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>Все DOM-селекторы
+				0% попаданий — интерфейс обновился</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>manual_ping_late_collect</code>
+				(аварийный)</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>170 сек</p>
+			</td>
+		</tr>
+		<tr>
+			<td style="border: none; padding: 0cm"><p><strong>Gemini</strong></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>passive_ping_error</code>
+				+ ответ из snapshot-кеша</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>inline_executeScript</code>
+				fallback</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>75 сек</p>
+			</td>
+		</tr>
+	</tbody>
+</table>
+<hr/>
+
+<h2>Что делать</h2>
+<p><strong>Для GPT</strong>: обновить селекторы в
+<code>selectors-config.js</code> / <code>selectors-override.json</code>
+для <code>stopButton</code> и <code>regenerateButton</code>.
+Нужно инспектировать актуальный DOM
+ChatGPT и найти новые <code>data-testid</code> или
+<code>aria-label</code> у кнопок.</p>
+<p><strong>Для Gemini</strong>: разобраться почему
+<code>passive_ping</code> падает с ошибкой. Вероятно,
+Gemini изменил политику доступа к контексту
+страницы или структуру shadow DOM. Возможно,
+стоит увеличить задержку пинга или
+перейти на <code>snapshot</code>-first стратегию
+для Gemini.Диагностировал причины жёлтого
+статуса через анализ логов</p>
+<p>Логи детально прочитаны. Вот анализ:</p>
+<hr/>
+
+<h3>Причины жёлтого статуса GPT и Gemini</h3>
+<h4>🟡 GPT — основная причина: полный провал
+всех DOM-селекторов</h4>
+<p>Из <code>SELECTOR_STATS</code> видно, что <strong>абсолютно
+все</strong> селекторы для GPT отработали с
+hit=0%:</p>
+<pre style="background: transparent"><code><font color="#14181f"><font face="var font-mono"><span style="background: transparent">stopButton:        button[data-testid=&quot;stop-button&quot;]       hit=0 miss=6 (0%)</span></font></font></code>
+<code><font color="#14181f"><font face="var font-mono"><span style="background: transparent">stopButton:        button[data-testid*=&quot;stop&quot;]             hit=0 miss=6 (0%)</span></font></font></code>
+<code><font color="#14181f"><font face="var font-mono"><span style="background: transparent">stopButton:        button[aria-label*=&quot;Stop&quot; i]            hit=0 miss=6 (0%)</span></font></font></code>
+<code><font color="#14181f"><font face="var font-mono"><span style="background: transparent">regenerateButton:  button[data-testid=&quot;regenerate-button&quot;] hit=0 miss=6 (0%)</span></font></font></code>
+<code><font color="#14181f"><font face="var font-mono"><span style="background: transparent">regenerateButton:  button[aria-label*=&quot;Regenerate&quot; i]      hit=0 miss=6 (0%)</span></font></font></code>
+<code><font color="#14181f"><font face="var font-mono"><span style="background: transparent">regenerateButton:  button[data-testid*=&quot;send-button&quot;]...   hit=0 miss=6 (0%)</span></font></font></code>
+<code><font color="#14181f"><font face="var font-mono"><span style="background: transparent">... и т.д.</span></font></font></code></pre><p>
+<strong>Следствие</strong>: pipeline не мог отслеживать
+состояние генерации через DOM. Ответ в
+итоге был получен только через
+<strong><code>manual_ping_late_collect</code></strong> — аварийный
+путь сбора. R4 занял <strong>170 секунд</strong>
+— почти 3 минуты, потребовалось несколько
+ручных пингов.</p>
+<p><strong>Диагноз</strong>: ChatGPT обновил разметку
+интерфейса — <code>data-testid</code> атрибуты у
+кнопок изменились или исчезли. Селекторы
+в конфиге устарели.</p>
+<hr/>
+
+<h4>🟡 Gemini — основная причина: ошибки
+passive ping + сбор из snapshot-кеша</h4>
+<p>В логах отчётливо видна цепочка:</p>
+<pre style="background: transparent"><code><font color="#14181f"><font face="var font-mono"><span style="background: transparent">LATE_COLLECT_DECISION_TRACE: passive_ping_error:adaptive_round2:partial_from_snapshot:snapshot_cache</span></font></font></code>
+<code><font color="#14181f"><font face="var font-mono"><span style="background: transparent">LATE_COLLECT_DECISION_TRACE: passive_ping_error:finalization_deferred_generation_active:...</span></font></font></code>
+<code><font color="#14181f"><font face="var font-mono"><span style="background: transparent">LATE_COLLECT_DECISION_TRACE: passive_ping_error:adaptive_round2:success:inline_executeScript</span></font></font></code></pre>
+<ul>
+	<li><p style="margin-bottom: 0cm"><strong><code>passive_ping_error</code></strong>
+	— пассивные пинги (основной механизм
+	сбора) постоянно падали с ошибкой 
+	</p></li>
+	<li><p style="margin-bottom: 0cm"><strong><code>finalization_deferred_generation_active</code></strong>
+	— финализация откладывалась, потому
+	что Gemini ещё генерировал в момент пинга
+		</p></li>
+	<li><p><strong><code>partial_from_snapshot:snapshot_cache</code></strong>
+	— ответ был взят из кеша снапшота, а не
+	из живого DOM 
+	</p></li>
+</ul>
+<p><strong>Интересный факт</strong>: R4 у Gemini
+завершился в <code>21:46:17</code>, а R3 — в <code>21:46:19</code>
+(R4 <strong>раньше</strong> R3). Это значит
+финализация прошла через ранний exit по
+lifecycle-детектору, а не через обычный визит
+коллекции.</p>
+<p><strong>Диагноз</strong>: Gemini не даёт stable
+DOM-доступ в момент активной генерации,
+пинги перехватываются ошибкой. Ответ
+получен, но через fallback-цепочку.</p>
+<hr/>
+
+<h3>Итоговая таблица</h3>
+<table cellpadding="2" cellspacing="2">
+	<thead>
+		<tr>
+			<th style="border: none; padding: 0cm"><p>Платформа</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>Причина жёлтого</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>Механизм сбора
+				ответа</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>Время R4</p>
+			</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td style="border: none; padding: 0cm"><p><strong>GPT</strong></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>Все DOM-селекторы
+				0% попаданий — интерфейс обновился</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>manual_ping_late_collect</code>
+				(аварийный)</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>170 сек</p>
+			</td>
+		</tr>
+		<tr>
+			<td style="border: none; padding: 0cm"><p><strong>Gemini</strong></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>passive_ping_error</code>
+				+ ответ из snapshot-кеша</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>inline_executeScript</code>
+				fallback</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>75 сек</p>
+			</td>
+		</tr>
+	</tbody>
+</table>
+<hr/>
+
+<h3>Что делать</h3>
+<p><strong>Для GPT</strong>: обновить селекторы в
+<code>selectors-config.js</code> / <code>selectors-override.json</code>
+для <code>stopButton</code> и <code>regenerateButton</code>.
+Нужно инспектировать актуальный DOM
+ChatGPT и найти новые <code>data-testid</code> или
+<code>aria-label</code> у кнопок.</p>
+<p><strong>Для Gemini</strong>: разобраться почему
+<code>passive_ping</code> падает с ошибкой. Вероятно,
+Gemini изменил политику доступа к контексту
+страницы или структуру shadow DOM. Возможно,
+стоит увеличить задержку пинга или
+перейти на <code>snapshot</code>-first стратегию
+для Gemini.</p>
+<h2>Grok</h2>
+<p class="response-meta">2026-05-29 23-54
+https://grok.com/c/65b20307-6421-4839-8f13-22fc06971a58?rid=5ea19f34-9e52-4b74-9b9b-cb6a496c1655</p>
+<p style="margin-bottom: 0cm">**Анализ проблемы: Gemini
+и GPT имеют жёлтый статус, хотя ответы
+успешно получены и залогированы.**</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">### Что значит жёлтый
+статус в этом расширении</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">Жёлтый статус (warning)
+обычно означает **&quot;Ответ получен, но
+lifecycle detection не завершился полностью&quot;**
+или **&quot;Частичное/нестабильное
+подтверждение успеха&quot;**.</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">Зелёный = полный цикл
+(промпт отправлен → ответ полностью
+сгенерирован → элемент ответа уверенно
+найден → ready-state подтверждён).&nbsp;&nbsp;</p>
+<p style="margin-bottom: 0cm">Жёлтый = ответ есть, но
+один или несколько этапов детекции
+сработали неидеально.</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">### Основные вероятные
+причины (именно для Gemini + GPT)</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">1. **Проблемы с
+ResponseLifecycleDetector / SelectorResolverV2**</p>
+<p style="margin-bottom: 0cm">&nbsp; &nbsp;- Gemini и ChatGPT чаще
+всего обновляют свой UI. Селекторы для
+финального состояния ответа (streaming
+finished, stop button disappeared, specific class на контейнере
+и т.д.) могут срабатывать нестабильно.</p>
+<p style="margin-bottom: 0cm">&nbsp; &nbsp;- SelectorResolverV2
+пытается быть умным (fallback'ы, mutation
+observers, polling), но при быстром обновлении
+ответа или специфическом поведении
+модели (Gemini любит менять DOM очень
+агрессивно) детектор не ловит &quot;final
+state&quot;.</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">2. **Разница в поведении
+streaming**</p>
+<p style="margin-bottom: 0cm">&nbsp; &nbsp;- GPT-4o / Gemini часто
+продолжают &quot;думать&quot; или добавлять
+мелкие правки даже после основного
+ответа.</p>
+<p style="margin-bottom: 0cm">&nbsp; &nbsp;- Расширение
+может зафиксировать текст ответа рано
+(поэтому он успешно логируется), но **не
+дождаться** сигнала, что генерация 100%
+завершена (например, отсутствие курсора,
+исчезновение regenerate-кнопки, конкретный
+data-state).</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">3. **Humanoid / anti-detection
+влияние**</p>
+<p style="margin-bottom: 0cm">&nbsp; &nbsp;- Симуляция
+ввода/клика иногда вызывает race condition:
+расширение думает, что отправка прошла,
+но нативный UI моделей реагирует чуть
+иначе.</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">4. **Специфические
+селекторы для Gemini и GPT**</p>
+<p style="margin-bottom: 0cm">&nbsp; &nbsp;- Gemini имеет очень
+динамичный DOM (много shadow roots, частые
+className с хэшами).</p>
+<p style="margin-bottom: 0cm">&nbsp; &nbsp;- ChatGPT тоже начал
+сильнее запутывать селекторы в последних
+версиях.</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">### Рекомендации по
+диагностике и исправлению</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">**Сначала посмотри логи
+подробнее:**</p>
+<p style="margin-bottom: 0cm">- Ищи строки с `Lifecycle`,
+`Detector`, `finalState`, `timeout`, `mutation` для Gemini и GPT.</p>
+<p style="margin-bottom: 0cm">- Обрати внимание на
+разницу между временем получения текста
+и временем установки финального статуса.</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">**Что можно улучшить
+прямо сейчас:**</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">1. В
+`content-utils/ResponseLifecycleDetector` (или где он лежит)
+добавить более мягкие условия для yellow
+→ green перехода при наличии длинного
+ответа.</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">2. Обновить селекторы
+в папке `selectors/` конкретно для:</p>
+<p style="margin-bottom: 0cm">&nbsp; &nbsp;- `gemini`</p>
+<p style="margin-bottom: 0cm">&nbsp; &nbsp;- `chatgpt`</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">3. Добавить fallback: если
+текст ответа &gt; определённой длины и
+нет активного streaming-индикатора → считать
+зелёным.</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p style="margin-bottom: 0cm">Хочешь — я могу посмотреть
+конкретные файлы:</p>
+<p style="margin-bottom: 0cm">- `content-scripts/content-gemini.js`</p>
+<p style="margin-bottom: 0cm">- `content-scripts/content-chatgpt.js`</p>
+<p style="margin-bottom: 0cm">- Техническую спецификацию
+SelectorResolverV2</p>
+<p style="margin-bottom: 0cm">- Или последние логи
+(например, All Logs 20260529_21-48.md)</p>
+<p style="margin-bottom: 0cm"><br/>
+
+</p>
+<p>Скинь кусок лога по Gemini/GPT или скажи,
+какой файл открыть — разберём точнее.</p>
+<h2>Le Chat</h2>
+<p class="response-meta">2026-05-29 23-54
+https://chat.mistral.ai/chat/4285d1c4-5d0a-49b8-a708-a84014648083</p>
+<p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Чтобы
+проанализировать причины, по которым
+модели </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Gemini</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+и </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">GPT</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+имели жёлтый статус, несмотря на то, что
+ответы были успешно записаны в журналы,
+нужно учитывать несколько возможных
+факторов. Жёлтый статус обычно указывает
+на </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">предупреждение
+или частичный успех</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+(например, ответ получен, но что-то пошло
+не так на этапе обработки или интеграции).</span></span></span></span></font></font></span></font></span></span></p>
+<p style="letter-spacing: normal; margin-top: 0.53cm; margin-bottom: 0.26cm; line-height: 0.64cm; font-weight: normal; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; font-style: normal; font-variant: normal; background: #000000; text-decoration: none">
+<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><font color="#14110f"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="background: #000000">Вот
+возможные причины и направления для
+анализа:</span></font></font></font></span></p>
+<hr/>
+
+<h3 style="margin-top: 0cm; margin-bottom: 0cm; line-height: 0.74cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="4" style="font-size: 13pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">1.
+Проблемы с интеграцией API</span></b></span></span></font></font></span></font></span></strong></span></h3>
+<ul type="disc">
+	<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Ограничения
+	по квотам или ключам API</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="line-height: 0.64cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Возможно,
+		у моделей </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Gemini</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		или </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">GPT</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		истекли квоты на запросы, или
+		использовались некорректные API-ключи.
+		</span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+		<li><p style="line-height: 0.5cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Проверьте
+		файлы конфигурации (например, </span></span></span></span></font></font></span></font></span></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">config/</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">,
+		</span></span></span></span></font></font></span></font></span></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">prompts.json</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">,
+		</span></span></span></span></font></font></span></font></span></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">selectors-config.js</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">)
+		на наличие актуальных ключей API. </span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+	</ul>
+	<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Ошибки
+	при парсинге ответа</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="letter-spacing: normal; line-height: 0.64cm; font-weight: normal; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; margin-top: 0.21cm; margin-bottom: 0.21cm; font-style: normal; font-variant: normal; background: #000000; text-decoration: none">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><font color="#14110f"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="background: #000000">Если
+		ответ от модели был получен, но не
+		корректно обработан (например, неверный
+		формат JSON или HTML), это могло вызвать
+		жёлтый статус. </span></font></font></font></span>
+		</p></li>
+		<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Посмотрите
+		в </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">All
+		Logs 20260529_23-44.md</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		— есть ли там ошибки парсинга или
+		предупреждения о несоответствии
+		форматов. </span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+	</ul>
+</ul>
+<hr/>
+
+<h3 style="margin-top: 0cm; margin-bottom: 0cm; line-height: 0.74cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="4" style="font-size: 13pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">2.
+Проблемы с селекторами или контентом</span></b></span></span></font></font></span></font></span></strong></span></h3>
+<ul type="disc">
+	<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Несоответствие
+	селекторов</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="letter-spacing: normal; line-height: 0.64cm; font-weight: normal; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; margin-top: 0.21cm; margin-bottom: 0.21cm; font-style: normal; font-variant: normal; background: #000000; text-decoration: none">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><font color="#14110f"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="background: #000000">Если
+		селекторы для вставки ответов в
+		интерфейс расширения не совпадают с
+		текущей структурой страницы, это могло
+		вызвать частичный успех (жёлтый статус).
+		</span></font></font></font></span>
+		</p></li>
+		<li><p style="line-height: 0.64cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Проверьте
+		файлы в папках </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">selectors/</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">,
+		</span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">SelectorPicker/</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">,
+		и </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">selectors-config.js</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		— актуальны ли они для текущей версии
+		страницы. </span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+	</ul>
+	<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Конфликты
+	с другими скриптами</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="letter-spacing: normal; line-height: 0.64cm; font-weight: normal; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; margin-top: 0.21cm; margin-bottom: 0.21cm; font-style: normal; font-variant: normal; background: #000000; text-decoration: none">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><font color="#14110f"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="background: #000000">Возможно,
+		другие скрипты на странице мешали
+		корректной вставке ответов. </span></font></font></font></span>
+		</p></li>
+		<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Проверьте
+		</span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">content-scripts/</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		и </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">content-utils/</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		на наличие конфликтов. </span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+	</ul>
+</ul>
+<hr/>
+
+<h3 style="margin-top: 0cm; margin-bottom: 0cm; line-height: 0.74cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="4" style="font-size: 13pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">3.
+Ошибки в логах</span></b></span></span></font></font></span></font></span></strong></span></h3>
+<ul type="disc">
+	<li><p style="margin-bottom: 0cm; line-height: 0.5cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Проверьте
+	файл </span></b></span></span></font></font></span></font></span></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><strong><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #27272a">All
+	Logs 20260529_23-44.md</span></b></span></span></font></font></span></font></span></code></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="line-height: 0.5cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Ищите
+		строки с ключевыми словами: </span></span></span></span></font></font></span></font></span></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">warning</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">,
+		</span></span></span></span></font></font></span></font></span></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">error</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">,
+		</span></span></span></span></font></font></span></font></span></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">failed</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">,
+		</span></span></span></span></font></font></span></font></span></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">partial</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">,
+		</span></span></span></span></font></font></span></font></span></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">timeout</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">,
+		</span></span></span></span></font></font></span></font></span></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">rate
+		limit</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">,
+		</span></span></span></span></font></font></span></font></span></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">invalid
+		format</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">.
+		</span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+		<li><p style="line-height: 0.64cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Обратите
+		внимание на временные метки — совпадают
+		ли они с моментом выполнения запросов
+		к </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Gemini</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		и </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">GPT</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">.
+		</span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+	</ul>
+	<li><p style="margin-bottom: 0cm; line-height: 0.5cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Проверьте
+	</span></b></span></span></font></font></span></font></span></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><strong><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #27272a">logs.json</span></b></span></span></font></font></span></font></span></code></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="letter-spacing: normal; line-height: 0.64cm; font-weight: normal; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; margin-top: 0.21cm; margin-bottom: 0.21cm; font-style: normal; font-variant: normal; background: #000000; text-decoration: none">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><font color="#14110f"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="background: #000000">Возможно,
+		там есть более детализированные ошибки,
+		которые не попали в markdown-логи. </span></font></font></font></span>
+		</p></li>
+	</ul>
+</ul>
+<hr/>
+
+<h3 style="margin-top: 0cm; margin-bottom: 0cm; line-height: 0.74cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="4" style="font-size: 13pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">4.
+Проблемы с сетью или таймаутами</span></b></span></span></font></font></span></font></span></strong></span></h3>
+<ul type="disc">
+	<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Задержки
+	в ответе от API</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="letter-spacing: normal; line-height: 0.64cm; font-weight: normal; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; margin-top: 0.21cm; margin-bottom: 0.21cm; font-style: normal; font-variant: normal; background: #000000; text-decoration: none">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><font color="#14110f"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="background: #000000">Если
+		ответ от модели пришёл с задержкой,
+		расширение могло пометить его как
+		&quot;частично успешный&quot; (жёлтый
+		статус). </span></font></font></font></span>
+		</p></li>
+		<li><p style="line-height: 0.5cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Проверьте,
+		есть ли в логах упоминания о таймаутах
+		(</span></span></span></span></font></font></span></font></span></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">timeout</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">)
+		или медленных ответах. </span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+	</ul>
+	<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Проблемы
+	с подключением</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Возможно,
+		были кратковременные проблемы с
+		интернетом или доступами к API </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Gemini</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">/</span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">GPT</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">.
+		</span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+	</ul>
+</ul>
+<hr/>
+
+<h3 style="margin-top: 0cm; margin-bottom: 0cm; line-height: 0.74cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="4" style="font-size: 13pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">5.
+Логика обработки статусов в коде</span></b></span></span></font></font></span></font></span></strong></span></h3>
+<ul type="disc">
+	<li><p style="line-height: 0.5cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Проверьте
+	файлы </span></b></span></span></font></font></span></font></span></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><strong><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #27272a">results.js</span></b></span></span></font></font></span></font></span></code></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">,
+	</span></b></span></span></font></font></span></font></span></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><strong><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #27272a">results-devtools.js</span></b></span></span></font></font></span></font></span></code></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">,
+	</span></b></span></span></font></font></span></font></span></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><strong><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #27272a">results-shared.js</span></b></span></span></font></font></span></font></span></code></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:
+	</span></span></span></span></font></font></span></font></span></span>
+	</p>
+	<ul type="disc">
+		<li><p style="letter-spacing: normal; line-height: 0.64cm; font-weight: normal; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; margin-top: 0.21cm; margin-bottom: 0.21cm; font-style: normal; font-variant: normal; background: #000000; text-decoration: none">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><font color="#14110f"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="background: #000000">Ищите
+		логику, которая определяет статус
+		ответа (зелёный/жёлтый/красный). </span></font></font></font></span>
+		</p></li>
+		<li><p style="letter-spacing: normal; line-height: 0.64cm; font-weight: normal; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; margin-top: 0.11cm; margin-bottom: 0.21cm; font-style: normal; font-variant: normal; background: #000000; text-decoration: none">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><font color="#14110f"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="background: #000000">Возможно,
+		жёлтый статус задаётся при выполнении
+		определённых условий (например, если
+		ответ пустой, неполный или содержит
+		ошибки). </span></font></font></font></span>
+		</p></li>
+	</ul>
+</ul>
+<hr/>
+
+<h3 style="margin-top: 0cm; margin-bottom: 0cm; line-height: 0.74cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="4" style="font-size: 13pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">6.
+Проблемы с кэшированием</span></b></span></span></font></font></span></font></span></strong></span></h3>
+<ul type="disc">
+	<li><p style="line-height: 0.64cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Устаревшие
+	данные</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:
+	</span></span></span></span></font></font></span></font></span></span>
+	</p>
+	<ul type="disc">
+		<li><p style="letter-spacing: normal; line-height: 0.64cm; font-weight: normal; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; margin-top: 0.21cm; margin-bottom: 0.21cm; font-style: normal; font-variant: normal; background: #000000; text-decoration: none">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><font color="#14110f"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="background: #000000">Возможно,
+		ответы были получены из кэша, но не
+		были актуализированы, что вызвало
+		предупреждение. </span></font></font></font></span>
+		</p></li>
+	</ul>
+</ul>
+<hr/>
+
+<h3 style="margin-top: 0cm; margin-bottom: 0cm; line-height: 0.74cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="4" style="font-size: 13pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Рекомендации
+по диагностике</span></b></span></span></font></font></span></font></span></strong></span></h3>
+<ol>
+	<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Откройте
+	файл </span></b></span></span></font></font></span></font></span></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><strong><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #27272a">All
+	Logs 20260529_23-44.md</span></b></span></span></font></font></span></font></span></code></strong></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+	и найдите записи, связанные с </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Gemini</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+	и </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">GPT</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">.</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="letter-spacing: normal; line-height: 0.64cm; font-weight: normal; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; margin-top: 0.21cm; margin-bottom: 0.21cm; font-style: normal; font-variant: normal; background: #000000; text-decoration: none">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><font color="#14110f"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="background: #000000">Ищите
+		упоминания о кодах ошибок, временных
+		метках и статусах. </span></font></font></font></span>
+		</p></li>
+	</ul>
+	<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Проверьте
+	файлы конфигурации</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="line-height: 0.5cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">config/</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		</span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+		<li><p style="line-height: 0.5cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">prompts.json</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		</span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+		<li><p style="line-height: 0.5cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">selectors-config.js</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		</span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+	</ul>
+	<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Анализируйте
+	код обработки ответов</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="line-height: 0.5cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">results.js</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		</span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+		<li><p style="line-height: 0.5cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">results-devtools.js</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		</span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+		<li><p style="line-height: 0.5cm; margin-bottom: 0cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.11cm; padding-right: 0cm"><code><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"><font size="2" style="font-size: 9pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #27272a">results-shared.js</span></span></span></span></font></font></span></font></span></code></span><span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		</span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+	</ul>
+	<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+	<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Проверьте
+	сетевые запросы</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">:</span></span></span></span></font></font></span></font></span></span></p>
+	<ul type="disc">
+		<li><p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.16cm; padding-right: 0cm; background: #000000">
+		<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Если
+		есть доступ к инструментам разработчика
+		(DevTools), посмотрите, какие запросы
+		отправлялись к API </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">Gemini</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		и </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">GPT</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+		и какие ответы были получены. </span></span></span></span></font></font></span></font></span></span>
+		</p></li>
+	</ul>
+</ol>
+<hr/>
+
+<p style="margin-bottom: 0cm; line-height: 0.64cm; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm; background: #000000">
+<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">Если
+предоставите содержимое файла </span></span></span></span></font></font></span></font></span><strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><b><span style="background: #000000">All
+Logs 20260529_23-44.md</span></b></span></span></font></font></span></font></span></strong><span style="font-variant: normal"><font color="#14110f"><span style="text-decoration: none"><font face="Inter, Inter Fallback"><font size="3" style="font-size: 12pt"><span style="letter-spacing: normal"><span style="font-style: normal"><span style="font-weight: normal"><span style="background: #000000">
+или других связанных файлов, я смогу
+помочь более детально!</span></span></span></span></font></font></span></font></span></span></p>
+<p style="letter-spacing: normal; line-height: 0.53cm; font-style: normal; font-weight: normal; font-variant: normal; text-decoration: none">
+<span style="display: inline-block; border-top: 1px solid #27272a; border-bottom: 1px solid #27272a; border-left: 1px solid #27272a; border-right: none; padding-top: 0.05cm; padding-bottom: 0.05cm; padding-left: 0.05cm; padding-right: 0cm"><font color="#27272a"><font face="Inter, Inter Fallback"><font size="2" style="font-size: 10pt"><span style="background: #000000">11:54pm</span></font></font></font></span></p>
+<h2>Qwen</h2>
+<p class="response-meta">2026-05-29 23-54
+https://chat.qwen.ai/c/5bb49ebc-d208-4159-96f3-accb280e77ec</p>
+<h1 class="western">🔍 Анализ лога: Жёлтый статус
+у Gemini и GPT</h1>
+<p style="margin-bottom: 0cm">Изучил файл <code>All Logs
+20260529_23-44.md</code>. Вот детальный разбор
+причин, почему <strong>Gemini</strong> и <strong>GPT</strong>
+получили жёлтый статус (<code>warning</code>),
+несмотря на успешное получение ответов.</p>
+<hr/>
+
+<h2>🟡 Общий принцип статусов в системе</h2>
+<table cellpadding="2" cellspacing="2">
+	<thead>
+		<tr>
+			<th style="border: none; padding: 0cm"><p>Статус</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>Значение</p>
+			</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td style="border: none; padding: 0cm"><p>🟢 <code>SUCCESS</code></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>Ответ получен
+				без ошибок, все этапы прошли чисто</p>
+			</td>
+		</tr>
+		<tr>
+			<td style="border: none; padding: 0cm"><p>🟡 <code>RECOVERABLE_ERROR</code>
+				/ <code>warning</code></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>Ответ получен,
+				но с предупреждениями (таймауты,
+				ошибки транспорта, частичные данные)</p>
+			</td>
+		</tr>
+		<tr>
+			<td style="border: none; padding: 0cm"><p>🔴 <code>ERROR</code></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>Критическая
+				ошибка, ответ не получен</p>
+			</td>
+		</tr>
+	</tbody>
+</table>
+<hr/>
+
+<h2>🤖 GPT: Причины жёлтого статуса</h2>
+<h3>Ключевые события в логе:</h3>
+<pre style="margin-bottom: 0.5cm">log</pre><h3>
+<span id="Frame1" dir="ltr" style="position: absolute; left: 0.64cm; width: 19.63cm; border: none; padding: 0cm; background: #ffffff">
+	<div id="Frame2" dir="ltr" style="position: absolute; top: 0cm; left: 0cm; width: 0.04cm; border: none; padding: 0cm; background: #ffffff"><p>
+		<br/>
+<br/>
+
+		</p>
+	</div><p><br/>
+<br/>
+
+	</p>
+</span>🔎 Корневые причины:
+</h3>
+<ol>
+	<li><p style="margin-bottom: 0cm"><strong><code>HARD_STOP_DEFERRED</code></strong><strong>
+	(12000ms)</strong><br/>
+→ Скрипт превысил лимит
+	времени выполнения, но система отложила
+	остановку, чтобы дать ответ &quot;дойти&quot;.</p></li>
+	<li><p style="margin-bottom: 0cm"><strong><code>PIPELINE_ERROR:
+	hard_timeout</code></strong><br/>
+→ Конвейер обработки
+	ответа не успел завершиться в отведённое
+	время.</p></li>
+	<li><p><strong><code>RECOVERABLE_ERROR:
+	script_runtime_hard_stop_deferred</code></strong><br/>
+→ Ошибка
+	классифицирована как &quot;восстановимая&quot;:
+	ответ всё же был извлечён, но с задержкой.</p></li>
+</ol>
+<h3>💡 Почему ответ всё же появился?</h3>
+<p style="margin-bottom: 0cm">Сработал механизм
+<strong>fallback-сборки</strong>: после таймаута
+система принудительно сняла DOM-снимок
+панели и извлекла ответ из него
+(<code>textLen=4264</code>). Это позволило сохранить
+функциональность, но статус остался
+жёлтым.</p>
+<hr/>
+
+<h2>🔷 Gemini: Причины жёлтого статуса</h2>
+<h3>Ключевые события в логе:</h3>
+<pre style="margin-bottom: 0.5cm">log</pre><h3>
+<span id="Frame3" dir="ltr" style="position: absolute; left: 0.64cm; width: 19.63cm; border: none; padding: 0cm; background: #ffffff">
+	<div id="Frame4" dir="ltr" style="position: absolute; top: 0cm; left: 0cm; width: 0.04cm; border: none; padding: 0cm; background: #ffffff"><p>
+		<br/>
+<br/>
+
+		</p>
+	</div><p><br/>
+<br/>
+
+	</p>
+</span>🔎 Корневые причины:
+</h3>
+<ol>
+	<li><p style="margin-bottom: 0cm"><strong><code>COMMAND_SEND_ERROR</code></strong><strong>
+	/ </strong><strong><code>SEND_DEGRADED_AFTER_SUBMIT</code></strong><br/>
+→
+	Ошибка канала сообщений Chrome Extension:
+	<code>message channel closed before response was received</code>.
+	Это частая проблема при асинхронной
+	коммуникации между content-script и background.</p></li>
+	<li><p style="margin-bottom: 0cm"><strong><code>RECOVERABLE_ERROR:
+	transport_error_after_submit</code></strong><br/>
+→ Транспортный
+	сбой после отправки команды. Система
+	переключилась на альтернативный метод
+	сбора ответа.</p></li>
+	<li><p><strong><code>PARTIAL:accepted</code></strong><br/>
+→ Ответ
+	был принят как <strong>частичный</strong>, так
+	как не все данные успели загрузиться
+	до срабатывания таймаута.</p></li>
+</ol>
+<h3>💡 Почему ответ всё же появился?</h3>
+<p style="margin-bottom: 0cm">Сработал механизм
+<strong>адаптивного сбора</strong>: после сбоя
+транспорта система использовала
+<code>inline_executeScript</code> для прямого извлечения
+контента из DOM-дерева страницы. Ответ
+был получен, но помечен как &quot;частичный&quot;.</p>
+<hr/>
+
+<h2>📊 Сравнительная таблица</h2>
+<table cellpadding="2" cellspacing="2">
+	<thead>
+		<tr>
+			<th style="border: none; padding: 0cm"><p>Параметр</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>GPT</p>
+			</th>
+			<th style="border: none; padding: 0cm"><p>Gemini</p>
+			</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td style="border: none; padding: 0cm"><p><strong>Тип ошибки</strong></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>hard_timeout</code>
+				(время выполнения)</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>transport_error</code>
+				(канал сообщений)</p>
+			</td>
+		</tr>
+		<tr>
+			<td style="border: none; padding: 0cm"><p><strong>Механизм
+				восстановления</strong></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>DOM snapshot fallback</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>inline_executeScript
+				recovery</p>
+			</td>
+		</tr>
+		<tr>
+			<td style="border: none; padding: 0cm"><p><strong>Полнота
+				ответа</strong></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>✅ Полный (4264
+				симв.)</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>⚠️ Частичный
+				(partial)</p>
+			</td>
+		</tr>
+		<tr>
+			<td style="border: none; padding: 0cm"><p><strong>Время до
+				восстановления</strong></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>~2 сек после
+				таймаута</p>
+			</td>
+			<td style="border: none; padding: 0cm"><p>~30 сек после
+				ошибки</p>
+			</td>
+		</tr>
+		<tr>
+			<td style="border: none; padding: 0cm"><p><strong>Статус в
+				логе</strong></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>RECOVERABLE_ERROR</code></p>
+			</td>
+			<td style="border: none; padding: 0cm"><p><code>RECOVERABLE_ERROR</code></p>
+			</td>
+		</tr>
+	</tbody>
+</table>
+<hr/>
+
+<h2>🛠 Рекомендации по устранению</h2>
+<h3>Для GPT:</h3>
+<ol>
+	<li><p style="margin-bottom: 0cm"><strong>Увеличить
+	</strong><strong><code>hard_timeout</code></strong> в настройках
+	пайплайна (сейчас 12000ms)</p></li>
+	<li><p style="margin-bottom: 0cm"><strong>Оптимизировать
+	обработку больших ответов</strong>
+	(<code>htmlLen=387021</code> — очень большой объём)</p></li>
+	<li><p><strong>Добавить прогрессивную загрузку</strong>
+	для избежания единого таймаута</p></li>
+</ol>
+<h3>Для Gemini:</h3>
+<ol>
+	<li><p style="margin-bottom: 0cm"><strong>Усилить обработку
+	</strong><strong><code>chrome.runtime.sendMessage</code></strong> с
+	retry-логикой и таймаутами</p></li>
+	<li><p style="margin-bottom: 0cm"><strong>Реализовать
+	keep-alive пинги</strong> для поддержания канала
+	сообщений</p></li>
+	<li><p><strong>Добавить валидацию полноты
+	ответа</strong> перед принятием <code>PARTIAL:accepted</code></p></li>
+</ol>
+<h3>Общие улучшения:</h3>
+<pre style="margin-bottom: 0.5cm">javascript</pre>
+<span id="Frame5" dir="ltr" style="position: absolute; left: 0.85cm; width: 19.42cm; border: none; padding: 0cm; background: #ffffff">
+	<div id="Frame6" dir="ltr" style="position: absolute; top: 0cm; left: 0cm; width: 0.04cm; border: none; padding: 0cm; background: #ffffff"><p>
+		<br/>
+<br/>
+
+		</p>
+	</div><p><br/>
+<br/>
+
+	</p>
+</span>
+<hr/>
+
+<blockquote>✅ <strong>Вывод:</strong> Жёлтый статус
+— это не ошибка, а <strong>информативное
+предупреждение</strong>. Система успешно
+восстановилась после сбоев и доставила
+ответы, но зафиксировала неидеальные
+условия выполнения. Для перехода в
+зелёную зону (<code>SUCCESS</code>) требуется
+устранить корневые причины: таймауты
+у GPT и нестабильность канала сообщений
+у Gemini.</blockquote>
+<p style="margin-bottom: 0cm">Нужно, чтобы я посмотрел
+код обработчиков таймаутов или
+транспортный слой для более глубокой
+диагностики? 🛠️</p>
+</body>
+</html>

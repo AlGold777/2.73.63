@@ -1,6 +1,19 @@
 (function initPlatformSelectors() {
   if (window.AnswerPipelineSelectors) return;
 
+  const COPY_BUTTON_SELECTORS = [
+    'button[aria-label*="Copy" i]',
+    'button[title*="Copy" i]',
+    'button[data-testid*="copy" i]',
+    '[role="button"][aria-label*="Copy" i]',
+    '[role="button"][title*="Copy" i]',
+    '[data-testid*="copy" i]',
+    '[aria-label*="Copy response" i]',
+    '[aria-label*="Copy answer" i]',
+    '[aria-label*="Копировать" i]',
+    'button[class*="copy" i]'
+  ];
+
   const PLATFORM_SELECTORS = {
     claude: {
       streamStart: [
@@ -21,7 +34,8 @@
       stopButton: 'button[aria-label*="Stop"], button:has-text("Stop generating")',
       regenerateButton: 'button:has-text("Regenerate")',
       lastMessage: '[data-testid*="conversation"] > div:last-child',
-      answerContainer: '[data-testid*="conversation"], [class*="conversation"]'
+      answerContainer: '[data-testid*="conversation"], [class*="conversation"]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     gpt: {
       streamStart: [
@@ -48,7 +62,8 @@
       stopButton: 'button[data-testid="stop-button"], button[aria-label*="Stop"]',
       regenerateButton: 'button[data-testid="regenerate-button"]',
       lastMessage: '[data-message-author-role="assistant"]:last-child',
-      answerContainer: '[data-testid="conversation-turn"], main[class*="conversation"]'
+      answerContainer: '[data-testid="conversation-turn"], main[class*="conversation"]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     grok: {
       streamStart: [
@@ -67,7 +82,8 @@
       ],
       stopButton: 'button[aria-label*="Stop"]',
       lastMessage: '[role="article"]:last-child, [data-testid="message"]:last-child',
-      answerContainer: '[role="log"], [data-testid="conversation"]'
+      answerContainer: '[role="log"], [data-testid="conversation"]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     perplexity: {
       streamStart: [
@@ -87,7 +103,8 @@
       ],
       stopButton: 'button[aria-label*="Stop"]',
       lastMessage: '[class*="answer-container"] > div:last-child',
-      answerContainer: '[class*="answer-container"], main'
+      answerContainer: '[class*="answer-container"], main',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     gemini: {
       streamStart: [
@@ -110,7 +127,8 @@
       ],
       stopButton: 'button[aria-label*="Stop"]',
       lastMessage: '[data-test-id*="model-response"]:last-child',
-      answerContainer: '[role="main"]'
+      answerContainer: '[role="main"]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     deepseek: {
       streamStart: [
@@ -127,7 +145,8 @@
       ],
       stopButton: 'button:has-text("Stop")',
       lastMessage: '.message-item:last-child[data-role="assistant"]',
-      answerContainer: '.chat-content, [class*="conversation"]'
+      answerContainer: '.chat-content, [class*="conversation"]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     qwen: {
       streamStart: [
@@ -150,7 +169,8 @@
       ],
       stopButton: 'button[class*="stop"]',
       lastMessage: 'div[class*="message-bot"]:last-child',
-      answerContainer: '.chat-messages, [class*="conversation"]'
+      answerContainer: '.chat-messages, [class*="conversation"]',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     lechat: {
       streamStart: [
@@ -174,7 +194,8 @@
       ],
       stopButton: 'button:has-text("Stop")',
       lastMessage: '[data-role="assistant"]:last-child',
-      answerContainer: '.messages-container'
+      answerContainer: '.messages-container',
+      copyButton: COPY_BUTTON_SELECTORS
     },
     generic: {
       streamStart: [
@@ -199,7 +220,8 @@
       ],
       stopButton: 'button[aria-label*="Stop"], button[aria-label*="stop"]',
       lastMessage: null,
-      answerContainer: '[role="log"], [role="main"], main'
+      answerContainer: '[role="log"], [role="main"], main',
+      copyButton: COPY_BUTTON_SELECTORS
     }
   };
 

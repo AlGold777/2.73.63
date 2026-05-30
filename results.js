@@ -10558,8 +10558,8 @@ document.addEventListener('click', (event) => {
         // Terminal / outcome states
         'SUCCESS': 'success',
         'COMPLETE': 'success',
-        'PARTIAL': 'warning',
-        'STREAM_TIMEOUT_HIDDEN': 'warning',
+        'PARTIAL': 'success',
+        'STREAM_TIMEOUT_HIDDEN': 'success',
         'RECOVERABLE_ERROR': 'error',
         'CRITICAL_ERROR': 'error',
         'NO_SEND': 'error',
@@ -10620,9 +10620,9 @@ document.addEventListener('click', (event) => {
             case 'COMPLETE':
                 return 'Complete';
             case 'PARTIAL':
-                return 'Partial';
+                return 'Complete (partial answer)';
             case 'STREAM_TIMEOUT_HIDDEN':
-                return 'Partial (timeout)';
+                return 'Complete (timeout, answer captured)';
             case 'RECOVERABLE_ERROR':
                 return 'Error';
             case 'CRITICAL_ERROR':
@@ -10792,7 +10792,7 @@ document.addEventListener('click', (event) => {
 
             const statusesToTest = [
                 'IDLE', 'INITIALIZING', 'SENDING', 'RECEIVING', 'SUCCESS',
-                'RECOVERABLE_ERROR', 'CRITICAL_ERROR', 'GENERATING', 'ERROR', 'no-answer'
+                'PARTIAL', 'STREAM_TIMEOUT_HIDDEN', 'RECOVERABLE_ERROR', 'CRITICAL_ERROR', 'GENERATING', 'ERROR', 'no-answer'
             ];
 
             const results = [];
@@ -11293,6 +11293,19 @@ document.addEventListener('click', (event) => {
                     normalizedText.trim().length || String(finalHtml || '').length ? 'success' : 'warning',
                     'UI'
                 )]);
+                const hasVisibleAnswer = Boolean(normalizedText.trim().length || String(finalHtml || '').trim().length);
+                if (hasVisibleAnswer && !normalizedText.trim().startsWith('Error:')) {
+                    const currentStatus = statusStateByModel[llmName]?.status || '';
+                    const isCurrentSuccess = window.LLMStatusContract?.isSuccessStatus
+                        ? window.LLMStatusContract.isSuccessStatus(currentStatus)
+                        : ['SUCCESS', 'COMPLETE', 'COPY_SUCCESS', 'DONE', 'PARTIAL', 'STREAM_TIMEOUT_HIDDEN'].includes(normalizeStatusValue(currentStatus));
+                    if (!isCurrentSuccess) {
+                        updateModelStatusUI(llmName, 'PARTIAL', {
+                            source: 'PANEL_OUTPUT_HAS_ANSWER',
+                            hasAnswer: true
+                        });
+                    }
+                }
             }
         } else {
             ingestLogs(llmName, [makeLocalDiagEntry(

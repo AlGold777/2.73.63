@@ -13,6 +13,14 @@ var pendingPings = new Map();
 var pendingPingByTabId = new Map();
 var healthCheckFailuresByTabId = new Map();
 var lastHealthCheckReportAtByTabId = new Map();
+
+function isTerminalHealthEntry(entry) {
+  if (!entry) return false;
+  if (self.ModelRunState?.isTerminalRunState?.(entry)) return true;
+  const status = String(entry.status || entry.finalStatus || '').toUpperCase();
+  return Boolean(entry.finalStatusRecorded || entry.finalStatus || TERMINAL_STATUSES.includes(status));
+}
+
 const SCRIPT_MAP = {
   'GPT': 'content-scripts/content-chatgpt.js',
   'Gemini': 'content-scripts/content-gemini.js',
@@ -68,9 +76,8 @@ function runHealthChecks() {
     }
 
     // Skip tabs that have already completed their session.
-    const sessionStatus = jobState?.llms?.[llmName]?.status;
-    if (TERMINAL_STATUSES.includes(sessionStatus)) {
-      console.log(`[HEALTH-CHECK] Skipping ${llmName} - session in terminal state: ${sessionStatus}`);
+    if (isTerminalHealthEntry(entry)) {
+      console.log(`[HEALTH-CHECK] Skipping ${llmName} - session in terminal state: ${entry?.modelRunState?.terminalStatus || entry?.finalStatus || entry?.status || 'terminal'}`);
       return;
     }
 
@@ -166,8 +173,7 @@ function startHeartbeatMonitor() {
 
     // Filter to only active (non-terminal) sessions.
     const activeEntries = entries.filter(([llmName]) => {
-      const status = jobState?.llms?.[llmName]?.status;
-      return !TERMINAL_STATUSES.includes(status);
+      return !isTerminalHealthEntry(jobState?.llms?.[llmName]);
     });
 
     if (!activeEntries.length) {
@@ -325,6 +331,7 @@ self.pendingPings = pendingPings;
 self.pendingPingByTabId = pendingPingByTabId;
 self.healthCheckFailuresByTabId = healthCheckFailuresByTabId;
 self.lastHealthCheckReportAtByTabId = lastHealthCheckReportAtByTabId;
+self.isTerminalHealthEntry = isTerminalHealthEntry;
 self.SCRIPT_MAP = SCRIPT_MAP;
 self.HEARTBEAT_INTERVAL = HEARTBEAT_INTERVAL;
 self.HEARTBEAT_TIMEOUT = HEARTBEAT_TIMEOUT;

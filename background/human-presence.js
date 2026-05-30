@@ -29,7 +29,6 @@ let visitHardCapTimer = null;
 const automationVisitLocks = new Map();
 const deferredAnswerTimers = {};
 const postSuccessScrollTimers = new Map();
-const terminalStatusesCache = Array.isArray(TERMINAL_STATUSES) ? TERMINAL_STATUSES : ['COPY_SUCCESS'];
 
 const resolveBoundTabIdForHuman = (llmName, entry = null) => {
   if (typeof self.getBoundTabId === 'function') {
@@ -44,7 +43,7 @@ const resolveBoundTabIdForHuman = (llmName, entry = null) => {
 const isTerminalEntry = (entry) => {
   if (!entry) return false;
   if (self.ModelRunState?.isTerminalRunState?.(entry)) return true;
-  if (terminalStatusesCache.includes(entry.status)) return true;
+  if (self.ModelRunState?.isTerminalStatus?.(entry.status)) return true;
   if (entry.finalStatusRecorded || entry.finalStatus) return true;
   return false;
 };
@@ -52,10 +51,13 @@ const isTerminalEntry = (entry) => {
 const isSuccessTerminalEntry = (entry) => {
   if (!entry) return false;
   if (entry.modelRunState?.terminalState === 'success') return true;
+  const status = String(entry.finalStatus || entry.status || '').toUpperCase();
+  if (self.ModelRunState?.isSuccessStatus) {
+    return self.ModelRunState.isSuccessStatus(status) && Boolean(entry.finalStatusRecorded || entry.finalStatus || entry.finalizedAt);
+  }
   const successStatuses = Array.isArray(SUCCESS_STATUSES)
     ? SUCCESS_STATUSES
     : ['COPY_SUCCESS', 'SUCCESS', 'DONE', 'PARTIAL', 'STREAM_TIMEOUT_HIDDEN'];
-  const status = String(entry.finalStatus || entry.status || '').toUpperCase();
   return successStatuses.includes(status) && Boolean(entry.finalStatusRecorded || entry.finalStatus || entry.finalizedAt);
 };
 
@@ -540,7 +542,7 @@ function finalizeTabVisit(reason = 'tab_switch') {
 function startAutomationVisit(tabId, llmName) {
   if (!llmName || !tabId) return false;
   const entry = jobState?.llms?.[llmName];
-  if (isSuccessTerminalEntry(entry)) return false;
+  if (isTerminalEntry(entry)) return false;
   if (entry) {
     entry.automationVisitActive = true;
     entry.automationVisitStartedAt = Date.now();
@@ -614,8 +616,11 @@ async function runHumanPresenceCycle() {
 
 function visitTabWithHumanity(llmName, tabId) {
   return new Promise((resolve) => {
-    if (isSuccessTerminalEntry(jobState?.llms?.[llmName])) {
-      completeHumanPresenceForModel(llmName, 'terminal_success_pre_visit');
+    const entry = jobState?.llms?.[llmName];
+    if (isTerminalEntry(entry)) {
+      if (isSuccessTerminalEntry(entry)) {
+        completeHumanPresenceForModel(llmName, 'terminal_success_pre_visit');
+      }
       resolve();
       return;
     }
@@ -1343,7 +1348,7 @@ function deriveHumanState(entry, llmName) {
   if (!entry) return 'off';
   if (entry.skipHumanLoop) return 'off';
   if (entry.humanStalled) return 'alert';
-  if (entry.status === 'COPY_SUCCESS') return 'active';
+  if (self.ModelRunState?.isTerminalRunState?.(entry)) return 'off';
   if (currentHumanVisit?.llmName === llmName) return 'active';
   if (!entry.status || entry.status === 'IDLE') return 'pending';
   return 'pending';
