@@ -182,7 +182,43 @@ describe('early terminal success guard', () => {
     });
 
     expect(deferred).toBe(false);
-    expect(entry.earlyTerminalGuard).toBeNull();
+    expect(entry.earlyTerminalGuard).toBeFalsy();
+  });
+
+  test('allows changed long answer after guard max wait to avoid stale lifecycle lock', () => {
+    const { context, logs } = createSandbox();
+    const entry = context.jobState.llms.Qwen;
+    const previousAnswer = 'previous qwen answer '.repeat(600);
+    const nextAnswer = `${previousAnswer}final paragraph changed`;
+    entry.earlyTerminalGuard = {
+      dispatchId: 'dispatch-qwen',
+      startedAt: Date.now() - 25000,
+      lastSeenAt: Date.now() - 500,
+      signature: context.buildEarlyTerminalGuardSignature(previousAnswer),
+      answerLength: previousAnswer.length,
+      responseSource: 'deferred_finalization',
+      completionReason: 'generation_inactive'
+    };
+
+    const deferred = context.maybeDeferEarlyTerminalSuccess('Qwen', entry, {
+      trimmedAnswer: nextAnswer,
+      normalizedAnswer: nextAnswer,
+      normalizedHtml: '<p>long changed qwen answer</p>',
+      responseSource: 'deferred_finalization',
+      completionReason: 'generation_inactive',
+      metaObj: { dispatchId: 'dispatch-qwen' }
+    });
+
+    expect(deferred).toBe(false);
+    expect(entry.earlyTerminalGuard).toBeFalsy();
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          llmName: 'Qwen',
+          entry: expect.objectContaining({ label: 'Terminal success guard max wait elapsed' })
+        })
+      ])
+    );
   });
 
   test('defers Qwen terminal success after generation-inactive probe until lifecycle or stable guard', () => {
@@ -242,7 +278,7 @@ describe('early terminal success guard', () => {
     expect(entry.earlyTerminalGuard).toBeNull();
   });
 
-  test('does not defer explicit user late collect terminal success', () => {
+  test('does not defer explicit user late collect terminal success', async () => {
     const { context, stateUpdates, partialMessages } = createSandbox();
     const entry = context.jobState.llms.Qwen;
     entry.status = 'RECOVERABLE_ERROR';
@@ -265,9 +301,11 @@ describe('early terminal success guard', () => {
         forceTerminalSuccess: true
       }
     });
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(accepted).toBe(true);
-    expect(entry.earlyTerminalGuard).toBeNull();
+    expect(entry.earlyTerminalGuard).toBeFalsy();
     expect(entry.finalStatusRecorded).toBe(true);
     expect(entry.finalStatus).toBe('SUCCESS');
     expect(stateUpdates).toEqual(
@@ -317,6 +355,90 @@ describe('early terminal success guard', () => {
         expect.objectContaining({
           llmName: 'Qwen',
           entry: expect.objectContaining({ label: 'Finalization deferred (generation active)' })
+        })
+      ])
+    );
+  });
+
+  test('does not let manual recovery force success while page is still generating', async () => {
+    const { context, partialMessages, logs, stateUpdates } = createSandbox();
+    context.chrome.scripting.executeScript = jest.fn(() => Promise.resolve([
+      { result: { active: true, stopVisible: true, busyVisible: true } }
+    ]));
+    const entry = context.jobState.llms.GPT;
+    const answer = 'manual partial gpt answer '.repeat(80);
+
+    context.handleLLMResponse('GPT', answer, null, {
+      dispatchId: 'dispatch-gpt',
+      manualRecovery: true,
+      responseMeta: {
+        source: 'manual_ping',
+        completionReason: 'manual_ping_late_collect',
+        manualRecovery: true,
+        manualOverride: true,
+        lateCollectFinal: true,
+        forceTerminalSuccess: true
+      }
+    });
+    await Promise.resolve();
+
+    expect(entry.finalStatusRecorded).toBeFalsy();
+    expect(stateUpdates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ llmName: 'GPT', status: 'RECEIVING' })
+      ])
+    );
+    expect(partialMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'LLM_PARTIAL_RESPONSE',
+          llmName: 'GPT',
+          metadata: expect.objectContaining({ status: 'GENERATING' })
+        })
+      ])
+    );
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          llmName: 'GPT',
+          entry: expect.objectContaining({ label: 'Finalization deferred (generation active)' })
+        })
+      ])
+    );
+  });
+
+  test('records active generation at streaming max as partial, not success', async () => {
+    const { context, partialMessages } = createSandbox();
+    context.chrome.scripting.executeScript = jest.fn(() => Promise.resolve([
+      { result: { active: true, stopVisible: false, busyVisible: true } }
+    ]));
+    const entry = context.jobState.llms.GPT;
+    entry.finalizationDeferStartedAt = Date.now() - 181000;
+    const answer = 'long answer still streaming '.repeat(90);
+
+    context.handleLLMResponse('GPT', answer, null, {
+      dispatchId: 'dispatch-gpt',
+      responseMeta: {
+        source: 'manual_ping',
+        completionReason: 'manual_ping_late_collect',
+        lateCollectFinal: true,
+        forceTerminalSuccess: true
+      }
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(entry.finalStatusRecorded).toBe(true);
+    expect(entry.finalStatus).toBe('PARTIAL');
+    expect(partialMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'LLM_PARTIAL_RESPONSE',
+          llmName: 'GPT',
+          metadata: expect.objectContaining({
+            status: 'PARTIAL',
+            completionReason: 'streaming_incomplete'
+          })
         })
       ])
     );

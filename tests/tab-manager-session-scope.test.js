@@ -237,4 +237,83 @@ describe('tab-manager session scoping', () => {
       ])
     );
   });
+
+  test('tryAttachExistingTab can globally reuse latest model tab when explicitly allowed', async () => {
+    const now = Date.now();
+    const { context, telemetry } = createTabManagerSandbox({
+      queryTabs: [
+        {
+          id: 2002,
+          url: 'https://chatgpt.com/c/older',
+          windowId: 7,
+          index: 0,
+          status: 'complete',
+          lastAccessed: now - 1000
+        },
+        {
+          id: 2003,
+          url: 'https://chatgpt.com/c/newer',
+          windowId: 7,
+          index: 1,
+          status: 'complete',
+          lastAccessed: now
+        }
+      ]
+    });
+
+    const attached = await context.tryAttachExistingTab('GPT', 'hello', [], { allowGlobalReuse: true });
+
+    expect(attached).toBe(true);
+    expect(context.prepareTabForUse).toHaveBeenCalledWith(2003, 'GPT');
+    expect(context.dispatchPromptToTab).toHaveBeenCalledWith('GPT', 2003, 'hello', [], 'attach_existing');
+    expect(context.jobState.session.boundTabIds).toContain(2003);
+    expect(telemetry).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          llmName: 'GPT',
+          label: 'TAB_ATTACHED',
+          payload: expect.objectContaining({
+            meta: expect.objectContaining({
+              runScope: 'global'
+            })
+          })
+        })
+      ])
+    );
+  });
+
+  test('resolveTabForLlmName revalidates cached tab before returning it', async () => {
+    const { context, telemetry } = createTabManagerSandbox({
+      queryTabs: [
+        {
+          id: 2002,
+          url: 'https://example.com/not-chatgpt',
+          windowId: 7,
+          index: 0,
+          status: 'complete',
+          lastAccessed: Date.now()
+        }
+      ]
+    });
+    context.llmTabMap.GPT = 2002;
+    context.jobState.session.boundTabIds = [2002];
+
+    const resolved = await new Promise((resolve) => {
+      context.resolveTabForLlmName('GPT', resolve);
+    });
+
+    expect(resolved).toBeNull();
+    expect(context.llmTabMap.GPT).toBeUndefined();
+    expect(telemetry).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          llmName: 'GPT',
+          label: 'TAB_READY_FAIL',
+          payload: expect.objectContaining({
+            details: 'tab_ineligible'
+          })
+        })
+      ])
+    );
+  });
 });

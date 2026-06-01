@@ -104,7 +104,6 @@ const MANUAL_RECOVERY_STRATEGIES = Object.freeze([
 const DEFER_STREAM_FINAL_MODELS = new Set(['GPT', 'Gemini', 'Claude', 'Le Chat', 'Perplexity', 'Grok', 'Qwen', 'DeepSeek']);
 const DEFER_STREAM_FINAL_RECHECK_MS = 8000;
 const DEFER_STREAM_FINAL_MAX_MS = 180000;
-const DEFER_STREAM_BUSY_ONLY_MAX_MS = 45000;
 const EARLY_TERMINAL_GUARD_MODELS = new Set(['GPT', 'Gemini', 'Claude', 'Le Chat', 'Perplexity', 'Grok', 'Qwen', 'DeepSeek']);
 const EARLY_TERMINAL_GUARD_FORCE_SUCCESS_CHARS = 1800;
 const EARLY_TERMINAL_GUARD_MAX_WAIT_MS = 20000;
@@ -1277,10 +1276,6 @@ function maybeDeferStreamingFinalization(llmName, answer, metaObj, answerHtml, n
   if (
     metaObj?.finalizationDeferredCheck
     || metaObj?.source === 'dom_snapshot_recovery'
-    || responseMeta.forceTerminalSuccess
-    || responseMeta.lateCollectFinal
-    || responseMeta.manualRecovery
-    || responseMeta.manualOverride
     || responseMeta.preTerminalMaterialize
   ) return false;
   const entry = jobState?.llms?.[llmName];
@@ -1301,20 +1296,25 @@ function maybeDeferStreamingFinalization(llmName, answer, metaObj, answerHtml, n
     const state = Array.isArray(results) ? results.find((item) => item?.result)?.result : null;
     const elapsedMs = Math.max(0, Date.now() - Number(liveEntry.finalizationDeferStartedAt || Date.now()));
     const pendingAnswerLength = String(liveEntry.pendingFinalAnswer || normalizedAnswer || answer || '').trim().length;
-    const busyOnlyMaxReached = Boolean(
-      state?.active
-      && state?.busyVisible
-      && !state?.stopVisible
-      && pendingAnswerLength >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS
-      && elapsedMs >= DEFER_STREAM_BUSY_ONLY_MAX_MS
-    );
-    if (state?.active && elapsedMs < DEFER_STREAM_FINAL_MAX_MS && !busyOnlyMaxReached) {
+    const streamingMaxReached = Boolean(state?.active && elapsedMs >= DEFER_STREAM_FINAL_MAX_MS);
+    if (state?.active && !streamingMaxReached) {
       appendLogEntry(llmName, {
         type: 'RESPONSE',
         label: 'Finalization deferred (generation active)',
         details: `elapsed=${elapsedMs}ms stop=${!!state.stopVisible} busy=${!!state.busyVisible}`,
         level: 'warning',
-        meta: { tabId, elapsedMs, stopVisible: !!state.stopVisible, busyVisible: !!state.busyVisible }
+        meta: {
+          tabId,
+          elapsedMs,
+          stopVisible: !!state.stopVisible,
+          busyVisible: !!state.busyVisible,
+          pendingAnswerLength
+        }
+      });
+      updateModelState(llmName, 'RECEIVING', {
+        message: 'generation_active',
+        completionReason: 'generation_active',
+        responseSource: responseMeta?.source || null
       });
       sendMessageToResultsTab({
         type: 'LLM_PARTIAL_RESPONSE',
@@ -1345,9 +1345,10 @@ function maybeDeferStreamingFinalization(llmName, answer, metaObj, answerHtml, n
         responseMeta: {
           ...(metaObj?.responseMeta || {}),
           source: metaObj?.responseMeta?.source || 'deferred_finalization',
-          completionReason: busyOnlyMaxReached
-            ? 'busy_only_max_elapsed'
-            : (elapsedMs >= DEFER_STREAM_FINAL_MAX_MS ? 'defer_max_elapsed' : 'generation_inactive')
+          completionReason: streamingMaxReached ? 'streaming_incomplete' : 'generation_inactive',
+          partial: streamingMaxReached || undefined,
+          forceTerminalSuccess: streamingMaxReached ? false : metaObj?.responseMeta?.forceTerminalSuccess,
+          lateCollectFinal: streamingMaxReached ? false : metaObj?.responseMeta?.lateCollectFinal
         }
       },
       liveEntry.pendingFinalAnswerHtml || answerHtml || ''
@@ -4301,7 +4302,7 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
   }
   const isSuccess = !error && !!String(normalizedAnswer || '').trim() && !normalizedAnswer.startsWith('Error:');
   const allowManualTerminalOverride = Boolean(manualTerminalOverrideRequested && isSuccess && trimmedAnswer.length >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS);
-  if (!manualTerminalOverrideRequested && isSuccess && maybeDeferStreamingFinalization(llmName, normalizedAnswer, metaObj, normalizedHtml, normalizedAnswer)) {
+  if (isSuccess && maybeDeferStreamingFinalization(llmName, normalizedAnswer, metaObj, normalizedHtml, normalizedAnswer)) {
     return;
   }
   if (isSuccess && entry && (entry.hardTimeoutRetryInFlight || entry.hardTimeoutRetryDone)) {

@@ -1294,7 +1294,7 @@ document.addEventListener('click', (event) => {
 
     // --- MAIN PAGE ELEMENTS ---
     const startButton = document.getElementById('start-button');
-    const promptInput = document.getElementById('prompt-input');
+    const promptInput = document.getElementById('modTa') || document.getElementById('prompt-input');
     const promptNoteView = document.getElementById('prompt-note-view');
     const promptContainer = document.querySelector('.prompt-container.prompt-sandwich') || document.querySelector('.prompt-container');
     let useInputRichMode = false;
@@ -1333,11 +1333,32 @@ document.addEventListener('click', (event) => {
     const viewGridBtn = document.getElementById('view-grid-btn');
     const viewStackBtn = document.getElementById('view-stack-btn');
     const autoCheckbox = document.getElementById('auto-checkbox');
+    const debateAutoPauseBtn = document.getElementById('debate-auto-pause-btn');
     const prefixToggleLabel = document.querySelector('.modifiers-toggle-label[data-mod-type="prefix"]');
     const suffixToggleLabel = document.querySelector('.modifiers-toggle-label[data-mod-type="suffix"]');
     const proSection = document.getElementById('pro-section');
     const newPagesCheckbox = document.getElementById('new-pages-checkbox');
     const apiModeCheckbox = document.getElementById('api-mode-checkbox');
+    let debatePaused = false;
+    let lastPipelineTriggerAt = 0;
+    let triggerPipelineRun = (event) => {
+        if (event) {
+            event.preventDefault();
+            event.stopImmediatePropagation?.();
+            event.stopPropagation();
+        }
+        const now = Date.now();
+        if (now - lastPipelineTriggerAt < 500) return;
+        lastPipelineTriggerAt = now;
+        if (typeof window.runPipeline === 'function') {
+            console.log('[RESULTS] Pipeline trigger clicked', {
+                source: event?.currentTarget?.id || event?.target?.id || 'unknown'
+            });
+            window.runPipeline();
+            return;
+        }
+        showNotification('Pipeline run is unavailable', 'error');
+    };
     const autoToggleBtn = document.getElementById('auto-toggle');
     const apiToggleBtn = document.getElementById('api-toggle');
     const leftSidebarToggleBtn = document.getElementById('left-sidebar-toggle');
@@ -2075,6 +2096,7 @@ document.addEventListener('click', (event) => {
     }
 
     let pipelineRunActive = false;
+    let resolveDebateApprovalGlobal = null;
     const pipelineWaiter = {
         runToken: 0,
         waiting: false,
@@ -2185,6 +2207,9 @@ document.addEventListener('click', (event) => {
         const pipelineExportBtn = document.getElementById('pipeline-export-btn');
         const pipelineImportBtn = document.getElementById('pipeline-import-btn');
         const pipelineRunBtn = document.getElementById('pipeline-run-btn');
+        const debateStartBtn = document.getElementById('debate-start-btn');
+        const debateStepBtn = document.getElementById('debate-step-btn');
+        const debatePauseBtn = document.getElementById('debate-pause-btn');
         const pipelineCloseBtn = document.getElementById('pipeline-close-btn');
         const pipelineItems = document.getElementById('pipelineItems');
         const pipelineName = document.getElementById('currentPipelineName');
@@ -2817,6 +2842,66 @@ document.addEventListener('click', (event) => {
             pipelineRunBtn.textContent = isRunning ? 'Running…' : '▶ Run';
         };
 
+        let debateApprovalResolver = null;
+        const updateDebateButtonsUi = () => {
+            if (debatePauseBtn) {
+                debatePauseBtn.textContent = debatePaused ? 'Resume' : 'Pause';
+            }
+            if (debateStepBtn) {
+                const waiting = typeof debateApprovalResolver === 'function';
+                debateStepBtn.disabled = !waiting;
+                debateStepBtn.textContent = waiting ? 'Approve' : 'Step';
+            }
+            syncDebateAutoPauseButton();
+        };
+        const resolveDebateApproval = () => {
+            const resolver = debateApprovalResolver;
+            debateApprovalResolver = null;
+            if (typeof resolver === 'function') {
+                resolver(true);
+            }
+            updateDebateButtonsUi();
+        };
+        resolveDebateApprovalGlobal = resolveDebateApproval;
+        const buildDebateActionPromptSuffix = () => {
+        const selectedAction = debateActionSelect?.value || '';
+        const actionMap = {
+                harden: 'Attack the previous thesis harder. Find a logical flaw or false assumption.',
+                compare: 'Build a comparative table: cost, complexity, risks, scalability.',
+                example: 'Support the thesis with one concrete real-world example with numbers.',
+                assumptions: 'List all implicit assumptions behind the previous argument.',
+                counter: 'Provide a counterexample that disproves the previous thesis.',
+                mvp: 'What is the smallest MVP step that can validate the hypothesis now?',
+                grounding: 'Stop theorizing. Provide a concrete implementation plan with tools.',
+            final: 'Final synthesis: agreed points, disputed points, and next step.'
+        };
+        const actionInstruction = actionMap[selectedAction] || '';
+        const modeValue = (debateModeSelect?.value || 'debate').trim();
+        const lenValue = (debateLengthSelect?.value || '500').trim();
+        const roleValue = (debateRoleSelect?.value || '').trim();
+        const senderValue = (debateSenderSelect?.value || '').trim();
+        const receiverValue = (debateReceiverSelect?.value || '').trim();
+        const extra = [];
+        if (modeValue) extra.push(`Mode: ${modeValue}`);
+        if (lenValue && lenValue !== 'inf') extra.push(`Max tokens: ${lenValue}`);
+        if (senderValue) extra.push(`Sender: ${senderValue}`);
+        if (receiverValue) extra.push(`Receiver: ${receiverValue || 'All models'}`);
+        if (roleValue) extra.push(`Receiver role: ${roleValue}`);
+        if (actionInstruction) extra.push(`Moderator action: ${actionInstruction}`);
+        return extra.length ? `\n\n${extra.join('\n')}` : '';
+    };
+        const waitForDebateApproval = async () => {
+            const isAuto = !!autoCheckbox?.checked;
+            if (isAuto && !debatePaused) return true;
+            if (debateApprovalResolver) return true;
+            await new Promise((resolve) => {
+                debateApprovalResolver = resolve;
+                updateDebateButtonsUi();
+            });
+            return true;
+        };
+        updateDebateButtonsUi();
+
         const getRoundModelsState = (roundIndex) => {
             const stack = document.getElementById(`r${roundIndex}-models`);
             if (!stack) return null;
@@ -3040,34 +3125,68 @@ document.addEventListener('click', (event) => {
                 showNotification('Pipeline already running', 'warn');
                 return;
             }
-            if (!promptInput) return;
-            const rawPrompt = (promptInput.value || '').trim();
+            const rawPrompt = buildDebateModeratorDispatchText();
             if (!rawPrompt) {
-                alert('Please enter a prompt.');
+                console.warn('[RESULTS] Pipeline run blocked: empty moderator prompt', {
+                    promptInputValue: promptInput?.value || '',
+                    moderatorBodyText: debateModMessageBody?.innerText || debateModMessageBody?.textContent || ''
+                });
+                alert('Please enter a moderator message or wait for a model response.');
                 return;
             }
 
             pipelineRunActive = true;
+            debateRunState.activeRole = String(debateRoleSelect?.value || '').trim();
+            const moderatorEntryText = getModeratorDispatchText();
+            syncModeratorSelectors();
             setPipelineRunUi(true);
 
             try {
                 const pipelineNameText = (pipelineName?.textContent || '').trim();
-                const basePrompt = applySelectedModifiersToPrompt(rawPrompt);
+                const basePrompt = applySelectedModifiersToPrompt(rawPrompt) + buildDebateActionPromptSuffix();
                 const attachmentsPayload = await buildAttachmentPayload();
                 const useApiFallback = apiModeCheckbox ? apiModeCheckbox.checked : true;
+                const selectedTopModels = getDebateTargetModels();
+                const moderatorOnly = String(debateReceiverSelect?.value || '').trim() === '__none__';
+                if (moderatorOnly) {
+                    appendModeratorFeedEntry(moderatorEntryText);
+                    clearModeratorComposer();
+                    return;
+                }
+                if (!selectedTopModels.length) {
+                    console.warn('[RESULTS] Pipeline run blocked: no selected top models');
+                    showNotification('Select at least one recipient model.', 'warn');
+                    return;
+                }
+                debateFeedState.lastCommittedHashByModel = {};
+                appendModeratorFeedEntry(moderatorEntryText);
+                renderDebateModelCards(debateRunState.activeRole, selectedTopModels, { approvalSelectable: true });
+                clearModeratorComposer();
 
                 const rounds = [];
                 let finalOutputs = {};
                 let responsesList = '';
 
                 for (let r = 1; r <= roundCounter; r++) {
-                    const roundState = getRoundModelsState(r);
-                    if (!roundState || !roundState.inputModels.length) {
-                        showNotification(`Pipeline: no Input models in R${r}`, 'warn');
+                    const baseRoundState = getRoundModelsState(r);
+                    if (!baseRoundState) {
+                        showNotification(`Pipeline: round R${r} is unavailable`, 'warn');
                         return;
                     }
 
                     const isFirstRound = r === 1;
+                    const roundState = isFirstRound
+                        ? {
+                            ...baseRoundState,
+                            inputModels: selectedTopModels.slice(),
+                            sendModels: selectedTopModels.slice()
+                        }
+                        : baseRoundState;
+
+                    if (!roundState.inputModels.length) {
+                        showNotification(`Pipeline: no Input models in R${r}`, 'warn');
+                        return;
+                    }
                     const forceNewTabs = isFirstRound ? (newPagesCheckbox ? newPagesCheckbox.checked : true) : false;
                     let outputs = {};
                     let missing = [];
@@ -3088,6 +3207,8 @@ document.addEventListener('click', (event) => {
                         missing = roundResult.missing || [];
                         timedOut = !!roundResult.timedOut;
                     } else {
+                        // Manual moderation applies to inter-round routing, not the initial user send.
+                        await waitForDebateApproval();
                         if (!responsesList) {
                             showNotification(`Pipeline: no Send outputs in R${r - 1}`, 'warn');
                             return;
@@ -3116,6 +3237,7 @@ document.addEventListener('click', (event) => {
 
                         promptByModel = {};
                         for (const [promptId, models] of promptGroups.entries()) {
+                            await waitForDebateApproval();
                             const promptDef = getJudgePromptById(promptId) || fallbackPrompt;
                             const evaluationPrompt = buildJudgeEvaluationPrompt(
                                 promptDef ? promptDef.text : '',
@@ -3186,10 +3308,38 @@ document.addEventListener('click', (event) => {
                 console.error('[RESULTS] Pipeline run failed', err);
                 showNotification(`Pipeline: error (${err?.message || String(err)})`, 'error');
             } finally {
+                if (debateFeedState.pendingApproval) {
+                    setDebateApprovalCandidate(null);
+                }
+                debateApprovalResolver = null;
+                debateRunState.activeRole = '';
                 pipelineRunActive = false;
                 pipelineWaiter.reset();
                 setPipelineRunUi(false);
+                updateDebateButtonsUi();
             }
+        };
+        window.runPipeline = runPipeline;
+        triggerPipelineRun = (event) => {
+            if (event) {
+                event.preventDefault();
+                event.stopImmediatePropagation?.();
+                event.stopPropagation();
+            }
+            const now = Date.now();
+            if (now - lastPipelineTriggerAt < 500) return;
+            lastPipelineTriggerAt = now;
+            const runFn = (typeof runPipeline === 'function')
+                ? runPipeline
+                : (typeof window.runPipeline === 'function' ? window.runPipeline : null);
+            if (!runFn) {
+                showNotification('Pipeline run is unavailable', 'error');
+                return;
+            }
+            console.log('[RESULTS] Pipeline trigger clicked', {
+                source: event?.currentTarget?.id || event?.target?.id || 'unknown'
+            });
+            runFn();
         };
 
         const resetPipeline = () => {
@@ -3763,7 +3913,24 @@ document.addEventListener('click', (event) => {
         pipelineDeleteBtn?.addEventListener('click', deleteActivePipeline);
         pipelineExportBtn?.addEventListener('click', exportPipelines);
         pipelineImportBtn?.addEventListener('click', importPipelines);
-        pipelineRunBtn?.addEventListener('click', runPipeline);
+        pipelineRunBtn?.addEventListener('click', triggerPipelineRun);
+        debateStartBtn?.addEventListener('click', triggerPipelineRun);
+        debatePauseBtn?.addEventListener('click', () => {
+            debatePaused = !debatePaused;
+            if (!debatePaused && debateApprovalResolver) {
+                resolveDebateApproval();
+            } else {
+                updateDebateButtonsUi();
+            }
+        });
+        debateStepBtn?.addEventListener('click', () => {
+            if (!debateApprovalResolver) {
+                showNotification('No pending moderator approval step.', 'warn');
+                return;
+            }
+            approvePendingDebateCandidate();
+            resolveDebateApproval();
+        });
         pipelineAddBtn?.addEventListener('click', addNewPipeline);
         pipelineAddRoundBtn?.addEventListener('click', addRound);
         pipelineRemoveRoundBtn?.addEventListener('click', removeLastRound);
@@ -10357,6 +10524,11 @@ document.addEventListener('click', (event) => {
     if (selectorAuditRefreshBtn) {
         selectorAuditRefreshBtn.addEventListener('click', () => refreshSelectorAudit());
     }
+
+    document.addEventListener('llm-selection-change', () => {
+        syncModeratorSelectors();
+        applyDebateSessionFilter();
+    });
     
     // --- "SELECT ALL" CHECKBOX LOGIC ---
     const notifySelectionChanged = () => {
@@ -10842,6 +11014,13 @@ document.addEventListener('click', (event) => {
     if (autoCheckbox) {
         autoCheckbox.addEventListener('change', () => {
             autoMode = autoCheckbox.checked;
+            if (autoMode) {
+                approvePendingDebateCandidate();
+                if (typeof resolveDebateApprovalGlobal === 'function') {
+                    resolveDebateApprovalGlobal();
+                }
+            }
+            syncDebateAutoPauseButton();
             if (syncAutoToggleState) syncAutoToggleState();
             console.log('[RESULTS] Auto mode:', autoMode);
         });
@@ -11026,6 +11205,19 @@ document.addEventListener('click', (event) => {
                     break;
                 case 'LLM_PARTIAL_RESPONSE': {
                     syncStatusFromResponseMessage(message);
+                    const previewPayload = (() => {
+                        if (message.answer && typeof message.answer === 'object') {
+                            return {
+                                text: String(message.answer.text || message.answer.answer || ''),
+                                html: String(message.answer.html || message.answer.answerHtml || message.answerHtml || message.html || '')
+                            };
+                        }
+                        return {
+                            text: String(message.answer || ''),
+                            html: String(message.answerHtml || message.html || '')
+                        };
+                    })();
+                    updateDebateModelCardOutput(message.llmName, previewPayload.text, previewPayload.html, message.metadata || {});
                     const revealManualPing = manualPingReveal.has(message.llmName);
                     if (revealManualPing) {
                         const answerText = (() => {
@@ -11042,7 +11234,7 @@ document.addEventListener('click', (event) => {
                         )]);
                     }
                     if (autoMode || revealManualPing) {
-                        updateLLMPanelOutput(message.llmName, message.answer, message.answerHtml || message.html || '');
+                        updateLLMPanelOutput(message.llmName, message.answer, message.answerHtml || message.html || '', message.metadata || {});
                         if (revealManualPing) {
                             manualPingReveal.delete(message.llmName);
                         }
@@ -11099,7 +11291,7 @@ document.addEventListener('click', (event) => {
                     }
                     break;
                 case 'UPDATE_LLM_PANEL_OUTPUT':
-                    updateLLMPanelOutput(message.llmName, message.answer, message.answerHtml || message.html || '');
+                    updateLLMPanelOutput(message.llmName, message.answer, message.answerHtml || message.html || '', message.metadata || {});
                     break;
                 case 'LLM_DIAGNOSTIC_EVENT':
                     if (Array.isArray(message.logs) && message.logs.length) {
@@ -11253,7 +11445,7 @@ document.addEventListener('click', (event) => {
         }
     });
         
-    function updateLLMPanelOutput(llmName, answer, answerHtml = '') {
+    function updateLLMPanelOutput(llmName, answer, answerHtml = '', meta = {}) {
         const panelId = llmName.toLowerCase().replace(/\s+/g, '');
         const panel = document.getElementById(`panel-${panelId}`);
         const payload = (() => {
@@ -11272,6 +11464,7 @@ document.addEventListener('click', (event) => {
         const rawHtml = payload.html || '';
         const sanitizedHtml = sanitizeInlineHtml(rawHtml);
         const resolvedHtml = sanitizedHtml || (looksLikeHtml(normalizedText) ? sanitizeInlineHtml(normalizedText) : '');
+        updateDebateModelCardOutput(llmName, normalizedText, resolvedHtml, meta);
         if (panel) {
             const outputElement = panel.querySelector('.output');
             if (outputElement) {
@@ -11743,33 +11936,45 @@ document.addEventListener('click', async (event) => {
     const promptEl = document.getElementById('prompt-input');
     if (!promptEl) return;
 
-    const baseText = (promptEl.value || '').trim();
-    const richActive = promptContainer?.classList.contains('is-note-viewing');
-    const richHtml = promptNoteView ? sanitizeInlineHtml(promptNoteView.innerHTML || '').trim() : '';
-    const richText = promptNoteView
-        ? String(promptNoteView.innerText || promptNoteView.textContent || '').trim()
-        : '';
-    const hasRichContent = !!(richActive && (richHtml || richText));
+    // Priority: export the full feed. Fallback: export current prompt content.
     let bodyHtml = '';
-    if (hasRichContent) {
-        bodyHtml = richHtml || buildHtmlFromText(richText);
+    const feedEl = document.querySelector('.llm-results');
+    const hasFeedContent = !!(feedEl && feedEl.querySelector('.llm-panel, .llm-panel-content, .panel-content'));
+    if (hasFeedContent) {
+        const feedClone = feedEl.cloneNode(true);
+        feedClone.querySelectorAll('button, .panel-save-note-btn, .llm-panel-actions').forEach((el) => el.remove());
+        bodyHtml = `<section class="export-feed">${feedClone.innerHTML}</section>`;
     } else {
-        const fullPromptText = applySelectedModifiersToPrompt(baseText, { includeResponses: true });
-        if (!fullPromptText) {
-            flashButtonFeedback(btn, 'warn');
-            return;
+        const baseText = (promptEl.value || '').trim();
+        const richActive = promptContainer?.classList.contains('is-note-viewing');
+        const richHtml = promptNoteView ? sanitizeInlineHtml(promptNoteView.innerHTML || '').trim() : '';
+        const richText = promptNoteView
+            ? String(promptNoteView.innerText || promptNoteView.textContent || '').trim()
+            : '';
+        const hasRichContent = !!(richActive && (richHtml || richText));
+        if (hasRichContent) {
+            bodyHtml = richHtml || buildHtmlFromText(richText);
+        } else {
+            const fullPromptText = applySelectedModifiersToPrompt(baseText, { includeResponses: true });
+            if (!fullPromptText) {
+                flashButtonFeedback(btn, 'warn');
+                return;
+            }
+            bodyHtml = `<pre>${escapeHtml(fullPromptText)}</pre>`;
         }
-        bodyHtml = `<pre>${escapeHtml(fullPromptText)}</pre>`;
     }
 
     const htmlContent = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Prompt Export</title>
+    <title>Feed Export</title>
     <style>
         body { font-family: sans-serif; line-height: 1.6; padding: 2em; }
         pre { white-space: pre-wrap; word-wrap: break-word; background: #f4f4f4; padding: 1em; border-radius: 5px; }
+        .export-feed { max-width: 980px; margin: 0 auto; }
+        .export-feed .llm-panel { margin-bottom: 14px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; }
+        .export-feed .llm-panel-title { font-weight: 700; margin-bottom: 8px; }
     </style>
 </head>
 <body>
@@ -11787,7 +11992,7 @@ document.addEventListener('click', async (event) => {
     const pad = n => String(n).padStart(2, '0');
     const dateStr = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}`;
     
-    a.download = `Prompt ${dateStr}.html`;
+    a.download = `Feed ${dateStr}.html`;
 
     document.body.appendChild(a);
     a.click();
@@ -12051,6 +12256,742 @@ function checkCompareButtonState() {
     }
     if (window.ResultsShared && !window.ResultsShared.getSelectedLLMs) {
         window.ResultsShared.getSelectedLLMs = getSelectedLLMs;
+    }
+
+    const debateModelCards = document.getElementById('debate-model-cards');
+    const debateSessionTabs = document.getElementById('debate-session-tabs');
+    const debateSessionAddBtn = document.getElementById('debate-session-add-btn');
+    const debateSessionCopyBtn = document.getElementById('debate-session-copy-btn');
+    const debateSessionExportBtn = document.getElementById('debate-session-export-btn');
+    const debateSessionClearBtn = document.getElementById('debate-session-clear-btn');
+    const debateApprovalPanel = document.getElementById('debate-approval');
+    const debateApprovalBody = document.getElementById('debate-approval-body');
+    const debateApprovalMeta = document.getElementById('debate-approval-meta');
+    const debateRoleSelect = document.getElementById('mod-role-select');
+    const debateSenderSelect = document.getElementById('mod-sender-select');
+    const debateReceiverSelect = document.getElementById('mod-receiver-select');
+    const debateDirectionIcon = document.getElementById('direction-icon');
+    const debateModTime = document.getElementById('mod-time');
+    const debateModMessageBody = document.getElementById('mod-message-body');
+    const debateMiniPrompts = document.getElementById('mod-mini-prompts');
+    const debateModSendBtn = document.getElementById('mod-send-btn');
+    const debateModCopyBtn = document.getElementById('mod-copy-btn');
+    const debateModExportBtn = document.getElementById('mod-export-btn');
+    const debateModClearBtn = document.getElementById('mod-clear-btn');
+    const debateActionSelect = document.getElementById('debate-action-select');
+    const debateModeSelect = document.getElementById('debate-mode-select');
+    const debateLengthSelect = document.getElementById('debate-length-select');
+    const debateSelToolbar = document.getElementById('debateSelTb');
+    const debateTabsState = {
+        activeSessionId: '1',
+        favoriteOnlyBySession: new Map(),
+        sessions: new Map([['1', { id: '1', title: '1', cards: [] }]])
+    };
+    const debateRunState = {
+        activeRole: ''
+    };
+    const debateSelectionState = { range: null, target: null };
+    const debateDirectionState = { mode: 'forward' };
+    const debateFeedState = {
+        nextId: 1,
+        placeholders: new Set(),
+        pendingApproval: null,
+        lastCommittedHashByModel: {},
+        selectedCardEl: null
+    };
+    function syncDebateAutoPauseButton() {
+        if (!debateAutoPauseBtn) return;
+        const isAuto = !!autoCheckbox?.checked;
+        debateAutoPauseBtn.classList.toggle('hidden', !isAuto);
+        debateAutoPauseBtn.textContent = debatePaused ? '▶' : 'Ⅱ';
+        debateAutoPauseBtn.title = debatePaused ? 'Resume auto debate' : 'Pause auto debate';
+        debateAutoPauseBtn.setAttribute('aria-label', debateAutoPauseBtn.title);
+    }
+    function autoGrowDebateTextarea(el) {
+        if (!el) return;
+        const max = 120;
+        el.style.height = 'auto';
+        el.style.height = `${Math.min(el.scrollHeight, max)}px`;
+    }
+    window.growTA = function growTA(el) {
+        autoGrowDebateTextarea(el);
+    };
+    function autoGrowDebateApprovalBody() {
+        if (!debateApprovalBody) return;
+        const max = 120;
+        debateApprovalBody.style.height = 'auto';
+        debateApprovalBody.style.height = `${Math.min(Math.max(debateApprovalBody.scrollHeight, 40), max)}px`;
+    }
+    function toModelKey(name = '') {
+        return String(name).toLowerCase().replace(/\s+/g, '');
+    }
+    function getActiveDebateSession() {
+        return debateTabsState.sessions.get(debateTabsState.activeSessionId) || null;
+    }
+    function ensureDebateSession(sessionId) {
+        const id = String(sessionId || '1');
+        if (!debateTabsState.sessions.has(id)) {
+            debateTabsState.sessions.set(id, { id, title: id, cards: [] });
+        }
+        return debateTabsState.sessions.get(id);
+    }
+    function renderDebateSessionTabs() {
+        if (!debateSessionTabs) return;
+        const tabs = Array.from(debateTabsState.sessions.values())
+            .sort((a, b) => Number(a.id) - Number(b.id))
+            .map((session) => `
+                <button type="button" class="debate-session-tab${session.id === debateTabsState.activeSessionId ? ' active' : ''}" data-session-id="${escapeHtml(session.id)}" title="Session ${escapeHtml(session.id)}">${escapeHtml(session.title || session.id)}</button>
+            `).join('');
+        debateSessionTabs.innerHTML = tabs;
+    }
+    function applyDebateSessionFilter() {
+        if (!debateModelCards) return;
+        const activeSessionId = debateTabsState.activeSessionId;
+        const favoriteOnly = !!debateTabsState.favoriteOnlyBySession.get(activeSessionId);
+        let firstPending = null;
+        let firstApproved = null;
+        Array.from(debateModelCards.children).forEach((card) => {
+            if (!(card instanceof HTMLElement)) return;
+            card.classList.remove('first-pending-zone-card', 'first-approved-zone-card');
+            const matchesSession = card.dataset.sessionId === activeSessionId;
+            const isFeedEntry = card.dataset.entryKind === 'response' || card.dataset.entryKind === 'placeholder';
+            const isStarred = card.dataset.starred === 'true';
+            const isFragment = card.dataset.kind === 'fragment';
+            const show = matchesSession && (!favoriteOnly || isStarred || isFragment);
+            card.style.display = show ? '' : 'none';
+            if (show && card.dataset.kind !== 'moderator') {
+                if (card.dataset.approved === 'true') {
+                    firstApproved = firstApproved || card;
+                } else {
+                    firstPending = firstPending || card;
+                }
+            }
+        });
+        firstPending?.classList.add('first-pending-zone-card');
+        firstApproved?.classList.add('first-approved-zone-card');
+        debateModelCards.scrollTop = debateModelCards.scrollHeight;
+    }
+    function getDebateTargetModels() {
+        const selected = getSelectedLLMs();
+        const receiver = String(debateReceiverSelect?.value || '').trim();
+        if (receiver === '__none__') return [];
+        if (receiver) return selected.includes(receiver) ? [receiver] : [];
+        return selected;
+    }
+    function buildApprovalCheckboxHtml(isSelectable = true) {
+        return isSelectable
+            ? '<input type="checkbox" class="debate-approval-check" title="Approve this answer" aria-label="Approve this answer">'
+            : '';
+    }
+    function isFinalResponseMeta(meta = {}) {
+        const status = String(meta.status || meta.finalStatus || '').toUpperCase();
+        const reason = String(meta.reason || meta.completionReason || '').toLowerCase();
+        if (status === 'GENERATING' || reason === 'generation_active') return false;
+        return Boolean(status && status !== 'RECEIVING' && status !== 'IN_PROGRESS');
+    }
+    function setDebatePrintingState(card, llmName, isPrinting) {
+        if (!card) return;
+        let printingEl = card.querySelector('.debate-model-card-printing');
+        if (!isPrinting) {
+            printingEl?.remove();
+            card.dataset.live = 'false';
+            return;
+        }
+        card.dataset.live = 'true';
+        if (!printingEl) {
+            printingEl = document.createElement('div');
+            printingEl.className = 'debate-model-card-printing';
+            card.appendChild(printingEl);
+        }
+        printingEl.textContent = `[${llmName}] printing`;
+    }
+    function getFirstPendingCard(sessionId = debateTabsState.activeSessionId) {
+        if (!debateModelCards) return null;
+        return Array.from(debateModelCards.querySelectorAll('.debate-model-card'))
+            .find((card) => (
+                card.dataset.sessionId === sessionId
+                && card.dataset.kind !== 'moderator'
+                && card.dataset.approved !== 'true'
+            )) || null;
+    }
+    function insertDebateCard(card, { zone = 'pending' } = {}) {
+        if (!debateModelCards || !card) return;
+        if (zone === 'approved') {
+            const firstPending = getFirstPendingCard(card.dataset.sessionId);
+            if (firstPending && firstPending !== card) {
+                debateModelCards.insertBefore(card, firstPending);
+                return;
+            }
+        }
+        debateModelCards.appendChild(card);
+    }
+    function insertModeratorCard(card) {
+        if (!debateModelCards || !card) return;
+        const sessionId = card.dataset.sessionId;
+        const hasModeratorInSession = Array.from(debateModelCards.querySelectorAll('.debate-moderator-card'))
+            .some((existing) => existing.dataset.sessionId === sessionId);
+        if (!hasModeratorInSession) {
+            const firstSessionCard = Array.from(debateModelCards.querySelectorAll('.debate-model-card'))
+                .find((existing) => existing.dataset.sessionId === sessionId);
+            if (firstSessionCard) {
+                debateModelCards.insertBefore(card, firstSessionCard);
+                return;
+            }
+        }
+        insertDebateCard(card, { zone: 'pending' });
+    }
+    function approveDebateCard(card) {
+        if (!card || card.dataset.approved === 'true') return null;
+        const outputEl = card.querySelector('.debate-model-card-output');
+        const text = String(outputEl?.innerText || outputEl?.textContent || '').trim();
+        if (!text || card.dataset.kind === 'placeholder') return null;
+        const llmName = card.dataset.llmName || 'Model';
+        card.dataset.approved = 'true';
+        card.dataset.approvalSelectable = 'false';
+        card.dataset.live = 'false';
+        card.classList.add('is-approved');
+        card.querySelector('.debate-approval-check')?.remove();
+        setDebatePrintingState(card, llmName, false);
+        insertDebateCard(card, { zone: 'approved' });
+        syncModeratorSelectors();
+        applyDebateSessionFilter();
+        return { card, llmName, text };
+    }
+    window.approveDebateCheckbox = function approveDebateCheckbox(checkbox) {
+        const card = checkbox?.closest?.('.debate-model-card');
+        return approveDebateCard(card);
+    };
+    function bindApprovalCheckbox(card) {
+        const checkbox = card?.querySelector?.('.debate-approval-check');
+        if (!checkbox || checkbox.dataset.bound === 'true') return;
+        checkbox.dataset.bound = 'true';
+        checkbox.addEventListener('change', () => {
+            if (checkbox.checked) approveDebateCard(card);
+        });
+        checkbox.addEventListener('click', () => {
+            setTimeout(() => {
+                if (checkbox.isConnected && checkbox.checked) approveDebateCard(card);
+            }, 0);
+        });
+    }
+    function renderDebateModelCards(
+        roleValue = debateRunState.activeRole || (debateRoleSelect?.value || ''),
+        models = getDebateTargetModels(),
+        options = {}
+    ) {
+        if (!debateModelCards) return;
+        const selected = Array.isArray(models) ? models.filter(Boolean) : [];
+        if (!selected.length) return;
+        const approvalSelectable = options.approvalSelectable !== false;
+        const session = ensureDebateSession(debateTabsState.activeSessionId);
+        selected.forEach((name) => {
+            const existingPending = Array.from(debateModelCards.querySelectorAll('.debate-model-card'))
+                .find((card) => (
+                    card.dataset.sessionId === session.id
+                    && card.dataset.llmName === name
+                    && card.dataset.approved !== 'true'
+                    && (
+                        card.dataset.entryKind === 'placeholder'
+                        || card.dataset.live === 'true'
+                        || card.dataset.entryKind === 'response'
+                    )
+                ));
+            if (existingPending) {
+                updateCardRole(existingPending, roleValue);
+                bindApprovalCheckbox(existingPending);
+                insertDebateCard(existingPending, { zone: 'pending' });
+                return;
+            }
+            const key = `${session.id}:${toModelKey(name)}:${Date.now()}:${debateFeedState.nextId++}`;
+            const card = document.createElement('div');
+            card.className = 'debate-model-card';
+            card.dataset.sessionId = session.id;
+            card.dataset.llmName = name;
+            card.dataset.entryKind = 'placeholder';
+            card.dataset.kind = 'placeholder';
+            card.dataset.approvalSelectable = approvalSelectable ? 'true' : 'false';
+            card.dataset.live = 'true';
+            card.id = `debate-placeholder-${key}`;
+            card.innerHTML = `
+                <div class="debate-model-card-header">
+                    <span class="debate-model-card-title">
+                        <span class="status-indicator" data-llm-name="${escapeHtml(name)}"></span>
+                        <span class="debate-model-card-title-main">
+                            <span class="debate-model-card-name">${escapeHtml(name)}</span>
+                            <span class="debate-model-card-role" data-role-for="${escapeHtml(name)}"></span>
+                            ${buildApprovalCheckboxHtml(approvalSelectable)}
+                        </span>
+                    </span>
+                    <span class="debate-model-card-meta">
+                        <span class="debate-model-card-time"></span>
+                        <button type="button" class="ib debate-card-branch" title="Branch" aria-label="Branch"><i class="ti ti-git-branch"></i></button>
+                        <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy">⧉</button>
+                        <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML">⬆</button>
+                        <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete">🗑️</button>
+                        <button type="button" class="ib debate-fav" title="Favorite" aria-label="Favorite">★</button>
+                    </span>
+                </div>
+                <div class="debate-model-card-output debate-model-card-empty"></div>
+            `;
+            updateCardRole(card, roleValue);
+            bindApprovalCheckbox(card);
+            insertDebateCard(card, { zone: 'pending' });
+            debateFeedState.placeholders.add(`${session.id}:${key}`);
+        });
+        applyDebateSessionFilter();
+    }
+    function appendModeratorFeedEntry(text) {
+        if (!debateModelCards) return;
+        const normalizedText = String(text || '').trim();
+        if (!normalizedText) return;
+        const session = ensureDebateSession(debateTabsState.activeSessionId);
+        const card = document.createElement('div');
+        const now = new Date();
+        const hh = String(now.getHours()).padStart(2, '0');
+        const mm = String(now.getMinutes()).padStart(2, '0');
+        card.className = 'debate-model-card debate-moderator-card';
+        card.dataset.sessionId = session.id;
+        card.dataset.llmName = 'Moderator';
+        card.dataset.entryKind = 'response';
+        card.dataset.kind = 'moderator';
+        card.dataset.starred = 'false';
+        card.dataset.entryId = String(debateFeedState.nextId++);
+        card.dataset.approved = 'moderator';
+        card.innerHTML = `
+            <div class="debate-model-card-header">
+                <span class="debate-model-card-title">
+                    <span class="debate-model-card-title-main">
+                        <span class="debate-model-card-name">Moderator</span>
+                    </span>
+                </span>
+                <span class="debate-model-card-meta">
+                    <span class="debate-model-card-time">${hh}:${mm}</span>
+                    <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy">⧉</button>
+                    <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML">⬆</button>
+                    <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete">🗑️</button>
+                    <button type="button" class="ib debate-fav" title="Favorite" aria-label="Favorite">★</button>
+                </span>
+            </div>
+            <div class="debate-model-card-output"></div>
+        `;
+        const body = card.querySelector('.debate-model-card-output');
+        body.textContent = normalizedText;
+        insertModeratorCard(card);
+        applyDebateSessionFilter();
+    }
+    function updateCardRole(card, roleValue) {
+        if (!card) return;
+        const roleEl = card.querySelector('.debate-model-card-role');
+        if (roleEl) {
+            roleEl.textContent = roleValue ? String(roleValue).trim() : '';
+        }
+    }
+    function appendDebateFeedEntry(llmName, text, html = '', meta = {}) {
+        if (!debateModelCards || !llmName) return;
+        const normalizedText = String(text || '').trim();
+        const normalizedHtml = sanitizeInlineHtml(String(html || '').trim());
+        if (!normalizedText && !normalizedHtml) return;
+        const session = ensureDebateSession(debateTabsState.activeSessionId);
+        const modelKey = `${session.id}:${toModelKey(llmName)}`;
+        const isFinal = isFinalResponseMeta(meta);
+        const contentHash = `${isFinal ? 'final' : 'printing'}|${normalizedText.length}:${normalizedText.slice(0, 64)}|${normalizedHtml.length}:${normalizedHtml.slice(0, 64)}`;
+        if (debateFeedState.lastCommittedHashByModel[modelKey] === contentHash) return;
+        debateFeedState.lastCommittedHashByModel[modelKey] = contentHash;
+        const liveCard = Array.from(debateModelCards.querySelectorAll('.debate-model-card'))
+            .find((card) => (
+                card.dataset.sessionId === session.id
+                && card.dataset.llmName === llmName
+                && card.dataset.approved !== 'true'
+                && (card.dataset.entryKind === 'placeholder' || card.dataset.live === 'true')
+            ))
+            || Array.from(debateModelCards.querySelectorAll('.debate-model-card'))
+                .reverse()
+                .find((card) => (
+                    card.dataset.sessionId === session.id
+                    && card.dataset.llmName === llmName
+                    && card.dataset.approved !== 'true'
+                    && card.dataset.entryKind === 'response'
+                    && card.dataset.kind !== 'moderator'
+                ));
+        if (liveCard) {
+            liveCard.dataset.entryKind = 'response';
+            liveCard.dataset.kind = meta.kind || 'answer';
+            liveCard.dataset.starred = liveCard.dataset.starred || 'false';
+            bindApprovalCheckbox(liveCard);
+            const now = new Date();
+            const hh = String(now.getHours()).padStart(2, '0');
+            const mm = String(now.getMinutes()).padStart(2, '0');
+            const timeEl = liveCard.querySelector('.debate-model-card-time');
+            if (timeEl) timeEl.textContent = `${hh}:${mm}`;
+            updateCardRole(liveCard, meta.role || debateRunState.activeRole || (debateRoleSelect?.value || ''));
+            const body = liveCard.querySelector('.debate-model-card-output');
+            if (body) {
+                body.classList.remove('debate-model-card-empty');
+                if (normalizedHtml) {
+                    replaceChildrenFromSanitizedHtml(body, normalizedHtml);
+                } else {
+                    body.textContent = normalizedText;
+                }
+            }
+            setDebatePrintingState(liveCard, llmName, !isFinal);
+            applyDebateSessionFilter();
+            return;
+        }
+        const card = document.createElement('div');
+        const now = new Date();
+        const hh = String(now.getHours()).padStart(2, '0');
+        const mm = String(now.getMinutes()).padStart(2, '0');
+        card.className = 'debate-model-card';
+        card.dataset.sessionId = session.id;
+        card.dataset.llmName = llmName;
+        card.dataset.entryKind = 'response';
+        card.dataset.kind = meta.kind || 'answer';
+        card.dataset.starred = 'false';
+        card.dataset.entryId = String(debateFeedState.nextId++);
+        card.innerHTML = `
+            <div class="debate-model-card-header">
+                <span class="debate-model-card-title">
+                    <span class="status-indicator success" data-llm-name="${escapeHtml(llmName)}"></span>
+                    <span class="debate-model-card-title-main">
+                        <span class="debate-model-card-name">${escapeHtml(llmName)}</span>
+                        <span class="debate-model-card-role"></span>
+                        ${buildApprovalCheckboxHtml(true)}
+                    </span>
+                </span>
+                <span class="debate-model-card-meta">
+                    <span class="debate-model-card-time">${hh}:${mm}</span>
+                    <button type="button" class="ib debate-card-branch" title="Branch" aria-label="Branch"><i class="ti ti-git-branch"></i></button>
+                    <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy">⧉</button>
+                    <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML">⬆</button>
+                    <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete">🗑️</button>
+                    <button type="button" class="ib debate-fav" title="Favorite" aria-label="Favorite">★</button>
+                </span>
+            </div>
+            <div class="debate-model-card-output"></div>
+        `;
+        updateCardRole(card, meta.role || debateRunState.activeRole || (debateRoleSelect?.value || ''));
+        const body = card.querySelector('.debate-model-card-output');
+        if (normalizedHtml) {
+            replaceChildrenFromSanitizedHtml(body, normalizedHtml);
+        } else {
+            body.textContent = normalizedText;
+        }
+        setDebatePrintingState(card, llmName, !isFinal);
+        bindApprovalCheckbox(card);
+        insertDebateCard(card, { zone: card.dataset.approved === 'true' ? 'approved' : 'pending' });
+        applyDebateSessionFilter();
+    }
+    function setDebateApprovalCandidate(candidate) {
+        debateFeedState.pendingApproval = candidate || null;
+        if (!debateApprovalPanel || !debateApprovalBody) return;
+        if (!candidate) {
+            debateApprovalPanel.classList.remove('hidden');
+            debateApprovalBody.classList.add('debate-model-card-empty');
+            debateApprovalBody.textContent = '';
+            if (debateApprovalMeta) debateApprovalMeta.textContent = 'Waiting';
+            autoGrowDebateApprovalBody();
+            return;
+        }
+        debateApprovalPanel.classList.remove('hidden');
+        if (debateApprovalMeta) debateApprovalMeta.textContent = `${candidate.llmName} pending`;
+        debateApprovalBody.classList.remove('debate-model-card-empty');
+        if (candidate.html) {
+            replaceChildrenFromSanitizedHtml(debateApprovalBody, candidate.html);
+        } else {
+            debateApprovalBody.textContent = candidate.text || '';
+        }
+        autoGrowDebateApprovalBody();
+    }
+    function collectCheckedDebateApprovals({ commit = false } = {}) {
+        if (!debateModelCards) return [];
+        const activeSessionId = debateTabsState.activeSessionId;
+        return Array.from(debateModelCards.querySelectorAll('.debate-approval-check:checked'))
+            .map((checkbox) => {
+                const card = checkbox.closest('.debate-model-card');
+                if (!card || card.dataset.sessionId !== activeSessionId) return null;
+                const outputEl = card.querySelector('.debate-model-card-output');
+                const text = String(outputEl?.innerText || outputEl?.textContent || '').trim();
+                if (!text || card.dataset.kind === 'placeholder') return null;
+                const item = {
+                    card,
+                    llmName: card.dataset.llmName || 'Model',
+                    text
+                };
+                if (commit) {
+                    approveDebateCard(card);
+                }
+                return item;
+            })
+            .filter(Boolean);
+    }
+    function collectApprovedDebateAnswers() {
+        if (!debateModelCards) return [];
+        const activeSessionId = debateTabsState.activeSessionId;
+        return Array.from(debateModelCards.querySelectorAll('.debate-model-card[data-approved="true"]'))
+            .filter((card) => (
+                card.dataset.sessionId === activeSessionId
+                && card.dataset.kind !== 'moderator'
+                && card.dataset.kind !== 'fragment'
+            ))
+            .map((card) => {
+                const outputEl = card.querySelector('.debate-model-card-output');
+                const text = String(outputEl?.innerText || outputEl?.textContent || '').trim();
+                if (!text) return null;
+                return {
+                    card,
+                    llmName: card.dataset.llmName || 'Model',
+                    text
+                };
+            })
+            .filter(Boolean);
+    }
+    function getModeratorDispatchText() {
+        const moderatorInputText = String(promptInput?.value || '').trim();
+        const moderatorBodyText = String(
+            debateModMessageBody?.innerText
+            || debateModMessageBody?.textContent
+            || ''
+        ).trim();
+        return moderatorInputText || moderatorBodyText;
+    }
+    function clearModeratorComposer() {
+        if (promptInput) {
+            promptInput.value = '';
+            promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+            autoGrowDebateTextarea(promptInput);
+        }
+        if (debateModMessageBody) {
+            debateModMessageBody.innerHTML = '';
+        }
+    }
+    function buildDebateModeratorDispatchText() {
+        const approval = debateFeedState.pendingApproval;
+        const legacyApprovalText = approval
+            ? String(approval.text || '').trim() || String(debateApprovalBody?.innerText || '').trim()
+            : '';
+        const checkedApprovals = collectCheckedDebateApprovals();
+        const approvedAnswers = checkedApprovals.length ? checkedApprovals : collectApprovedDebateAnswers();
+        const moderatorText = getModeratorDispatchText();
+        const parts = [];
+        approvedAnswers.forEach((item) => {
+            parts.push(`${item.llmName}\n${item.text}`);
+        });
+        if (!approvedAnswers.length && legacyApprovalText) {
+            const approvalLabel = approval?.llmName || 'Model';
+            parts.push(`${approvalLabel}\n${legacyApprovalText}`);
+        }
+        if (moderatorText) {
+            parts.push(`Moderator\n${moderatorText}`);
+        }
+        return parts.join('\n\n').trim();
+    }
+    function updateDebateModelCardOutput(llmName, text, html = '', meta = {}) {
+        const normalizedText = String(text || '').trim();
+        const normalizedHtml = sanitizeInlineHtml(String(html || '').trim());
+        appendDebateFeedEntry(llmName, normalizedText, normalizedHtml, {
+            ...meta,
+            role: meta?.role || debateRunState.activeRole || (debateRoleSelect?.value || '')
+        });
+    }
+    function approvePendingDebateCandidate() {
+        const candidate = debateFeedState.pendingApproval;
+        if (!candidate) return false;
+        appendDebateFeedEntry(candidate.llmName, candidate.text, candidate.html, candidate);
+        setDebateApprovalCandidate(null);
+        return true;
+    }
+    function setActiveDebateSession(sessionId) {
+        const session = ensureDebateSession(sessionId);
+        debateTabsState.activeSessionId = session.id;
+        renderDebateSessionTabs();
+        applyDebateSessionFilter();
+    }
+    function addDebateSession() {
+        const next = String(debateTabsState.sessions.size + 1);
+        ensureDebateSession(next);
+        setActiveDebateSession(next);
+    }
+    function getApprovedSenderModels() {
+        if (!debateModelCards) return [];
+        const activeSessionId = debateTabsState.activeSessionId;
+        return Array.from(debateModelCards.querySelectorAll('.debate-model-card[data-approved="true"]'))
+            .filter((card) => card.dataset.sessionId === activeSessionId)
+            .map((card) => card.dataset.llmName || '')
+            .filter(Boolean)
+            .filter((name, index, list) => list.indexOf(name) === index);
+    }
+    function syncModeratorSelectors() {
+        const selected = getSelectedLLMs();
+        const approvedSenders = getApprovedSenderModels();
+        const senderOptions = ['<option value="Moderator">Moderator</option>']
+            .concat(selected.map((name) => {
+                const disabled = approvedSenders.includes(name) ? '' : ' disabled';
+                return `<option value="${escapeHtml(name)}"${disabled}>${escapeHtml(name)}</option>`;
+            }))
+            .join('');
+        const receiverOptions = [
+            '<option value="">All models</option>',
+            '<option value="__none__">None</option>'
+        ]
+            .concat(selected.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`))
+            .join('');
+        if (debateSenderSelect) {
+            const prevValue = debateSenderSelect.value;
+            debateSenderSelect.innerHTML = senderOptions;
+            const hasPrevValue = Array.from(debateSenderSelect.options).some((opt) => opt.value === prevValue && !opt.disabled);
+            debateSenderSelect.value = hasPrevValue ? prevValue : 'Moderator';
+        }
+        if (debateReceiverSelect) {
+            const prevValue = debateReceiverSelect.value;
+            debateReceiverSelect.innerHTML = receiverOptions;
+            const hasPrevValue = Array.from(debateReceiverSelect.options).some((opt) => opt.value === prevValue);
+            debateReceiverSelect.value = hasPrevValue ? prevValue : '__none__';
+        }
+    }
+    function syncDirectionIcon() {
+        if (!debateDirectionIcon) return;
+        if (debateDirectionState.mode === 'all') {
+            debateDirectionIcon.textContent = '||';
+            return;
+        }
+        debateDirectionIcon.textContent = debateDirectionState.mode === 'reverse' ? '←' : '→';
+    }
+    function syncModeratorMiniPrompts() {
+        if (!debateMiniPrompts) return;
+        const role = debateRoleSelect?.value || '';
+        const action = debateActionSelect?.value || '';
+        const pieces = [];
+        if (role) pieces.push(`<span class="mod-mini-prompt">Role: ${escapeHtml(role)}</span>`);
+        if (action) pieces.push(`<span class="mod-mini-prompt">Action: ${escapeHtml(action)}</span>`);
+        debateMiniPrompts.innerHTML = pieces.join('');
+        if (debateModMessageBody) {
+            debateModMessageBody.innerHTML = pieces.join(' ');
+        }
+    }
+    function syncModeratorTime() {
+        if (!debateModTime) return;
+        const now = new Date();
+        debateModTime.textContent = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    }
+    function hideDebateSelectionToolbar() {
+        if (debateSelToolbar) debateSelToolbar.classList.remove('vis');
+        debateSelectionState.range = null;
+        debateSelectionState.target = null;
+    }
+    function showDebateSelectionToolbar(target) {
+        if (!debateSelToolbar || !target) return;
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
+        const range = sel.getRangeAt(0).cloneRange();
+        const rect = range.getBoundingClientRect();
+        const wrapRect = document.querySelector('.prompt-sandwich')?.getBoundingClientRect();
+        if (!rect || !wrapRect) return;
+        debateSelectionState.range = range;
+        debateSelectionState.target = target;
+        const top = Math.max(4, rect.top - wrapRect.top - 36);
+        let left = rect.left - wrapRect.left + rect.width / 2 - 80;
+        left = Math.max(4, Math.min(left, wrapRect.width - 170));
+        debateSelToolbar.style.top = `${top}px`;
+        debateSelToolbar.style.left = `${left}px`;
+        debateSelToolbar.classList.add('vis');
+    }
+    function applyDebateSelectionStyle(command, value = null) {
+        if (!debateSelectionState.range) return;
+        const sel = window.getSelection();
+        if (!sel) return;
+        sel.removeAllRanges();
+        sel.addRange(debateSelectionState.range);
+        if (command === 'hiliteColor') {
+            document.execCommand('hiliteColor', false, value);
+        } else {
+            document.execCommand(command, false, value);
+        }
+        sel.removeAllRanges();
+        hideDebateSelectionToolbar();
+    }
+    function promoteDebateSelectionToFavorite() {
+        const text = window.getSelection()?.toString()?.trim() || '';
+        if (!text || !debateModelCards) return;
+        const session = ensureDebateSession(debateTabsState.activeSessionId);
+        const card = document.createElement('div');
+        const now = new Date();
+        const hh = String(now.getHours()).padStart(2, '0');
+        const mm = String(now.getMinutes()).padStart(2, '0');
+        card.className = 'debate-model-card';
+        card.dataset.sessionId = session.id;
+        card.dataset.entryKind = 'response';
+        card.dataset.kind = 'fragment';
+        card.dataset.starred = 'true';
+        card.innerHTML = `
+            <div class="debate-model-card-header">
+                <span class="debate-model-card-title">
+                    <span class="status-indicator success"></span>
+                    <span class="debate-model-card-title-main">
+                        <span class="debate-model-card-name">Fragment</span>
+                        <span class="debate-model-card-role"></span>
+                    </span>
+                </span>
+                <span class="debate-model-card-meta">
+                    <span class="debate-model-card-time">${hh}:${mm}</span>
+                    <button type="button" class="ib debate-card-branch" title="Branch" aria-label="Branch"><i class="ti ti-git-branch"></i></button>
+                    <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy">⧉</button>
+                    <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML">⬆</button>
+                    <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete">🗑️</button>
+                    <button type="button" class="ib debate-fav active" title="Favorite" aria-label="Favorite">★</button>
+                </span>
+            </div>
+            <div class="debate-model-card-output">${escapeHtml(text)}</div>
+        `;
+        debateModelCards.appendChild(card);
+        applyDebateSessionFilter();
+        hideDebateSelectionToolbar();
+        window.getSelection().removeAllRanges();
+    }
+    function collectDebateFeedHtml(activeOnly = false) {
+        if (!debateModelCards) return '';
+        const activeSessionId = debateTabsState.activeSessionId;
+        const favoriteOnly = !!debateTabsState.favoriteOnlyBySession.get(activeSessionId);
+        const cards = Array.from(debateModelCards.children).filter((card) => {
+            if (!(card instanceof HTMLElement)) return false;
+            if (card.dataset.sessionId !== activeSessionId) return false;
+            if (!favoriteOnly) return true;
+            return card.dataset.starred === 'true' || card.dataset.kind === 'fragment';
+        });
+        const html = cards.map((card) => {
+            const clone = card.cloneNode(true);
+            if (!(clone instanceof HTMLElement)) return '';
+            clone.querySelectorAll('.debate-model-card-meta, .debate-approval-check, .debate-model-card-printing').forEach((el) => el.remove());
+            return clone.outerHTML;
+        }).join('');
+        return activeOnly ? html : `<div class="debate-feed-export">${html}</div>`;
+    }
+    function collectDebateFeedText() {
+        if (!debateModelCards) return '';
+        const activeSessionId = debateTabsState.activeSessionId;
+        const favoriteOnly = !!debateTabsState.favoriteOnlyBySession.get(activeSessionId);
+        const lines = [];
+        Array.from(debateModelCards.children).forEach((card) => {
+            if (!(card instanceof HTMLElement)) return;
+            if (card.dataset.sessionId !== activeSessionId) return;
+            if (favoriteOnly && card.dataset.starred !== 'true' && card.dataset.kind !== 'fragment') return;
+            if (card.dataset.kind === 'moderator') return;
+            const outputEl = card.querySelector('.debate-model-card-output');
+            const text = String(outputEl?.innerText || outputEl?.textContent || '').trim();
+            if (!text) return;
+            lines.push(text);
+        });
+        return lines.join('\n\n');
+    }
+    function clearDebateFeed(activeSessionId = debateTabsState.activeSessionId) {
+        if (!debateModelCards) return;
+        Array.from(debateModelCards.children).forEach((card) => {
+            if (card instanceof HTMLElement && card.dataset.sessionId === activeSessionId) {
+                card.remove();
+            }
+        });
+        debateFeedState.placeholders = new Set(
+            Array.from(debateFeedState.placeholders).filter((key) => !String(key).startsWith(`${activeSessionId}:`))
+        );
     }
 
     //-- 2.1. Выносим функцию сборки промпта в общую область видимости --//
@@ -12480,13 +13421,23 @@ if (smartCompareButton) {
             checkCompareButtonState();
             renderDiagnosticsModal();
             notifySelectionChanged();
+            syncModeratorSelectors();
+            syncModeratorMiniPrompts();
         });
         button.addEventListener('dblclick', (event) => {
             event.preventDefault();
             toggleAllLLMs();
+            syncModeratorSelectors();
+            syncModeratorMiniPrompts();
         });
     });
     checkCompareButtonState();
+    syncModeratorSelectors();
+    syncModeratorMiniPrompts();
+    syncModeratorTime();
+    renderDebateSessionTabs();
+    applyDebateSessionFilter();
+    syncDebateAutoPauseButton();
 
     // --- TEMPLATE FUNCTIONALITY LOGIC ---
     function updateAllLists() {
@@ -13173,6 +14124,237 @@ function exportSingleTemplate(templateName, sourceData = null) {
                 setActiveDevtoolsTab(devtoolsTabs[nextIndex].dataset.tabTarget);
             });
         });
+    }
+    debateSessionTabs?.addEventListener('click', (event) => {
+        const tab = event.target.closest('.debate-session-tab');
+        if (!tab) return;
+        setActiveDebateSession(tab.dataset.sessionId || '1');
+    });
+    debateSessionTabs?.addEventListener('dblclick', (event) => {
+        const tab = event.target.closest('.debate-session-tab');
+        if (!tab) return;
+        const sessionId = String(tab.dataset.sessionId || '1');
+        const nextValue = !debateTabsState.favoriteOnlyBySession.get(sessionId);
+        debateTabsState.favoriteOnlyBySession.set(sessionId, nextValue);
+        applyDebateSessionFilter();
+    });
+    debateSessionAddBtn?.addEventListener('click', () => addDebateSession());
+    debateAutoPauseBtn?.addEventListener('click', () => {
+        debatePaused = !debatePaused;
+        if (!debatePaused && typeof resolveDebateApprovalGlobal === 'function') {
+            resolveDebateApprovalGlobal();
+        }
+        syncDebateAutoPauseButton();
+    });
+    debateSessionCopyBtn?.addEventListener('click', async () => {
+        const html = collectDebateFeedHtml();
+        const text = collectDebateFeedText();
+        if (!html && !text) return;
+        try {
+            await writeRichContentToClipboard({ text, html });
+        } catch (err) {
+            console.warn('[RESULTS] debate feed copy failed', err);
+        }
+    });
+    document.addEventListener('click', (event) => {
+        const sessionExportBtn = event.target.closest('#debate-session-export-btn');
+        if (!sessionExportBtn) return;
+        try {
+            const html = collectDebateFeedHtml();
+            const text = collectDebateFeedText();
+            if (!html && !text) return;
+            const body = html || `<pre>${escapeHtml(text)}</pre>`;
+            const htmlContent = `<!doctype html><html><head><meta charset="utf-8"><title>Debate Feed</title></head><body>${body}</body></html>`;
+            const blob = new Blob([htmlContent], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = `debate_feed_${formatPipelineTimestamp()}.html`;
+            document.body.appendChild(anchor);
+            anchor.click();
+            document.body.removeChild(anchor);
+            URL.revokeObjectURL(url);
+            flashButtonFeedback(sessionExportBtn, 'success');
+        } catch (err) {
+            console.warn('[RESULTS] debate feed export failed', err);
+            flashButtonFeedback(sessionExportBtn, 'error');
+        }
+    });
+    debateSessionClearBtn?.addEventListener('click', () => {
+        clearDebateFeed();
+        setDebateApprovalCandidate(null);
+        applyDebateSessionFilter();
+    });
+    document.addEventListener('click', (event) => {
+        const exportBtn = event.target.closest('.debate-card-export');
+        if (!exportBtn) return;
+        const card = exportBtn.closest('.debate-model-card');
+        if (!card) return;
+        const outputEl = card.querySelector('.debate-model-card-output');
+        const html = outputEl ? (outputEl.innerHTML || '').trim() : '';
+        const text = html
+            ? plainTextFromHtml(html)
+            : (outputEl ? (outputEl.innerText || outputEl.textContent || '').trim() : '');
+        if (!text && !html) {
+            flashButtonFeedback(exportBtn, 'warn');
+            return;
+        }
+        try {
+            const body = html || escapeHtml(text);
+            const htmlContent = `<!doctype html><html><body><div class="debate-card-export-item">${body}</div></body></html>`;
+            const blob = new Blob([htmlContent], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = `debate_card_${formatPipelineTimestamp()}.html`;
+            document.body.appendChild(anchor);
+            anchor.click();
+            document.body.removeChild(anchor);
+            URL.revokeObjectURL(url);
+            flashButtonFeedback(exportBtn, 'success');
+        } catch (err) {
+            console.warn('[RESULTS] debate card export failed', err);
+            flashButtonFeedback(exportBtn, 'error');
+        }
+    });
+    debateModelCards?.addEventListener('click', async (event) => {
+        const approvalCheck = event.target.closest('.debate-approval-check');
+        if (approvalCheck) {
+            const card = approvalCheck.closest('.debate-model-card');
+            approveDebateCard(card);
+            return;
+        }
+        const favBtn = event.target.closest('.debate-fav');
+        const card = event.target.closest('.debate-model-card');
+        if (!card) return;
+
+        if (favBtn) {
+            const starred = card.dataset.starred === 'true';
+            card.dataset.starred = starred ? 'false' : 'true';
+            favBtn.classList.toggle('active', !starred);
+            applyDebateSessionFilter();
+            return;
+        }
+
+        const outputEl = card.querySelector('.debate-model-card-output');
+        const text = outputEl?.innerText?.trim() || '';
+        const html = outputEl?.innerHTML?.trim() || '';
+
+        if (event.target.closest('.debate-card-copy')) {
+            if (!text && !html) return;
+            try { await writeRichContentToClipboard({ text, html }); } catch (err) { console.warn(err); }
+            return;
+        }
+        if (event.target.closest('.debate-card-export')) {
+            return;
+        }
+        if (event.target.closest('.debate-card-delete')) {
+            card.remove();
+            applyDebateSessionFilter();
+            return;
+        }
+        if (event.target.closest('.debate-card-branch')) {
+            const modelName = card.dataset.llmName || '';
+            if (debateSenderSelect && modelName) {
+                const hasModel = Array.from(debateSenderSelect.options).some((opt) => opt.value === modelName);
+                if (hasModel) debateSenderSelect.value = modelName;
+            }
+            if (promptInput) {
+                promptInput.value = text;
+                autoGrowDebateTextarea(promptInput);
+                promptInput.focus();
+            }
+        }
+    });
+    debateModelCards?.addEventListener('change', (event) => {
+        const approvalCheck = event.target.closest?.('.debate-approval-check');
+        if (!approvalCheck || !approvalCheck.checked) return;
+        const card = approvalCheck.closest('.debate-model-card');
+        approveDebateCard(card);
+    });
+    debateRoleSelect?.addEventListener('change', () => {
+        syncModeratorMiniPrompts();
+        const roleText = debateRoleSelect.value || '';
+        if (promptInput && roleText) {
+            promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+    });
+    debateSenderSelect?.addEventListener('change', syncDirectionIcon);
+    debateReceiverSelect?.addEventListener('change', syncDirectionIcon);
+    debateRoleSelect?.addEventListener('change', syncDirectionIcon);
+    debateDirectionIcon?.addEventListener('click', () => {
+        debateDirectionState.mode = debateDirectionState.mode === 'forward'
+            ? 'reverse'
+            : debateDirectionState.mode === 'reverse'
+                ? 'all'
+                : 'forward';
+        syncDirectionIcon();
+    });
+    syncDirectionIcon();
+    debateActionSelect?.addEventListener('change', syncModeratorMiniPrompts);
+    debateModeSelect?.addEventListener('change', syncModeratorMiniPrompts);
+    debateLengthSelect?.addEventListener('change', syncModeratorMiniPrompts);
+    debateModSendBtn?.addEventListener('click', triggerPipelineRun);
+    debateModCopyBtn?.addEventListener('click', async () => {
+        const text = debateModMessageBody?.innerText?.trim() || promptInput?.value?.trim() || '';
+        const html = debateModMessageBody?.innerHTML?.trim() || escapeHtml(promptInput?.value?.trim() || '');
+        if (!text && !html) return;
+        try { await writeRichContentToClipboard({ text, html }); } catch (err) { console.warn(err); }
+    });
+    debateModExportBtn?.addEventListener('click', () => {
+        const body = debateModMessageBody?.innerHTML?.trim() || escapeHtml(promptInput?.value?.trim() || '');
+        if (!body) return;
+        const blob = new Blob([`<!doctype html><html><body>${body}</body></html>`], { type: 'text/html' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `moderator_${formatPipelineTimestamp()}.html`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+    });
+    debateModClearBtn?.addEventListener('click', () => {
+        clearModeratorComposer();
+    });
+    debateSelToolbar?.addEventListener('click', (event) => {
+        const btn = event.target.closest('button');
+        if (!btn) return;
+        event.preventDefault();
+        const color = btn.dataset.color || '';
+        const cmd = btn.dataset.cmd || '';
+        if (color) {
+            applyDebateSelectionStyle('hiliteColor', color);
+            return;
+        }
+        if (cmd) {
+            applyDebateSelectionStyle(cmd);
+            return;
+        }
+        if (btn.dataset.fav) {
+            promoteDebateSelectionToFavorite();
+        }
+    });
+    document.addEventListener('mouseup', (event) => {
+        const target = event.target?.closest?.('.debate-model-card-output, #mod-message-body');
+        if (!target) {
+            hideDebateSelectionToolbar();
+            return;
+        }
+        requestAnimationFrame(() => showDebateSelectionToolbar(target));
+    });
+    document.addEventListener('mousedown', (event) => {
+        if (event.target?.closest?.('#debateSelTb')) return;
+        if (!event.target?.closest?.('.debate-model-card-output, #mod-message-body')) {
+            hideDebateSelectionToolbar();
+        }
+    });
+    if (promptInput) {
+        autoGrowDebateTextarea(promptInput);
+        promptInput.addEventListener('input', () => autoGrowDebateTextarea(promptInput));
+    }
+    autoGrowDebateApprovalBody();
+    if (devtoolsTabs.length && devtoolsPanels.length) {
         setActiveDevtoolsTab(activeDevtoolsTabId || DEFAULT_DEVTOOLS_TAB_ID);
     }
     const ensureTelemetryDevtoolsLoaded = () => {

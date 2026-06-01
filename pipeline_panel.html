@@ -127,13 +127,12 @@
                         </div>
                     </div>
                     <div class="top-bar-right">
-                        <label class="top-new-pages-toggle" data-tooltip="Open each model's answer in a new tab for comparison.">
+                        <label class="top-new-pages-toggle" data-tooltip="Open each model response in a new tab.">
                             <span class="top-new-pages-text">New Pages</span>
                             <input type="checkbox" id="new-pages-checkbox" class="top-new-pages-checkbox" checked>
                             <span class="top-toggle-track"><span class="top-toggle-thumb"></span></span>
                         </label>
-                        <!-- Auto checkbox hidden in header; functionality handled elsewhere. -->
-                        <label class="top-new-pages-toggle hidden" data-tooltip="Auto: answers populate cards without extra clicks.">
+                        <label class="top-new-pages-toggle" data-tooltip="Auto debate mode: ON = without moderator confirmation, OFF = with manual moderator confirmation.">
                             <span class="top-new-pages-text">Auto</span>
                             <input type="checkbox" id="auto-checkbox" class="top-new-pages-checkbox">
                             <span class="top-toggle-track"><span class="top-toggle-thumb"></span></span>
@@ -156,20 +155,103 @@
                 <!-- 1.1. Оборачиваем поле ввода в "сэндвич-контейнер" -->
 <div class="prompt-container prompt-sandwich">
     <div id="prefix-container" class="modifier-chips-container"></div>
-    
-    <textarea id="prompt-input" placeholder="Enter a prompt..." data-default-placeholder="Enter a prompt..."></textarea>
-    <div id="prompt-note-view" class="prompt-note-view" role="textbox" aria-multiline="true" aria-label="Note view" data-placeholder="Note..."></div>
-    
-    <div id="suffix-container" class="modifier-chips-container"></div>
-    
+
     <!-- Кнопки копирования и очистки теперь внутри обертки, но позиционируются абсолютно -->
     <input type="file" id="prompt-attach-input" class="visually-hidden" multiple>
-    <button type="button" id="prompt-attach-btn" class="prompt-export-btn" title="Attach file" aria-label="Attach file">+</button>
-    <button type="button" id="prompt-copy-btn" class="prompt-copy-btn" title="Copy prompt" aria-label="Copy prompt">⧉</button>
-    <button type="button" id="prompt-export-html-btn" class="prompt-export-btn" title="Export as HTML" aria-label="Export as HTML">⬆</button>
-    <!-- JSON export button removed per latest UI request -->
-    <button type="button" id="clear-prompt-btn" class="prompt-clear-btn" title="Clear prompt">🗑️</button>
-    <button id="start-button" class="send-button send-button-floating" title="Send prompt">▶</button>
+    <div class="debate-sel-toolbar" id="debateSelTb">
+        <button class="stb col" style="background:#fde68a;border-color:#f59e0b" data-color="#fde68a" title="Yellow highlight"></button>
+        <button class="stb col" style="background:#bbf7d0;border-color:#22c55e" data-color="#bbf7d0" title="Green highlight"></button>
+        <button class="stb col" style="background:#bfdbfe;border-color:#3b82f6" data-color="#bfdbfe" title="Blue highlight"></button>
+        <div style="width:1px;background:rgba(255,255,255,.2);margin:2px 3px;height:14px;flex-shrink:0"></div>
+        <button class="stb" data-cmd="bold" title="Bold"><i class="ti ti-bold" style="font-size:12px"></i></button>
+        <button class="stb" data-cmd="italic" title="Italic"><i class="ti ti-italic" style="font-size:12px"></i></button>
+        <div style="width:1px;background:rgba(255,255,255,.2);margin:2px 3px;height:14px;flex-shrink:0"></div>
+        <button class="stb" data-fav="1" title="Favorite"><i class="ti ti-star" style="font-size:12px"></i></button>
+    </div>
+    <div class="debate-session-bar" id="debate-session-bar">
+        <div class="debate-session-left">
+            <div class="debate-session-tabs" id="debate-session-tabs" role="tablist" aria-label="Debate sessions">
+                <button type="button" class="debate-session-tab active" data-session-id="1" title="Session 1">1</button>
+            </div>
+            <button type="button" id="debate-session-add-btn" class="ib" title="New session" aria-label="New session">+</button>
+        </div>
+        <div class="debate-session-actions">
+            <button type="button" id="debate-auto-pause-btn" class="ib hidden" title="Pause auto debate" aria-label="Pause auto debate">Ⅱ</button>
+            <button type="button" id="debate-session-copy-btn" class="ib" title="Copy feed" aria-label="Copy feed">⧉</button>
+            <button type="button" id="debate-session-export-btn" class="ib" title="Export feed as HTML" aria-label="Export feed as HTML">⬆</button>
+            <button type="button" id="debate-session-clear-btn" class="ib" title="Clear feed" aria-label="Clear feed">🗑️</button>
+        </div>
+    </div>
+    <div class="debate-model-cards" id="debate-model-cards" aria-live="polite"></div>
+    <div class="moderator-input" id="moderator-input">
+        <div class="msg-header">
+            <div class="msg-head-left">
+                <span class="status-indicator st-done" id="mod-status-indicator" title="Moderator status"></span>
+                <select id="mod-sender-select" class="mod-select" aria-label="Sender model">
+                </select>
+                <span class="direction-icon" id="direction-icon" title="Direction">→</span>
+                <select id="mod-receiver-select" class="mod-select" aria-label="Receiver model">
+                    <option value="">All models</option>
+                    <option value="__none__" selected>None</option>
+                </select>
+                <select id="mod-role-select" class="mod-select" aria-label="Receiver role">
+                    <option value="">Role</option>
+                    <option value="expert">Expert</option>
+                    <option value="critic">Critic</option>
+                    <option value="synthesizer">Synthesizer</option>
+                    <option value="provocateur">Provocateur</option>
+                </select>
+            </div>
+            <div class="msg-head-right">
+                <span class="msg-time" id="mod-time">--:--</span>
+                <button type="button" id="mod-copy-btn" class="ib" title="Copy" aria-label="Copy">⧉</button>
+                <button type="button" id="mod-export-btn" class="ib" title="Export HTML" aria-label="Export HTML">⬆</button>
+                <button type="button" id="mod-clear-btn" class="ib" title="Clear" aria-label="Clear">🗑️</button>
+            </div>
+        </div>
+        <div class="mod-middle">
+            <div class="mod-divider-label">Moderator</div>
+            <div id="mod-message-body" class="mod-message-body"></div>
+            <textarea id="modTa" placeholder="Ваш комментарий или управляющий запрос…" oninput="growTA(this)"></textarea>
+        </div>
+        <div class="mod-footer">
+            <div class="mod-footer-left">
+                <div class="mod-controls">
+                    <select id="debate-mode-select" class="mod-select mod-select-compact" aria-label="Debate mode">
+                        <option value="debate" selected>Debate</option>
+                        <option value="research">Research</option>
+                        <option value="brainstorm">Brainstorm</option>
+                        <option value="expert">Expert</option>
+                    </select>
+                    <select id="debate-length-select" class="mod-select mod-select-compact" aria-label="Debate length">
+                        <option value="300">300</option>
+                        <option value="500" selected>500</option>
+                        <option value="700">700</option>
+                        <option value="1000">1000</option>
+                        <option value="inf">∞</option>
+                    </select>
+                    <select id="debate-action-select" class="mod-select mod-select-wide" aria-label="Moderator action">
+                        <option value="">Action</option>
+                        <option value="harden">Harden Critique</option>
+                        <option value="compare">Compare by Criteria</option>
+                        <option value="example">Add Concrete Example</option>
+                        <option value="assumptions">Find Assumptions</option>
+                        <option value="counter">Request Counterexample</option>
+                        <option value="mvp">Translate to MVP</option>
+                        <option value="grounding">Grounding Plan</option>
+                        <option value="final">Final Synthesis</option>
+                    </select>
+                </div>
+                <div class="mod-mini-prompts" id="mod-mini-prompts"></div>
+            </div>
+            <button type="button" id="mod-send-btn" class="mod-send-btn" title="Send"><i class="ti ti-send"></i></button>
+        </div>
+    </div>
+    <div id="suffix-container" class="modifier-chips-container"></div>
+    <button type="button" id="prompt-copy-btn" class="prompt-copy-btn hidden" title="Copy prompt" aria-label="Copy prompt">⧉</button>
+    <button type="button" id="prompt-export-html-btn" class="prompt-export-btn hidden" title="Export feed as HTML" aria-label="Export feed as HTML">⬆</button>
+    <button type="button" id="clear-prompt-btn" class="prompt-clear-btn hidden" title="Clear prompt">🗑️</button>
+    <button id="start-button" class="send-button send-button-floating hidden" title="Send prompt">▶</button>
 </div>
 <div class="attachment-bar" id="prompt-attachment-bar" aria-live="polite"></div>
             </div>
