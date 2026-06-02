@@ -10539,6 +10539,7 @@ document.addEventListener('click', (event) => {
 
 // Подстраховка: если модификаторы уже загружены до этого места — отрендерим повторно при изменении DOM
     const modifiersRowObserver = new MutationObserver(() => {
+        if (typeof document === 'undefined') return;
         const row = document.getElementById('modifiers-row');
         if (row && row.childElementCount === 0 && Object.keys(modifiersById || {}).length) {
             const merged = Object.values(modifiersById).sort((a,b) => (a.order||999)-(b.order||999));
@@ -11030,7 +11031,9 @@ document.addEventListener('click', (event) => {
         getItButton.disabled = true;
     }
 
-    startButton.disabled = false;
+    if (startButton) {
+        startButton.disabled = false;
+    }
 
         //-- 1.1. Скрываем секцию Comparative Analysis при инициализации --//
     if (comparisonSection) {
@@ -12261,6 +12264,7 @@ function checkCompareButtonState() {
     const debateModelCards = document.getElementById('debate-model-cards');
     const debateSessionTabs = document.getElementById('debate-session-tabs');
     const debateSessionAddBtn = document.getElementById('debate-session-add-btn');
+    const debateSessionDeleteBtn = document.getElementById('debate-session-delete-btn');
     const debateSessionCopyBtn = document.getElementById('debate-session-copy-btn');
     const debateSessionExportBtn = document.getElementById('debate-session-export-btn');
     const debateSessionClearBtn = document.getElementById('debate-session-clear-btn');
@@ -12284,14 +12288,15 @@ function checkCompareButtonState() {
     const debateSelToolbar = document.getElementById('debateSelTb');
     const debateTabsState = {
         activeSessionId: '1',
-        favoriteOnlyBySession: new Map(),
-        sessions: new Map([['1', { id: '1', title: '1', cards: [] }]])
+        sessions: new Map([['1', { id: '1', title: '1', favoriteOnly: false, cards: [], messages: [] }]])
     };
     const debateRunState = {
         activeRole: ''
     };
     const debateSelectionState = { range: null, target: null };
     const debateDirectionState = { mode: 'forward' };
+    const DEBATE_SESSION_CLICK_DELAY_MS = 180;
+    let debateSessionClickTimer = null;
     const debateFeedState = {
         nextId: 1,
         placeholders: new Set(),
@@ -12299,6 +12304,18 @@ function checkCompareButtonState() {
         lastCommittedHashByModel: {},
         selectedCardEl: null
     };
+    const debateMessageStore = new Map();
+    const debateDomIndex = new Map();
+    function makeDebateEntryId(prefix = 'entry') {
+        return `${prefix}-${Date.now()}-${debateFeedState.nextId++}`;
+    }
+    function normalizeDebateBoolean(value) {
+        return value === true || value === 'true';
+    }
+    function normalizeDebateKind(value, fallback = 'answer') {
+        const kind = String(value || fallback || '').trim();
+        return kind || fallback;
+    }
     function syncDebateAutoPauseButton() {
         if (!debateAutoPauseBtn) return;
         const isAuto = !!autoCheckbox?.checked;
@@ -12331,33 +12348,181 @@ function checkCompareButtonState() {
     function ensureDebateSession(sessionId) {
         const id = String(sessionId || '1');
         if (!debateTabsState.sessions.has(id)) {
-            debateTabsState.sessions.set(id, { id, title: id, cards: [] });
+            debateTabsState.sessions.set(id, { id, title: id, favoriteOnly: false, cards: [], messages: [] });
         }
-        return debateTabsState.sessions.get(id);
+        const session = debateTabsState.sessions.get(id);
+        if (!Array.isArray(session.messages)) session.messages = [];
+        if (!Array.isArray(session.cards)) session.cards = [];
+        if (typeof session.favoriteOnly !== 'boolean') {
+            session.favoriteOnly = false;
+        }
+        return session;
+    }
+    function getDebateSessionFavoriteOnly(sessionId = debateTabsState.activeSessionId) {
+        return !!ensureDebateSession(sessionId).favoriteOnly;
+    }
+    function setDebateSessionFavoriteOnly(sessionId, favoriteOnly) {
+        const session = ensureDebateSession(sessionId);
+        session.favoriteOnly = !!favoriteOnly;
+        return session.favoriteOnly;
+    }
+    function getDebateSessionIdsSorted() {
+        return Array.from(debateTabsState.sessions.keys()).sort((a, b) => Number(a) - Number(b));
+    }
+    function resolveNextActiveSessionId(removedSessionId) {
+        const ids = getDebateSessionIdsSorted();
+        if (!ids.length) return String(removedSessionId || '1');
+        const index = ids.indexOf(String(removedSessionId));
+        if (index > 0) return ids[index - 1];
+        return ids[0];
+    }
+    function readDebateCardMessageSnapshot(card) {
+        const outputEl = card?.querySelector?.('.debate-model-card-output');
+        const timeEl = card?.querySelector?.('.debate-model-card-time');
+        const roleEl = card?.querySelector?.('.debate-model-card-role');
+        const isModerator = card?.dataset?.kind === 'moderator' || card?.classList?.contains('debate-moderator-card');
+        const isFragment = card?.dataset?.kind === 'fragment';
+        const isPlaceholder = card?.dataset?.entryKind === 'placeholder' || card?.dataset?.kind === 'placeholder';
+        const isPrinting = card?.dataset?.live === 'true';
+        const isApproved = card?.dataset?.approved === 'true' || isModerator;
+        return {
+            sessionId: String(card?.dataset?.sessionId || debateTabsState.activeSessionId || '1'),
+            kind: isFragment ? 'fragment' : isModerator ? 'moderator' : 'model',
+            status: isPrinting ? 'printing' : isApproved ? 'approved' : isPlaceholder ? 'pending' : 'pending',
+            starred: card?.dataset?.starred === 'true',
+            sourceMessageId: card?.dataset?.sourceMessageId || '',
+            sourceCardId: card?.dataset?.sourceCardId || '',
+            model: String(card?.dataset?.llmName || card?.querySelector?.('.debate-model-card-name')?.textContent || (isModerator ? 'Moderator' : 'Model')).trim(),
+            role: String(roleEl?.textContent || '').trim(),
+            text: String(outputEl?.innerText || outputEl?.textContent || '').trim(),
+            html: String(outputEl?.innerHTML || '').trim(),
+            timeLabel: String(timeEl?.textContent || '').trim()
+        };
+    }
+    function syncDebateCardFromMessage(card, message) {
+        if (!(card instanceof HTMLElement) || !message) return;
+        card.dataset.entryId = message.id;
+        card.dataset.messageId = message.id;
+        card.dataset.sessionId = message.sessionId;
+        card.dataset.kind = message.kind === 'model' ? (card.dataset.kind === 'placeholder' ? 'placeholder' : 'answer') : message.kind;
+        card.dataset.status = message.status || '';
+        card.dataset.starred = message.starred ? 'true' : 'false';
+        card.dataset.llmName = message.model || card.dataset.llmName || 'Model';
+        if (message.sourceMessageId) card.dataset.sourceMessageId = message.sourceMessageId;
+        if (message.sourceCardId) card.dataset.sourceCardId = message.sourceCardId;
+        if (message.status === 'approved' || message.kind === 'moderator') card.dataset.approved = 'true';
+        if (message.status === 'printing') card.dataset.live = 'true';
+        const favBtn = card.querySelector('.debate-fav');
+        favBtn?.classList.toggle('active', !!message.starred);
+        if (favBtn) {
+            favBtn.setAttribute('aria-pressed', String(!!message.starred));
+            favBtn.title = message.starred ? 'Remove from favorites' : 'Add to favorites';
+        }
+        const roleEl = card.querySelector('.debate-model-card-role');
+        if (roleEl && typeof message.role === 'string') roleEl.textContent = message.role;
+    }
+    function ensureDebateCardMessage(card, patch = {}) {
+        if (!(card instanceof HTMLElement)) return null;
+        const snapshot = { ...readDebateCardMessageSnapshot(card), ...patch };
+        const session = ensureDebateSession(snapshot.sessionId);
+        const existingId = patch.id || card.dataset.entryId || card.dataset.messageId || '';
+        const messageId = existingId || makeDebateEntryId(card.dataset.kind || snapshot.kind || 'entry');
+        const prev = debateMessageStore.get(messageId) || null;
+        const message = {
+            id: messageId,
+            sessionId: String(snapshot.sessionId || prev?.sessionId || debateTabsState.activeSessionId || '1'),
+            kind: normalizeDebateKind(snapshot.kind ?? prev?.kind, 'answer'),
+            status: String(snapshot.status ?? prev?.status ?? 'pending'),
+            starred: typeof snapshot.starred === 'boolean' ? snapshot.starred : normalizeDebateBoolean(prev?.starred) || normalizeDebateBoolean(card.dataset.starred),
+            sourceMessageId: String(snapshot.sourceMessageId ?? prev?.sourceMessageId ?? ''),
+            sourceCardId: String(snapshot.sourceCardId ?? prev?.sourceCardId ?? ''),
+            model: String(snapshot.model ?? prev?.model ?? ''),
+            role: String(snapshot.role ?? prev?.role ?? ''),
+            text: String(snapshot.text ?? prev?.text ?? ''),
+            html: String(snapshot.html ?? prev?.html ?? ''),
+            timeLabel: String(snapshot.timeLabel ?? prev?.timeLabel ?? ''),
+            createdAt: prev?.createdAt || Date.now(),
+            order: typeof prev?.order === 'number' ? prev.order : debateFeedState.nextId++,
+            updatedAt: Date.now()
+        };
+        debateMessageStore.set(messageId, message);
+        debateDomIndex.set(messageId, card);
+        const existingIndex = session.messages.findIndex((m) => m.id === messageId);
+        if (existingIndex >= 0) {
+            session.messages[existingIndex] = message;
+        } else {
+            session.messages.push(message);
+        }
+        syncDebateCardFromMessage(card, message);
+        return message;
+    }
+    function patchDebateCardMessage(card, patch = {}) {
+        if (!(card instanceof HTMLElement)) return null;
+        const message = ensureDebateCardMessage(card);
+        if (!message) return null;
+        Object.assign(message, patch, { updatedAt: new Date().toISOString() });
+        syncDebateCardFromMessage(card, message);
+        return message;
+    }
+    function removeDebateCardMessage(card) {
+        if (!(card instanceof HTMLElement)) return;
+        const sessionId = card.dataset.sessionId || debateTabsState.activeSessionId;
+        const messageId = card.dataset.entryId || card.dataset.messageId;
+        if (!messageId) return;
+        debateMessageStore.delete(messageId);
+        debateDomIndex.delete(messageId);
+        const session = ensureDebateSession(sessionId);
+        session.messages = session.messages.filter((message) => message.id !== messageId);
+    }
+    function shouldShowDebateCard(card, options = {}) {
+        if (!(card instanceof HTMLElement)) return false;
+        const state = ensureDebateCardMessage(card);
+        if (!state) return false;
+        const sessionId = String(options.sessionId ?? debateTabsState.activeSessionId ?? '1');
+        const favoriteOnly = typeof options.favoriteOnly === 'boolean'
+            ? options.favoriteOnly
+            : getDebateSessionFavoriteOnly(sessionId);
+        if (state.sessionId !== sessionId) return false;
+        if (state.kind === 'fragment') return favoriteOnly && !!state.starred;
+        if (!favoriteOnly) return true;
+        return !!state.starred;
+    }
+    function getVisibleDebateCards(sessionId = debateTabsState.activeSessionId) {
+        if (!debateModelCards) return [];
+        const favoriteOnly = getDebateSessionFavoriteOnly(sessionId);
+        const timelineOrder = new Map(
+            ensureDebateSession(sessionId).messages.map((message, index) => [message.id, index])
+        );
+        return Array.from(debateModelCards.children).filter((card) => {
+            return shouldShowDebateCard(card, { sessionId, favoriteOnly });
+        }).sort((a, b) => {
+            const aId = a.dataset.entryId || a.dataset.messageId || '';
+            const bId = b.dataset.entryId || b.dataset.messageId || '';
+            return (timelineOrder.get(aId) ?? Number.MAX_SAFE_INTEGER)
+                - (timelineOrder.get(bId) ?? Number.MAX_SAFE_INTEGER);
+        });
     }
     function renderDebateSessionTabs() {
         if (!debateSessionTabs) return;
         const tabs = Array.from(debateTabsState.sessions.values())
             .sort((a, b) => Number(a.id) - Number(b.id))
             .map((session) => `
-                <button type="button" class="debate-session-tab${session.id === debateTabsState.activeSessionId ? ' active' : ''}" data-session-id="${escapeHtml(session.id)}" title="Session ${escapeHtml(session.id)}">${escapeHtml(session.title || session.id)}</button>
+                <button type="button" class="debate-session-tab${session.id === debateTabsState.activeSessionId ? ' active' : ''}${session.favoriteOnly ? ' favorite-only' : ''}" data-session-id="${escapeHtml(session.id)}" title="Session ${escapeHtml(session.id)}">${escapeHtml(session.title || session.id)}</button>
             `).join('');
         debateSessionTabs.innerHTML = tabs;
     }
     function applyDebateSessionFilter() {
         if (!debateModelCards) return;
         const activeSessionId = debateTabsState.activeSessionId;
-        const favoriteOnly = !!debateTabsState.favoriteOnlyBySession.get(activeSessionId);
+        const favoriteOnly = getDebateSessionFavoriteOnly(activeSessionId);
         let firstPending = null;
         let firstApproved = null;
         Array.from(debateModelCards.children).forEach((card) => {
             if (!(card instanceof HTMLElement)) return;
+            normalizeDebateCardState(card);
+            const message = ensureDebateCardMessage(card);
             card.classList.remove('first-pending-zone-card', 'first-approved-zone-card');
-            const matchesSession = card.dataset.sessionId === activeSessionId;
-            const isFeedEntry = card.dataset.entryKind === 'response' || card.dataset.entryKind === 'placeholder';
-            const isStarred = card.dataset.starred === 'true';
-            const isFragment = card.dataset.kind === 'fragment';
-            const show = matchesSession && (!favoriteOnly || isStarred || isFragment);
+            const show = shouldShowDebateCard(card, { sessionId: activeSessionId, favoriteOnly });
             card.style.display = show ? '' : 'none';
             if (show && card.dataset.kind !== 'moderator') {
                 if (card.dataset.approved === 'true') {
@@ -12405,6 +12570,45 @@ function checkCompareButtonState() {
         }
         printingEl.textContent = `[${llmName}] printing`;
     }
+    function normalizeDebateCardState(card) {
+        if (!(card instanceof HTMLElement) || !card.classList.contains('debate-model-card')) return;
+        const isModerator = card.dataset.kind === 'moderator' || card.classList.contains('debate-moderator-card');
+        const isApproved = card.dataset.approved === 'true' || isModerator;
+        const timeEl = card.querySelector('.debate-model-card-time');
+        const titleMainEl = card.querySelector('.debate-model-card-title-main');
+        const nameEl = card.querySelector('.debate-model-card-name');
+
+        if (isModerator) {
+            card.dataset.approved = 'true';
+            card.dataset.approvalSelectable = 'false';
+            card.dataset.live = 'false';
+            card.classList.add('is-approved', 'debate-moderator-card');
+            card.querySelector('.debate-approval-check')?.remove();
+            card.querySelectorAll('.status-indicator').forEach((indicator) => indicator.remove());
+            setDebatePrintingState(card, card.dataset.llmName || 'Moderator', false);
+        }
+
+        if (isApproved) {
+            card.classList.add('is-approved');
+            card.querySelector('.debate-approval-check')?.remove();
+            card.querySelectorAll('.status-indicator').forEach((indicator) => indicator.remove());
+            if (timeEl && titleMainEl) {
+                timeEl.classList.remove('msg-time');
+                timeEl.classList.add('debate-inline-time');
+                const referenceEl = nameEl?.nextSibling || titleMainEl.firstChild;
+                if (timeEl.parentElement !== titleMainEl || timeEl.previousElementSibling !== nameEl) {
+                    titleMainEl.insertBefore(timeEl, referenceEl);
+                }
+            }
+        } else if (timeEl) {
+            timeEl.classList.remove('debate-inline-time', 'msg-time');
+            const metaEl = card.querySelector('.debate-model-card-meta');
+            if (metaEl && timeEl.parentElement !== metaEl) {
+                metaEl.insertBefore(timeEl, metaEl.firstChild);
+            }
+            card.classList.remove('is-approved');
+        }
+    }
     function getFirstPendingCard(sessionId = debateTabsState.activeSessionId) {
         if (!debateModelCards) return null;
         return Array.from(debateModelCards.querySelectorAll('.debate-model-card'))
@@ -12414,31 +12618,17 @@ function checkCompareButtonState() {
                 && card.dataset.approved !== 'true'
             )) || null;
     }
-    function insertDebateCard(card, { zone = 'pending' } = {}) {
+    function insertDebateCard(card) {
         if (!debateModelCards || !card) return;
-        if (zone === 'approved') {
-            const firstPending = getFirstPendingCard(card.dataset.sessionId);
-            if (firstPending && firstPending !== card) {
-                debateModelCards.insertBefore(card, firstPending);
-                return;
-            }
+        normalizeDebateCardState(card);
+        if (card.parentElement !== debateModelCards) {
+            debateModelCards.appendChild(card);
         }
-        debateModelCards.appendChild(card);
     }
     function insertModeratorCard(card) {
         if (!debateModelCards || !card) return;
-        const sessionId = card.dataset.sessionId;
-        const hasModeratorInSession = Array.from(debateModelCards.querySelectorAll('.debate-moderator-card'))
-            .some((existing) => existing.dataset.sessionId === sessionId);
-        if (!hasModeratorInSession) {
-            const firstSessionCard = Array.from(debateModelCards.querySelectorAll('.debate-model-card'))
-                .find((existing) => existing.dataset.sessionId === sessionId);
-            if (firstSessionCard) {
-                debateModelCards.insertBefore(card, firstSessionCard);
-                return;
-            }
-        }
-        insertDebateCard(card, { zone: 'pending' });
+        normalizeDebateCardState(card);
+        insertDebateCard(card);
     }
     function approveDebateCard(card) {
         if (!card || card.dataset.approved === 'true') return null;
@@ -12449,8 +12639,11 @@ function checkCompareButtonState() {
         card.dataset.approved = 'true';
         card.dataset.approvalSelectable = 'false';
         card.dataset.live = 'false';
-        card.classList.add('is-approved');
-        card.querySelector('.debate-approval-check')?.remove();
+        patchDebateCardMessage(card, {
+            status: 'approved',
+            kind: card.dataset.kind === 'fragment' ? 'fragment' : 'model'
+        });
+        normalizeDebateCardState(card);
         setDebatePrintingState(card, llmName, false);
         insertDebateCard(card, { zone: 'approved' });
         syncModeratorSelectors();
@@ -12499,6 +12692,10 @@ function checkCompareButtonState() {
             if (existingPending) {
                 updateCardRole(existingPending, roleValue);
                 bindApprovalCheckbox(existingPending);
+                patchDebateCardMessage(existingPending, {
+                    role: roleValue,
+                    status: existingPending.dataset.live === 'true' ? 'printing' : 'pending'
+                });
                 insertDebateCard(existingPending, { zone: 'pending' });
                 return;
             }
@@ -12535,6 +12732,12 @@ function checkCompareButtonState() {
             `;
             updateCardRole(card, roleValue);
             bindApprovalCheckbox(card);
+            ensureDebateCardMessage(card, {
+                kind: 'model',
+                status: 'printing',
+                role: roleValue,
+                starred: false
+            });
             insertDebateCard(card, { zone: 'pending' });
             debateFeedState.placeholders.add(`${session.id}:${key}`);
         });
@@ -12576,6 +12779,16 @@ function checkCompareButtonState() {
         `;
         const body = card.querySelector('.debate-model-card-output');
         body.textContent = normalizedText;
+        ensureDebateCardMessage(card, {
+            kind: 'moderator',
+            status: 'approved',
+            model: 'Moderator',
+            text: normalizedText,
+            html: escapeHtml(normalizedText),
+            timeLabel: `${hh}:${mm}`,
+            starred: false
+        });
+        normalizeDebateCardState(card);
         insertModeratorCard(card);
         applyDebateSessionFilter();
     }
@@ -12634,6 +12847,15 @@ function checkCompareButtonState() {
                 }
             }
             setDebatePrintingState(liveCard, llmName, !isFinal);
+            patchDebateCardMessage(liveCard, {
+                kind: 'model',
+                status: isFinal ? 'pending' : 'printing',
+                model: llmName,
+                role: meta.role || debateRunState.activeRole || (debateRoleSelect?.value || ''),
+                text: normalizedText || String(body?.innerText || body?.textContent || '').trim(),
+                html: normalizedHtml || String(body?.innerHTML || '').trim(),
+                timeLabel: `${hh}:${mm}`
+            });
             applyDebateSessionFilter();
             return;
         }
@@ -12678,6 +12900,16 @@ function checkCompareButtonState() {
         }
         setDebatePrintingState(card, llmName, !isFinal);
         bindApprovalCheckbox(card);
+        ensureDebateCardMessage(card, {
+            kind: 'model',
+            status: isFinal ? 'pending' : 'printing',
+            model: llmName,
+            role: meta.role || debateRunState.activeRole || (debateRoleSelect?.value || ''),
+            text: normalizedText || String(body?.innerText || body?.textContent || '').trim(),
+            html: normalizedHtml || String(body?.innerHTML || '').trim(),
+            timeLabel: `${hh}:${mm}`,
+            starred: false
+        });
         insertDebateCard(card, { zone: card.dataset.approved === 'true' ? 'approved' : 'pending' });
         applyDebateSessionFilter();
     }
@@ -12800,16 +13032,45 @@ function checkCompareButtonState() {
         setDebateApprovalCandidate(null);
         return true;
     }
-    function setActiveDebateSession(sessionId) {
+    function setActiveDebateSession(sessionId, options = {}) {
         const session = ensureDebateSession(sessionId);
+        const prevActiveSessionId = debateTabsState.activeSessionId;
+        const prevFavoriteOnly = getDebateSessionFavoriteOnly(session.id);
+        if (typeof options.favoriteOnly === 'boolean') {
+            setDebateSessionFavoriteOnly(session.id, options.favoriteOnly);
+        }
         debateTabsState.activeSessionId = session.id;
+        const nextFavoriteOnly = getDebateSessionFavoriteOnly(session.id);
+        if (prevActiveSessionId === session.id && prevFavoriteOnly === nextFavoriteOnly) {
+            return;
+        }
         renderDebateSessionTabs();
         applyDebateSessionFilter();
     }
     function addDebateSession() {
-        const next = String(debateTabsState.sessions.size + 1);
+        const ids = getDebateSessionIdsSorted().map(Number).filter(Number.isFinite);
+        const next = String((ids.length ? Math.max(...ids) : 0) + 1);
         ensureDebateSession(next);
         setActiveDebateSession(next);
+    }
+    function removeDebateSession(sessionId = debateTabsState.activeSessionId) {
+        const id = String(sessionId || debateTabsState.activeSessionId || '1');
+        const sessionCount = debateTabsState.sessions.size;
+        if (!debateTabsState.sessions.has(id)) return false;
+        if (sessionCount <= 1) {
+            clearDebateFeed(id);
+            setDebateSessionFavoriteOnly(id, false);
+            renderDebateSessionTabs();
+            applyDebateSessionFilter();
+            return true;
+        }
+        clearDebateFeed(id);
+        debateTabsState.sessions.delete(id);
+        const nextActiveSessionId = resolveNextActiveSessionId(id);
+        debateTabsState.activeSessionId = ensureDebateSession(nextActiveSessionId).id;
+        renderDebateSessionTabs();
+        applyDebateSessionFilter();
+        return true;
     }
     function getApprovedSenderModels() {
         if (!debateModelCards) return [];
@@ -12895,40 +13156,91 @@ function checkCompareButtonState() {
         debateSelToolbar.style.left = `${left}px`;
         debateSelToolbar.classList.add('vis');
     }
-    function applyDebateSelectionStyle(command, value = null) {
-        if (!debateSelectionState.range) return;
-        const sel = window.getSelection();
-        if (!sel) return;
-        sel.removeAllRanges();
-        sel.addRange(debateSelectionState.range);
-        if (command === 'hiliteColor') {
-            document.execCommand('hiliteColor', false, value);
-        } else {
-            document.execCommand(command, false, value);
+    function getDebateSelectionText() {
+        const rangeText = String(debateSelectionState.range?.toString?.() || '').trim();
+        if (rangeText) return rangeText;
+        return String(window.getSelection?.()?.toString?.() || '').trim();
+    }
+    function syncDebateSelectionSourceMessage() {
+        const sourceCard = debateSelectionState.target?.closest?.('.debate-model-card') || null;
+        if (!sourceCard) return;
+        const outputEl = sourceCard.querySelector('.debate-model-card-output');
+        patchDebateCardMessage(sourceCard, {
+            text: String(outputEl?.innerText || outputEl?.textContent || '').trim(),
+            html: String(outputEl?.innerHTML || '').trim()
+        });
+    }
+    function wrapDebateSelectionRange(tagName, stylePatch = {}) {
+        const range = debateSelectionState.range;
+        if (!range || range.collapsed) return false;
+        const target = debateSelectionState.target;
+        if (target && !target.contains(range.commonAncestorContainer)) return false;
+        const wrapper = document.createElement(tagName);
+        Object.entries(stylePatch).forEach(([key, value]) => {
+            wrapper.style[key] = value;
+        });
+        try {
+            const fragment = range.extractContents();
+            wrapper.appendChild(fragment);
+            range.insertNode(wrapper);
+            range.selectNodeContents(wrapper);
+            syncDebateSelectionSourceMessage();
+            return true;
+        } catch (err) {
+            console.warn('[RESULTS] debate selection format failed', err);
+            return false;
         }
-        sel.removeAllRanges();
+    }
+    function applyDebateSelectionStyle(command, value = null) {
+        let applied = false;
+        if (command === 'hiliteColor') {
+            applied = wrapDebateSelectionRange('span', { backgroundColor: value || '#fde68a' });
+        } else if (command === 'bold') {
+            applied = wrapDebateSelectionRange('strong');
+        } else if (command === 'italic') {
+            applied = wrapDebateSelectionRange('em');
+        }
+        if (!applied && command && document.queryCommandSupported?.(command)) {
+            const sel = window.getSelection?.();
+            try {
+                sel?.removeAllRanges?.();
+                if (debateSelectionState.range) sel?.addRange?.(debateSelectionState.range);
+                document.execCommand(command, false, value);
+                syncDebateSelectionSourceMessage();
+            } catch (_) {}
+        }
+        window.getSelection?.()?.removeAllRanges?.();
         hideDebateSelectionToolbar();
     }
     function promoteDebateSelectionToFavorite() {
-        const text = window.getSelection()?.toString()?.trim() || '';
+        const text = getDebateSelectionText();
         if (!text || !debateModelCards) return;
         const session = ensureDebateSession(debateTabsState.activeSessionId);
+        const sourceCard = debateSelectionState.target?.closest?.('.debate-model-card') || null;
+        const sourceMessage = sourceCard ? ensureDebateCardMessage(sourceCard) : null;
+        const sourceModel = sourceMessage?.model || sourceCard?.dataset?.llmName || 'Fragment';
+        if (sourceCard && !sourceCard.id) {
+            sourceCard.id = `debate-source-${sourceMessage?.id || makeDebateEntryId('source')}`;
+        }
         const card = document.createElement('div');
         const now = new Date();
         const hh = String(now.getHours()).padStart(2, '0');
         const mm = String(now.getMinutes()).padStart(2, '0');
-        card.className = 'debate-model-card';
+        card.className = 'debate-model-card fragment-card debate-fragment-card';
         card.dataset.sessionId = session.id;
         card.dataset.entryKind = 'response';
         card.dataset.kind = 'fragment';
         card.dataset.starred = 'true';
+        if (sourceMessage?.id) card.dataset.sourceMessageId = sourceMessage.id;
+        if (sourceCard?.id) card.dataset.sourceCardId = sourceCard.id;
+        card.dataset.llmName = sourceModel;
         card.innerHTML = `
             <div class="debate-model-card-header">
                 <span class="debate-model-card-title">
                     <span class="status-indicator success"></span>
                     <span class="debate-model-card-title-main">
                         <span class="debate-model-card-name">Fragment</span>
-                        <span class="debate-model-card-role"></span>
+                        <span class="debate-model-card-role">${escapeHtml(sourceModel)}</span>
                     </span>
                 </span>
                 <span class="debate-model-card-meta">
@@ -12942,6 +13254,19 @@ function checkCompareButtonState() {
             </div>
             <div class="debate-model-card-output">${escapeHtml(text)}</div>
         `;
+        ensureDebateCardMessage(card, {
+            kind: 'fragment',
+            status: 'approved',
+            starred: true,
+            sourceMessageId: sourceMessage?.id || '',
+            sourceCardId: sourceCard?.id || '',
+            sessionId: session.id,
+            model: sourceModel,
+            role: sourceModel,
+            text,
+            html: escapeHtml(text),
+            timeLabel: `${hh}:${mm}`
+        });
         debateModelCards.appendChild(card);
         applyDebateSessionFilter();
         hideDebateSelectionToolbar();
@@ -12949,14 +13274,7 @@ function checkCompareButtonState() {
     }
     function collectDebateFeedHtml(activeOnly = false) {
         if (!debateModelCards) return '';
-        const activeSessionId = debateTabsState.activeSessionId;
-        const favoriteOnly = !!debateTabsState.favoriteOnlyBySession.get(activeSessionId);
-        const cards = Array.from(debateModelCards.children).filter((card) => {
-            if (!(card instanceof HTMLElement)) return false;
-            if (card.dataset.sessionId !== activeSessionId) return false;
-            if (!favoriteOnly) return true;
-            return card.dataset.starred === 'true' || card.dataset.kind === 'fragment';
-        });
+        const cards = getVisibleDebateCards();
         const html = cards.map((card) => {
             const clone = card.cloneNode(true);
             if (!(clone instanceof HTMLElement)) return '';
@@ -12967,18 +13285,20 @@ function checkCompareButtonState() {
     }
     function collectDebateFeedText() {
         if (!debateModelCards) return '';
-        const activeSessionId = debateTabsState.activeSessionId;
-        const favoriteOnly = !!debateTabsState.favoriteOnlyBySession.get(activeSessionId);
         const lines = [];
-        Array.from(debateModelCards.children).forEach((card) => {
-            if (!(card instanceof HTMLElement)) return;
-            if (card.dataset.sessionId !== activeSessionId) return;
-            if (favoriteOnly && card.dataset.starred !== 'true' && card.dataset.kind !== 'fragment') return;
-            if (card.dataset.kind === 'moderator') return;
+        getVisibleDebateCards().forEach((card) => {
+            const message = ensureDebateCardMessage(card);
             const outputEl = card.querySelector('.debate-model-card-output');
             const text = String(outputEl?.innerText || outputEl?.textContent || '').trim();
             if (!text) return;
-            lines.push(text);
+            if (message?.kind === 'fragment') {
+                const sourceLine = message.sourceMessageId ? `Fragment from: ${message.model || 'Source'}` : 'Fragment';
+                lines.push(`${sourceLine}\n${text}`);
+            } else {
+                const label = message?.model || card.dataset.llmName || 'Message';
+                const time = message?.timeLabel ? ` ${message.timeLabel}` : '';
+                lines.push(`${label}${time}\n${text}`);
+            }
         });
         return lines.join('\n\n');
     }
@@ -12986,9 +13306,11 @@ function checkCompareButtonState() {
         if (!debateModelCards) return;
         Array.from(debateModelCards.children).forEach((card) => {
             if (card instanceof HTMLElement && card.dataset.sessionId === activeSessionId) {
+                removeDebateCardMessage(card);
                 card.remove();
             }
         });
+        ensureDebateSession(activeSessionId).messages = [];
         debateFeedState.placeholders = new Set(
             Array.from(debateFeedState.placeholders).filter((key) => !String(key).startsWith(`${activeSessionId}:`))
         );
@@ -13096,7 +13418,7 @@ function checkCompareButtonState() {
         return finalParts.join('\n\n');
     }
 
-    startButton.addEventListener('click', async () => {
+    startButton?.addEventListener('click', async () => {
         if (getItButton) {
             getItButton.disabled = true;
         }
@@ -14128,17 +14450,30 @@ function exportSingleTemplate(templateName, sourceData = null) {
     debateSessionTabs?.addEventListener('click', (event) => {
         const tab = event.target.closest('.debate-session-tab');
         if (!tab) return;
-        setActiveDebateSession(tab.dataset.sessionId || '1');
+        if (event.detail > 1) return;
+        if (debateSessionClickTimer) clearTimeout(debateSessionClickTimer);
+        const sessionId = tab.dataset.sessionId || '1';
+        debateSessionClickTimer = setTimeout(() => {
+            debateSessionClickTimer = null;
+            setActiveDebateSession(sessionId, { favoriteOnly: false });
+        }, DEBATE_SESSION_CLICK_DELAY_MS);
     });
     debateSessionTabs?.addEventListener('dblclick', (event) => {
         const tab = event.target.closest('.debate-session-tab');
         if (!tab) return;
+        event.preventDefault();
+        if (debateSessionClickTimer) {
+            clearTimeout(debateSessionClickTimer);
+            debateSessionClickTimer = null;
+        }
         const sessionId = String(tab.dataset.sessionId || '1');
-        const nextValue = !debateTabsState.favoriteOnlyBySession.get(sessionId);
-        debateTabsState.favoriteOnlyBySession.set(sessionId, nextValue);
+        debateTabsState.activeSessionId = ensureDebateSession(sessionId).id;
+        setDebateSessionFavoriteOnly(sessionId, true);
+        renderDebateSessionTabs();
         applyDebateSessionFilter();
     });
     debateSessionAddBtn?.addEventListener('click', () => addDebateSession());
+    debateSessionDeleteBtn?.addEventListener('click', () => removeDebateSession());
     debateAutoPauseBtn?.addEventListener('click', () => {
         debatePaused = !debatePaused;
         if (!debatePaused && typeof resolveDebateApprovalGlobal === 'function') {
@@ -14156,66 +14491,10 @@ function exportSingleTemplate(templateName, sourceData = null) {
             console.warn('[RESULTS] debate feed copy failed', err);
         }
     });
-    document.addEventListener('click', (event) => {
-        const sessionExportBtn = event.target.closest('#debate-session-export-btn');
-        if (!sessionExportBtn) return;
-        try {
-            const html = collectDebateFeedHtml();
-            const text = collectDebateFeedText();
-            if (!html && !text) return;
-            const body = html || `<pre>${escapeHtml(text)}</pre>`;
-            const htmlContent = `<!doctype html><html><head><meta charset="utf-8"><title>Debate Feed</title></head><body>${body}</body></html>`;
-            const blob = new Blob([htmlContent], { type: 'text/html' });
-            const url = URL.createObjectURL(blob);
-            const anchor = document.createElement('a');
-            anchor.href = url;
-            anchor.download = `debate_feed_${formatPipelineTimestamp()}.html`;
-            document.body.appendChild(anchor);
-            anchor.click();
-            document.body.removeChild(anchor);
-            URL.revokeObjectURL(url);
-            flashButtonFeedback(sessionExportBtn, 'success');
-        } catch (err) {
-            console.warn('[RESULTS] debate feed export failed', err);
-            flashButtonFeedback(sessionExportBtn, 'error');
-        }
-    });
     debateSessionClearBtn?.addEventListener('click', () => {
         clearDebateFeed();
         setDebateApprovalCandidate(null);
         applyDebateSessionFilter();
-    });
-    document.addEventListener('click', (event) => {
-        const exportBtn = event.target.closest('.debate-card-export');
-        if (!exportBtn) return;
-        const card = exportBtn.closest('.debate-model-card');
-        if (!card) return;
-        const outputEl = card.querySelector('.debate-model-card-output');
-        const html = outputEl ? (outputEl.innerHTML || '').trim() : '';
-        const text = html
-            ? plainTextFromHtml(html)
-            : (outputEl ? (outputEl.innerText || outputEl.textContent || '').trim() : '');
-        if (!text && !html) {
-            flashButtonFeedback(exportBtn, 'warn');
-            return;
-        }
-        try {
-            const body = html || escapeHtml(text);
-            const htmlContent = `<!doctype html><html><body><div class="debate-card-export-item">${body}</div></body></html>`;
-            const blob = new Blob([htmlContent], { type: 'text/html' });
-            const url = URL.createObjectURL(blob);
-            const anchor = document.createElement('a');
-            anchor.href = url;
-            anchor.download = `debate_card_${formatPipelineTimestamp()}.html`;
-            document.body.appendChild(anchor);
-            anchor.click();
-            document.body.removeChild(anchor);
-            URL.revokeObjectURL(url);
-            flashButtonFeedback(exportBtn, 'success');
-        } catch (err) {
-            console.warn('[RESULTS] debate card export failed', err);
-            flashButtonFeedback(exportBtn, 'error');
-        }
     });
     debateModelCards?.addEventListener('click', async (event) => {
         const approvalCheck = event.target.closest('.debate-approval-check');
@@ -14230,8 +14509,7 @@ function exportSingleTemplate(templateName, sourceData = null) {
 
         if (favBtn) {
             const starred = card.dataset.starred === 'true';
-            card.dataset.starred = starred ? 'false' : 'true';
-            favBtn.classList.toggle('active', !starred);
+            patchDebateCardMessage(card, { starred: !starred });
             applyDebateSessionFilter();
             return;
         }
@@ -14249,6 +14527,7 @@ function exportSingleTemplate(templateName, sourceData = null) {
             return;
         }
         if (event.target.closest('.debate-card-delete')) {
+            removeDebateCardMessage(card);
             card.remove();
             applyDebateSessionFilter();
             return;
@@ -14494,7 +14773,143 @@ function exportSingleTemplate(templateName, sourceData = null) {
         }
     }
     // --- V2.0 END: API Keys Modal Logic ---
+	});
+const pipelineExportFlash = (button, state) => {
+    try {
+        window.ResultsShared?.flashButtonFeedback?.(button, state);
+    } catch (_) {}
+};
+
+const pipelineExportStamp = () => {
+    const now = new Date();
+    const pad = (num) => String(num).padStart(2, '0');
+    return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}`;
+};
+
+const pipelineExportEscape = (value = '') => String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const pipelineExportDownloadHtml = (filename, htmlContent) => {
+    const content = String(htmlContent || '').trim();
+    if (!content) return false;
+    const blob = new Blob([content], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+    return true;
+};
+
+const pipelineExportCardParts = (card) => {
+    const outputEl = card?.querySelector?.('.debate-model-card-output');
+    const rawHtml = outputEl ? String(outputEl.innerHTML || '').trim() : '';
+    const text = outputEl ? String(outputEl.innerText || outputEl.textContent || '').trim() : '';
+    const body = rawHtml || (text ? `<pre>${pipelineExportEscape(text)}</pre>` : '');
+    if (!body) return null;
+    return {
+        model: String(card.dataset.llmName || card.querySelector('.debate-model-card-name')?.textContent || 'Model').trim() || 'Model',
+        time: String(card.querySelector('.debate-model-card-time')?.textContent || '').trim(),
+        body
+    };
+};
+
+const pipelineExportHeading = ({ model, time }, tag = 'h2') => (
+    `<${tag}>${pipelineExportEscape(model)}${time ? ` <span class="response-time">${pipelineExportEscape(time)}</span>` : ''}</${tag}>`
+);
+
+const pipelineExportSection = (card) => {
+    const parts = pipelineExportCardParts(card);
+    if (!parts) return '';
+    return `
+        <section>
+            ${pipelineExportHeading(parts, 'h2')}
+            <div class="response-body">${parts.body}</div>
+        </section>
+    `;
+};
+
+const pipelineExportDocument = (title, bodyHtml) => `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>${pipelineExportEscape(title)}</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #ffffff; color: #111; padding: 24px; line-height: 1.5; }
+        section { margin-bottom: 24px; }
+        h1 { font-size: 24px; margin: 0 0 16px; }
+        h2 { margin: 0 0 12px; font-size: 20px; }
+        pre { background: #f6f8fa; padding: 12px; border-radius: 8px; white-space: pre-wrap; word-wrap: break-word; }
+        .response-body { background: #f8fafc; padding: 12px; border-radius: 8px; }
+        .response-body table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+        .response-body th, .response-body td { border: 1px solid #ddd; padding: 6px 8px; vertical-align: top; }
+        .response-body ul, .response-body ol { padding-left: 24px; }
+        .response-time { color: #555; font-size: 14px; font-weight: 400; }
+    </style>
+</head>
+<body>
+    <h1>${pipelineExportEscape(title)}</h1>
+    ${bodyHtml}
+</body>
+</html>`;
+
+const pipelineExportCollectFeedHtml = () => {
+    const feed = document.getElementById('debate-model-cards');
+    if (!feed) return '';
+    const activeSessionId = document.querySelector('.debate-session-tab.active')?.dataset?.sessionId || '1';
+    return Array.from(feed.querySelectorAll('.debate-model-card'))
+        .filter((card) => card.dataset.sessionId === activeSessionId && card.style.display !== 'none')
+        .map((card) => pipelineExportSection(card))
+        .filter(Boolean)
+        .join('\n');
+};
+
+document.addEventListener('click', (event) => {
+    const btn = event.target.closest('#debate-session-export-btn');
+    if (!btn) return;
+    try {
+        const body = pipelineExportCollectFeedHtml();
+        if (!body) {
+            pipelineExportFlash(btn, 'warn');
+            return;
+        }
+        const html = pipelineExportDocument('Debate Feed', body);
+        const ok = pipelineExportDownloadHtml(`debate_feed_${pipelineExportStamp()}.html`, html);
+        pipelineExportFlash(btn, ok ? 'success' : 'error');
+    } catch (err) {
+        console.warn('[RESULTS] debate feed export failed', err);
+        pipelineExportFlash(btn, 'error');
+    }
 });
+
+document.addEventListener('click', (event) => {
+    const btn = event.target.closest('.debate-card-export');
+    if (!btn) return;
+    try {
+        const parts = pipelineExportCardParts(btn.closest('.debate-model-card'));
+        if (!parts) {
+            pipelineExportFlash(btn, 'warn');
+            return;
+        }
+        const doc = pipelineExportDocument(
+            `${parts.model} Response`,
+            `<section>${pipelineExportHeading(parts, 'h2')}<div class="response-body">${parts.body}</div></section>`
+        );
+        const ok = pipelineExportDownloadHtml(`debate_card_${pipelineExportStamp()}.html`, doc);
+        pipelineExportFlash(btn, ok ? 'success' : 'error');
+    } catch (err) {
+        console.warn('[RESULTS] debate card export failed', err);
+        pipelineExportFlash(btn, 'error');
+    }
+});
+
 //-- 3.1. Добавляем обработчик для новой кнопки закрытия панели сравнения --//
 document.addEventListener('click', (event) => {
     // Ищем кнопку закрытия по её ID

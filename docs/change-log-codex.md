@@ -1,5 +1,120 @@
 ## Change Log — Codex
 
+### 2026-06-02 15:17 CEST — v2.74.29
+
+- Для чего: добавить управление текущей session через `-` рядом с `+`. Изменение: `#debate-session-delete-btn` удаляет активную session при наличии нескольких sessions; если session одна, она не удаляется, а очищается и остаётся активной.
+- Для чего: держать кнопки управления sessions визуально пустыми. Изменение: `#debate-session-add-btn` и `#debate-session-delete-btn` получили прямой transparent/no-border override и выключенные hover/active фоновые эффекты.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` проверяет удаление текущей session в обоих режимах.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.29`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-02 09:08 CEST — v2.74.28
+
+- Для чего: исправить неработающий CSS override для `#debate-session-add-btn`. Изменение: селектор был уточнён до прямого `#debate-session-add-btn`, потому что кнопка находится в `.debate-session-left`, а не в `.debate-session-actions`; сняты border/background/box-shadow и hover/active на самой кнопке.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.28`. Файл: `manifest.json`.
+- Проверка: computed style в браузере после правки должен перестать показывать UA `2px outset` и серый background.
+
+### 2026-06-02 09:05 CEST — v2.74.27
+
+- Для чего: полностью убрать border/background у `#debate-session-add-btn`. Изменение: добавлен точечный override `border: none`, `background: transparent`, `box-shadow: none` и снят hover/active visual state для этой кнопки.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.27`. Файл: `manifest.json`.
+- Проверка: визуальная правка CSS, версия манифеста обновлена.
+
+### 2026-06-02 09:02 CEST — v2.74.26
+
+- Для чего: убрать у `#debate-session-add-btn` лишние фон и рамку. Изменение: добавлен точечный override `background: transparent` и `box-shadow: none` для кнопки добавления session.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.26`. Файл: `manifest.json`.
+- Проверка: визуальная правка CSS, версия манифеста обновлена.
+
+### 2026-06-02 09:02 CEST — v2.74.25
+
+- Для чего: убрать отдельные fragment-card из обычной Pipeline-ленты. Изменение: `shouldShowDebateCard()` теперь скрывает `kind=fragment` при `favoriteOnly=false`; saved fragments остаются в session timeline/store и показываются только в favorite-view/export текущего режима.
+- Для чего: сделать выделение в обычной ленте реальным форматированием исходной карточки. Изменение: toolbar больше не полагается на `document.execCommand`; выделение оборачивается через сохранённый `Range` в `span` с `backgroundColor`, `strong` или `em`, затем source message синхронизируется с обновлённым HTML.
+- Для чего: не терять текст выделения при клике по toolbar. Изменение: favorite fragment берёт текст из сохранённого `debateSelectionState.range`, а не только из текущего `window.getSelection()`.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` теперь проверяет, что fragment-card скрыт в обычной ленте, появляется в favorite-view, а color/bold форматируют source card без создания fragment-card.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.25`. Файл: `manifest.json`.
+- Проверка: `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-02 08:51 CEST — v2.74.24
+
+- Для чего: исправить неработающий double-click по `.debate-session-tab` в Pipeline favorite-view. Изменение: single-click теперь выполняется с короткой задержкой и отменяется при `dblclick`, поэтому первый click больше не перерисовывает tab до обработки double-click; обычный click возвращает session в полный timeline.
+- Для чего: сделать toolbar выделенного текста понятным без угадывания иконок. Изменение: кнопки highlight/bold/italic/favorite получили видимые подписи и `aria-label`, добавлены стили `.debate-sel-toolbar .stb/.stb-label`.
+- Для чего: зафиксировать архитектуру fragment favorite тестами. Изменение: добавлен `tests/results-debate-favorites.test.js`, который проверяет favorite-only режим, возврат в полный timeline, создание `fragment-card` со `starred=true`, `sourceMessageId`, `sourceCardId`, `sessionId`, а также подписи toolbar.
+- Для чего: не ронять инициализацию Pipeline в неполном DOM/test harness. Изменение: добавлены defensive checks для `startButton` и modifier observer.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.24`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`, `npm test -- --runInBand`.
+
+### 2026-06-01 23:52 CEST — v2.74.23
+
+- Для чего: убрать рассинхрон `Favorites` между DOM-флагами и внутренним состоянием. Изменение: введён единый state-layer на `entryId` (`debateMessageStore` + `debateDomIndex`), `ensureDebateCardMessage()` теперь нормализует карточку в store и обратно в DOM.
+- Для чего: стабилизировать показ карточек в favorite-only режиме. Изменение: добавлен `shouldShowDebateCard()`; `getVisibleDebateCards()` и фильтрация используют единое условие.
+- Для чего: исключить конфликт `messageId`/`entryId`. Изменение: синхронизация карточки теперь всегда выставляет оба атрибута на единый id; удаление карточки очищает store по `entryId`.
+- Проверка: `node --check results.js`, `node --check background/message-router.js`.
+
+### 2026-06-01 23:16 CEST — v2.74.22
+
+- Для чего: перевести Pipeline favorite-view с набора DOM-флагов на явный lifecycle сообщений. Изменение: session теперь имеет `messages`, карточки получают `data-message-id`, добавлены `ensureDebateCardMessage()`, `patchDebateCardMessage()`, `removeDebateCardMessage()` и `getVisibleDebateCards()`.
+- Для чего: сделать избранное устойчивым при approval, session-filter, fragment и delete. Изменение: `approval`, `favorite`, fragment creation, clear/delete и filter синхронизируют DOM-карточку с message-store.
+- Для чего: показать режим избранного на табе. Изменение: double-click по `.debate-session-tab` обновляет `.favorite-only`, для таба добавлен визуальный маркер `★`.
+- Проверка: `node --check results.js`, `node --check background/message-router.js`, статический Node-тест на `messages`, `messageId`, favorite-store patch, fragment source, visible-card copy/export и tab marker.
+
+### 2026-06-01 22:58 CEST — v2.74.21
+
+- Для чего: реально увеличить текст ответа в Pipeline-карточках до `12px`. Изменение: `.debate-model-card-output`, `.debate-moderator-card .debate-model-card-output`, все потомки `.debate-model-card-output *` и inline `font-size` теперь принудительно получают `font-size: 12px !important`.
+- Причина предыдущего промаха: были покрыты только часть вложенных HTML-элементов ответа, но не все потомки, например `span`, из-за чего импортированный HTML мог сохранять миниатюрный размер.
+- Проверка: `rg` подтвердил отсутствие `11px !important` для `.debate-model-card-output`; `node --check results.js`, `node --check background/message-router.js`.
+
+### 2026-06-01 22:55 CEST — v2.74.20
+
+- Для чего: убрать лишний заголовок approved-зоны в Pipeline. Изменение: удалён `content: "Утверждённые"` для `.debate-model-card.first-approved-zone-card::before`.
+- Для чего: вернуть порядок заголовка карточки к `Model time`. Изменение: `normalizeDebateCardState()` переносит `.debate-model-card-time` после `.debate-model-card-name`, а не перед ним.
+- Для чего: убрать миниатюрный текст внутри ответа модели. Изменение: `.debate-model-card-output` и вложенный/inline HTML-контент принудительно получают `font-size: 11px`.
+- Проверка: `node --check results.js`, `node --check background/message-router.js`.
+
+### 2026-06-01 22:41 CEST — v2.74.19
+
+- Для чего: исправить миниатюрный размер имени/времени в карточке модератора через lifecycle, а не очередной локальный CSS-патч. Изменение: добавлена `normalizeDebateCardState()`, которая нормализует карточку при `approval`, вставке модератора, вставке карточки и `session-filter`.
+- Для чего: убрать конкретное CSS-перебивание модератора. Изменение: `.debate-moderator-card .debate-model-card-name/.time` теперь явно `16px`, а output остаётся `11px`, как у ответов моделей.
+- Проверка: `node --check results.js`, `node --check background/message-router.js`.
+
+### 2026-06-01 19:19 CEST — v2.74.18
+
+- Для чего: убрать влияние глобального `.msg-time` (`9px`) на время в утверждённых карточках ответов. Изменение: в `approveDebateCard()` время больше не получает `msg-time`; добавляется отдельный класс `debate-inline-time`.
+- Для чего: стабилизировать кегль времени у утверждённых карточек моделей и модератора. Изменение: добавлены селекторы `.debate-model-card.is-approved .debate-model-card-title-main .debate-inline-time` и `.debate-moderator-card .debate-inline-time` с `font-size: 16px`.
+- Проверка: `node --check results.js`, `node --check background/message-router.js`.
+
+### 2026-06-01 19:16 CEST — v2.74.17
+
+- Для чего: уважить вручную установленный кегль карточек и убрать миниатюрный текст в approved-карточке модератора. Изменение: `.debate-model-card-name` возвращён к `16px`; для `.debate-model-card.is-approved .debate-model-card-title-main .msg-time`, `.debate-moderator-card .msg-time`, `.debate-moderator-card .debate-model-card-name/.output/.time` установлен `font-size: inherit` вместо жёсткого `11px`.
+- Проверка: `node --check results.js`, `node --check background/message-router.js`.
+
+### 2026-06-01 19:13 CEST — v2.74.16
+
+- Для чего: убрать слишком мелкий кегль времени в карточке утверждённого ответа модератора. Изменение: добавлено правило `.debate-moderator-card .msg-time { font-size: 11px; }`, чтобы глобальный `.msg-time { font-size: 9px; }` не уменьшал время в approved-карточке.
+- Для чего: устранить повторный регресс размера имени в debate-карточках. Изменение: `.debate-model-card-name` снова зафиксирован на `font-size: 11px` (вместо 16px).
+- Проверка: `node --check results.js`, `node --check background/message-router.js`.
+
+### 2026-06-01 19:08 CEST — v2.74.15
+
+- Для чего: в утверждённых карточках разместить время ответа слева от названия модели. Изменение: в `approveDebateCard()` элемент `.debate-model-card-time` получает класс `msg-time` и переносится в начало `.debate-model-card-title-main`.
+- Для чего: убрать рассинхрон шрифта в карточках и исправить регрессию размера имени. Изменение: `.debate-model-card-name` возвращён к `font-size: 11px` (вместо ошибочного `161px`), для `.debate-model-card.is-approved .debate-model-card-title-main .msg-time` добавлены стили 11px.
+- Для чего: карточка модератора в approved-контексте должна использовать тот же кегль. Изменение: для `.debate-moderator-card .debate-model-card-name`, `.debate-moderator-card .debate-model-card-output`, `.debate-moderator-card .debate-model-card-time` закреплён `font-size: 11px`.
+- Проверка: `node --check results.js`, `node --check background/message-router.js`.
+
+### 2026-06-01 18:46 CEST — v2.74.14
+
+- Для чего: добавить время ответа рядом с названием модели в Pipeline HTML export, включая `Moderator`. Изменение: экспорт теперь строится через `pipelineExportCardParts()`, `pipelineExportHeading()` и выводит `<span class="response-time">HH:MM</span>` рядом с именем модели.
+- Для чего: привести Pipeline export к формату LLM Stream export. Изменение: добавлен `pipelineExportDocument()` со стилями `section`, `h1/h2`, `.response-body`, `pre`, таблиц и списков по аналогии с рабочим экспортом LLM Stream.
+- Для чего: улучшить отображение карточек в debate-ленте. Изменение: `.debate-model-card-output` теперь имеет `max-height: 200px`; карточки используют единый `Arial, sans-serif` и `11px`, включая вложенный markdown/HTML-контент.
+- Для чего: очищать утверждённые ответы от live-status. Изменение: `approveDebateCard()` удаляет `.status-indicator` при переносе карточки в approved-зону.
+- Проверка: `node --check results.js`, `node --check background/message-router.js`, static test для export helpers, CSS max-height/font и удаления status-indicator.
+
+### 2026-06-01 18:18 CEST — v2.74.13
+
+- Для чего: проверить гипотезу из внешнего анализа о месте регистрации Pipeline export handlers. Изменение: `#debate-session-export-btn` и `.debate-card-export` вынесены из `DOMContentLoaded` в top-level delegated handlers внутри guard `__RESULTS_PAGE_LOADED`.
+- Для чего: убрать зависимость Pipeline export от scoped-функций внутреннего init-блока. Изменение: добавлены top-level helpers `pipelineExportCollectFeedHtml()`, `pipelineExportDownloadHtml()`, `pipelineExportStamp()`, `pipelineExportEscape()`; они работают напрямую через DOM и повторяют anchor-download flow рабочей главной страницы.
+- Проверка: `node --check results.js`, `node --check background/message-router.js`.
+
 ### 2026-06-01 17:58 CEST — v2.74.12
 
 - Для чего: убрать ещё одно отличие Pipeline export от рабочего экспорта главной страницы. Изменение: `#debate-session-export-btn` теперь обрабатывается через `document.addEventListener('click')` и `event.target.closest(...)`, как `#export-html-btn` и `.panel-export-html-btn`, вместо прямого listener на элемент.

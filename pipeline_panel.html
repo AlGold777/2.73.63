@@ -158,15 +158,15 @@
 
     <!-- Кнопки копирования и очистки теперь внутри обертки, но позиционируются абсолютно -->
     <input type="file" id="prompt-attach-input" class="visually-hidden" multiple>
-    <div class="debate-sel-toolbar" id="debateSelTb">
-        <button class="stb col" style="background:#fde68a;border-color:#f59e0b" data-color="#fde68a" title="Yellow highlight"></button>
-        <button class="stb col" style="background:#bbf7d0;border-color:#22c55e" data-color="#bbf7d0" title="Green highlight"></button>
-        <button class="stb col" style="background:#bfdbfe;border-color:#3b82f6" data-color="#bfdbfe" title="Blue highlight"></button>
+    <div class="debate-sel-toolbar" id="debateSelTb" aria-label="Selected text actions">
+        <button class="stb col" style="background:#fde68a;border-color:#f59e0b" data-color="#fde68a" title="Yellow highlight" aria-label="Yellow highlight"><span class="stb-label">Yellow</span></button>
+        <button class="stb col" style="background:#bbf7d0;border-color:#22c55e" data-color="#bbf7d0" title="Green highlight" aria-label="Green highlight"><span class="stb-label">Green</span></button>
+        <button class="stb col" style="background:#bfdbfe;border-color:#3b82f6" data-color="#bfdbfe" title="Blue highlight" aria-label="Blue highlight"><span class="stb-label">Blue</span></button>
         <div style="width:1px;background:rgba(255,255,255,.2);margin:2px 3px;height:14px;flex-shrink:0"></div>
-        <button class="stb" data-cmd="bold" title="Bold"><i class="ti ti-bold" style="font-size:12px"></i></button>
-        <button class="stb" data-cmd="italic" title="Italic"><i class="ti ti-italic" style="font-size:12px"></i></button>
+        <button class="stb" data-cmd="bold" title="Bold" aria-label="Bold"><span class="stb-label">Bold</span></button>
+        <button class="stb" data-cmd="italic" title="Italic" aria-label="Italic"><span class="stb-label">Italic</span></button>
         <div style="width:1px;background:rgba(255,255,255,.2);margin:2px 3px;height:14px;flex-shrink:0"></div>
-        <button class="stb" data-fav="1" title="Favorite"><i class="ti ti-star" style="font-size:12px"></i></button>
+        <button class="stb" data-fav="1" title="Add selected fragment to favorites" aria-label="Add selected fragment to favorites"><span class="stb-label">Favorite</span></button>
     </div>
     <div class="debate-session-bar" id="debate-session-bar">
         <div class="debate-session-left">
@@ -174,6 +174,7 @@
                 <button type="button" class="debate-session-tab active" data-session-id="1" title="Session 1">1</button>
             </div>
             <button type="button" id="debate-session-add-btn" class="ib" title="New session" aria-label="New session">+</button>
+            <button type="button" id="debate-session-delete-btn" class="ib" title="Delete current session" aria-label="Delete current session">−</button>
         </div>
         <div class="debate-session-actions">
             <button type="button" id="debate-auto-pause-btn" class="ib hidden" title="Pause auto debate" aria-label="Pause auto debate">Ⅱ</button>
