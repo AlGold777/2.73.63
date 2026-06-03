@@ -1,5 +1,116 @@
 ## Change Log — Codex
 
+### 2026-06-03 06:05 CEST — v2.74.42
+
+- Для чего: уменьшить карточку ответа с 6 строк до 5 строк в collapsed state. Изменение: `.debate-model-card-output` теперь ограничен `max-height: calc(var(--debate-card-line-height) * 5)`.
+- Для чего: убрать дополнительную строку для `Show more`. Изменение: кнопка переведена в overlay-режим `position: absolute` и размещается у нижнего края карточки, а не под текстом.
+- Для чего: сделать toggle collapse по dblclick на имени модели. Изменение: повторный dblclick по `.debate-model-card-name` теперь переключает `is-expanded` обратно в `false`, то есть сворачивает карточку до 5 строк.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` проверяет 5 строк, overlay `Show more` и повторный dblclick collapse.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.42`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-03 00:36 CEST — v2.74.41
+
+- Для чего: изменить гарантированный размер текста карточек моделей с `11px` на `14px`. Изменение: `.debate-model-card` и все вложенные элементы теперь нормализованы до `14px !important`; line-height обновлён до `21px`.
+- Для чего: исправить высоту коротких ответов. Изменение: у непустого `.debate-model-card-output` удалён `min-height: 6 строк`; короткий ответ теперь занимает фактическую высоту текста до лимита 6 строк.
+- Для чего: сохранить ограничение длинных ответов. Изменение: длинный ответ по-прежнему ограничен `max-height: 6 строк` и получает `Show more`, если превышает 6 строк.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` проверяет `14px`, пустую строку, отсутствие `min-height` на 6 строк, короткий ответ без `Show more` и длинный ответ с `Show more`.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.41`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-03 00:24 CEST — v2.74.40
+
+- Для чего: гарантировать единый размер текста во всех карточках моделей. Изменение: `.debate-model-card` и все вложенные элементы принудительно нормализованы до `11px`; прежние исключения для имени модели, moderator/time/output и вложенного HTML переопределены на `11px`.
+- Для чего: сделать пустую карточку видимой. Изменение: `.debate-model-card-empty` теперь имеет высоту ровно одной строки через `--debate-card-line-height`.
+- Для чего: сделать стабильный preview ответов. Изменение: непустой `.debate-model-card-output` получает фиксированную высоту 6 строк независимо от длины ответа.
+- Для чего: добавить управляемое раскрытие длинных ответов. Изменение: добавлены `Show more`, `is-expanded`, `syncDebateCardOutputLayout()` и раскрытие по клику `Show more` или двойному клику по `.debate-model-card-name`.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` проверяет 11px, высоту 1/6 строк, появление `Show more`, раскрытие кнопкой и dblclick по имени модели.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.40`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-03 00:12 CEST — v2.74.39
+
+- Для чего: восстановить работу color/bold/italic в floating toolbar. Изменение: общий `document mouseup` больше не вызывает `hideDebateSelectionToolbar()` для событий внутри `#debateSelTb`, поэтому сохранённый selection range не сбрасывается перед `click`.
+- Для чего: зафиксировать реальный порядок браузерных событий. Изменение: тест форматирования теперь симулирует `mouseup` на toolbar перед кликом по color/bold и проверяет, что форматирование всё равно применяется к исходной карточке.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.39`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-03 00:10 CEST — v2.74.38
+
+- Для чего: перевести floating toolbar выделения в светлую тему. Изменение: `.debate-sel-toolbar` получил белый фон, светлые кнопки, мягкую границу и менее тяжёлую тень.
+- Для чего: сделать выбор цвета понятным визуально. Изменение: цветовые кнопки теперь залиты образцом цвета целиком через `--swatch-color`, а не отображаются тонкими полосками.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` проверяет светлый фон toolbar и swatch-заливку цветовых кнопок.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.38`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-03 00:06 CEST — v2.74.37
+
+- Для чего: поставить floating toolbar непосредственно над выделенным фрагментом. Изменение: `.debate-sel-toolbar` переведён с `position: sticky` на `position: absolute`, а `showDebateSelectionToolbar()` рассчитывает `top/left` от selection rect и размера самого toolbar.
+- Для чего: сделать пункты toolbar видимыми без угадывания. Изменение: цветовые кнопки стали тонкими горизонтальными полосками, а `Bold`, `Italic`, `Favorite` получили явные CSS-иконки `B`, `I`, `★`.
+- Для чего: сохранить доступные подписи. Изменение: текстовые `.stb-label` оставлены в HTML, но визуально скрыты CSS вместо пустых невидимых зон.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` проверяет absolute-позиционирование toolbar и наличие видимых CSS-иконок.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.37`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `node --check pipeline/pipeline-runtime.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-02 23:49 CEST — v2.74.36
+
+- Для чего: исправить отправку Pipeline в модели, которых пользователь не выбирал. Изменение: R1 Pipeline синхронизируется с верхним списком выбранных LLM перед запуском, пока R1 не был явно изменён вручную или загруженным pipeline config.
+- Для чего: сохранить ручную настройку Pipeline. Изменение: добавлен dirty-флаг для `#r1-models`; ручные изменения R1 не перезаписываются верхним выбором.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` проверяет сценарий `Le Chat` + `Perplexity` и отсутствие отправки в дефолтные `Claude`, `GPT`, `Gemini`.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.36`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `node --check pipeline/pipeline-runtime.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-02 23:37 CEST — v2.74.35
+
+- Для чего: убрать визуальную метку pending-зоны. Изменение: удалён CSS `.debate-model-card.first-pending-zone-card::before` и текст `На утверждение`; runtime больше не добавляет `first-pending-zone-card`.
+- Для чего: убрать статус-индикатор из moderator header. Изменение: из `pipeline_panel.html` удалён `#mod-status-indicator` внутри `.msg-header`.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` проверяет отсутствие `#mod-status-indicator`, pending-zone pseudo-label CSS и текста `На утверждение`.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.35`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-02 23:35 CEST — v2.74.34
+
+- Для чего: исправить регрессию approval reorder в Pipeline Debate. Изменение: `insertDebateCard(card, { zone: 'approved' })` снова учитывает `zone` и переносит approved-карточку перед первой pending-карточкой текущей session.
+- Для чего: зафиксировать сценарий пользователя. Изменение: `tests/results-debate-favorites.test.js` проверяет порядок `Qwen`, `Le Chat`: если `Le Chat` утверждён первым, карточка переносится выше оставшейся pending `Qwen` и теряет checkbox.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.34`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `node --check pipeline/pipeline-runtime.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-02 23:01 CEST — v2.74.33
+
+- Для чего: выполнить P2.1 без полного risky split `results.js`. Изменение: добавлен `pipeline/pipeline-runtime.js` с model registry, render helpers, output helpers, stack capture и runtime snapshot helpers; `results.js` теперь делегирует Pipeline rendering/snapshot helpers этому модулю.
+- Для чего: выполнить P2.2 и убрать hard-coded Pipeline model blocks из HTML. Изменение: `pipeline_panel.html` и `result_new.html` теперь содержат только mount points `#r1-models`, `#r2-models`, `#output-stack` с `data-render`, а карточки моделей/output blocks рендерятся из state в `pipeline-runtime.js`.
+- Для чего: обеспечить загрузку нового runtime. Изменение: оба HTML entrypoints подключают `pipeline/pipeline-runtime.js` перед `results.js`, а `manifest.json` добавляет файл в `web_accessible_resources`.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` загружает runtime перед `results.js` и проверяет, что HTML entrypoints больше не содержат hard-coded `.model-block`/`.output-block`.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.33`. Файл: `manifest.json`.
+- Проверка: `node --check pipeline/pipeline-runtime.js`, `node --check results.js`, `node --check background/message-router.js`, `node --check background/job-orchestrator.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-02 22:42 CEST — v2.74.32
+
+- Для чего: сделать Pipeline UI источником правды для R1. Изменение: запуск строит runtime snapshot из `r1-models` и больше не подменяет первый раунд выбранными top/debate models.
+- Для чего: заморозить конфигурацию на старте run. Изменение: `buildPipelineRuntimeSnapshot()` читает rounds/output один раз, сохраняет model names/input/send/role и использует этот snapshot до конца запуска.
+- Для чего: убрать хрупкую зависимость output selection от текста label. Изменение: `pipeline_panel.html` получил `data-output="notes|export|exportHtml"`, а `getPipelineOutputSelection()` читает machine keys с fallback на legacy labels.
+- Для чего: уйти от hard-coded `r === 1` в execution flow. Изменение: runtime rounds получают `stage: models|judge`, а loop выбирает ветку по `roundState.stage`.
+- Для чего: санитизировать Pipeline HTML export. Изменение: `safePipelineMarkdownToHtml()` удаляет опасные HTML/protocol tokens, экранирует model text, конвертирует markdown и пропускает результат через sanitizer.
+- Для чего: убрать global approval escape hatch. Изменение: `resolveDebateApprovalGlobal` заменён на state-object `debateApprovalBridge`.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` проверяет `data-output`, R1 snapshot source-of-truth и sanitized export.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.32`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `node --check background/message-router.js`, `node --check background/job-orchestrator.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-02 17:47 CEST — v2.74.31
+
+- Для чего: стабилизировать lifecycle Pipeline run. Изменение: `pipelineWaiter` теперь хранит pending-state по `pipelineRunId`, `pipelineRoundId`, `pipelineBatchId`, optional `dispatchId` и игнорирует ответы не из текущего batch.
+- Для чего: не запускать следующие раунды на первом chunk. Изменение: `LLM_PARTIAL_RESPONSE` обновляет preview, но закрывает waiter только при terminal metadata (`SUCCESS`, `COPY_SUCCESS`, `ERROR`, `STREAM_TIMEOUT`, etc.) или explicit final message.
+- Для чего: убрать зависание manual approval. Изменение: `waitForDebateApproval()` получил abort/timeout cleanup и больше не оставляет висящий resolver после cancel/error.
+- Для чего: добавить явную отмену Pipeline. Изменение: активный run получает `AbortController`; кнопка Pause во время run работает как `Cancel`, чистит waiter/approval и отправляет `CANCEL_PIPELINE_RUN` в background, где он проходит через существующий `stopAllProcesses()`.
+- Для чего: зафиксировать регрессию тестами. Изменение: `tests/results-debate-favorites.test.js` проверяет, что partial/wrong-batch response не закрывает waiter, terminal correct response закрывает batch, а approval abort чистит ожидание.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.31`. Файл: `manifest.json`.
+- Проверка: `node --check results.js`, `node --check background/message-router.js`, `node --check background/job-orchestrator.js`, `npx jest --config tests/jest.config.js tests/results-debate-favorites.test.js --runInBand`.
+
+### 2026-06-02 15:28 CEST — v2.74.30
+
+- Для чего: добавить скрытую поисковую метку для сторонних разработчиков. Изменение: в `pipeline_panel.html` добавлены невидимые для пользователя `<!-- LLM Discus -->` и `<meta name="keywords" content="LLM Discus">` в `<head>`.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.30`. Файл: `manifest.json`.
+
 ### 2026-06-02 15:17 CEST — v2.74.29
 
 - Для чего: добавить управление текущей session через `-` рядом с `+`. Изменение: `#debate-session-delete-btn` удаляет активную session при наличии нескольких sessions; если session одна, она не удаляется, а очищается и остаётся активной.

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "A_Codex_Vision_73.16",
-  "version": "2.74.29",
+  "version": "2.74.42",
   "description": "Compares LLMs.",
   "permissions": [
     "storage",
@@ -203,6 +203,7 @@
         "result_new.html",
         "styles.css",
         "results.js",
+        "pipeline/pipeline-runtime.js",
         "content-scripts/content-bridge.js",
         "content-scripts/fetch-monitor-bridge.js",
         "scroll-toolkit.js",

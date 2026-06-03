@@ -108,11 +108,49 @@ function renderDebateDom() {
       <div id="debate-session-tabs">
         <button type="button" class="debate-session-tab active" data-session-id="1">1</button>
       </div>
+      <div class="llm-buttons">
+        <button class="llm-button" id="llm-gpt">GPT</button>
+        <button class="llm-button" id="llm-gemini">Gemini</button>
+        <button class="llm-button" id="llm-claude">Claude</button>
+        <button class="llm-button" id="llm-grok">Grok</button>
+        <button class="llm-button" id="llm-lechat">Le Chat</button>
+        <button class="llm-button" id="llm-qwen">Qwen</button>
+        <button class="llm-button" id="llm-deepseek">DeepSeek</button>
+        <button class="llm-button" id="llm-perplexity">Perplexity</button>
+      </div>
       <button id="debate-session-add-btn" type="button">+</button>
       <button id="debate-session-delete-btn" type="button">−</button>
       <button id="debate-session-copy-btn" type="button">copy</button>
       <button id="debate-session-export-btn" type="button">export</button>
       <button id="debate-session-clear-btn" type="button">clear</button>
+      <div id="pipeline-panel">
+        <div class="model-stack" id="r1-models">
+          <div class="model-block">
+            <span class="model-name">GPT</span>
+            <input type="checkbox" class="model-input-checkbox" checked>
+            <input type="checkbox" class="model-send-checkbox" checked>
+          </div>
+          <div class="model-block">
+            <span class="model-name">Claude</span>
+            <input type="checkbox" class="model-input-checkbox">
+            <input type="checkbox" class="model-send-checkbox" checked>
+          </div>
+        </div>
+        <div class="output-stack" id="output-stack">
+          <div class="output-block" data-output="notes">
+            <input type="checkbox" class="output-checkbox" checked>
+            <span class="output-name">Renamed A</span>
+          </div>
+          <div class="output-block" data-output="export">
+            <input type="checkbox" class="output-checkbox">
+            <span class="output-name">Renamed B</span>
+          </div>
+          <div class="output-block" data-output="exportHtml">
+            <input type="checkbox" class="output-checkbox" checked>
+            <span class="output-name">Renamed C</span>
+          </div>
+        </div>
+      </div>
       <textarea id="prompt-input"></textarea>
       <div id="debate-model-cards"></div>
       <div id="create-template-modal" class="modal">
@@ -180,6 +218,19 @@ function addDebateCard({ id, text, starred = false, model = 'GPT' }) {
   return card;
 }
 
+function addPendingApprovalCard({ id, text, model }) {
+  const card = addDebateCard({ id, text, model });
+  card.dataset.approved = 'false';
+  card.dataset.approvalSelectable = 'true';
+  const titleMain = card.querySelector('.debate-model-card-title-main');
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'debate-approval-check';
+  checkbox.setAttribute('aria-label', 'Approve this answer');
+  titleMain.appendChild(checkbox);
+  return card;
+}
+
 async function selectTextInOutput(output, start, end) {
   const textNode = output.firstChild;
   const range = document.createRange();
@@ -195,6 +246,9 @@ async function selectTextInOutput(output, start, end) {
 async function loadResultsScript() {
   installChromeStorageMock();
   installDomMocks();
+  window.__RESULTS_TEST_DEBUG__ = true;
+  const pipelineRuntime = fs.readFileSync(path.join(__dirname, '..', 'pipeline', 'pipeline-runtime.js'), 'utf8');
+  window.eval(pipelineRuntime);
   const script = fs.readFileSync(path.join(__dirname, '..', 'results.js'), 'utf8');
   window.eval(script);
   document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }));
@@ -309,6 +363,31 @@ describe('Pipeline debate favorites view', () => {
     expect(document.querySelectorAll('.debate-model-card')).toHaveLength(0);
   });
 
+  test('approving a lower pending card moves it above remaining pending cards', async () => {
+    const qwen = addPendingApprovalCard({
+      id: 'qwen-pending',
+      model: 'Qwen',
+      text: 'Qwen pending answer'
+    });
+    const leChat = addPendingApprovalCard({
+      id: 'lechat-pending',
+      model: 'Le Chat',
+      text: 'Le Chat approved first'
+    });
+
+    expect(Array.from(document.querySelectorAll('.debate-model-card')).map((card) => card.dataset.llmName))
+      .toEqual(['Qwen', 'Le Chat']);
+
+    window.approveDebateCheckbox(leChat.querySelector('.debate-approval-check'));
+    await delay(20);
+
+    const order = Array.from(document.querySelectorAll('.debate-model-card')).map((card) => card.dataset.llmName);
+    expect(order).toEqual(['Le Chat', 'Qwen']);
+    expect(leChat.dataset.approved).toBe('true');
+    expect(leChat.querySelector('.debate-approval-check')).toBeNull();
+    expect(qwen.dataset.approved).not.toBe('true');
+  });
+
   test('selection toolbar formats the source card text in the normal timeline', async () => {
     const source = addDebateCard({
       id: 'source-format',
@@ -317,6 +396,8 @@ describe('Pipeline debate favorites view', () => {
     });
     let output = source.querySelector('.debate-model-card-output');
     await selectTextInOutput(output, 7, 11);
+    const toolbar = document.getElementById('debateSelTb');
+    toolbar.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     document.querySelector('#debateSelTb [data-color="#fde68a"]').click();
 
     let highlight = output.querySelector('span');
@@ -328,6 +409,7 @@ describe('Pipeline debate favorites view', () => {
 
     output = source.querySelector('.debate-model-card-output');
     await selectTextInOutput(output, 0, 6);
+    toolbar.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     document.querySelector('#debateSelTb [data-cmd="bold"]').click();
 
     const bold = output.querySelector('strong');
@@ -342,5 +424,214 @@ describe('Pipeline debate favorites view', () => {
     expect(html).toContain('<span class="stb-label">Bold</span>');
     expect(html).toContain('aria-label="Add selected fragment to favorites"');
     expect(html).toContain('<span class="stb-label">Favorite</span>');
+  });
+
+  test('selection toolbar is absolutely positioned near the selected fragment and has visible icons', async () => {
+    const card = addDebateCard({ id: 'msg-toolbar', text: 'Toolbar anchor text', model: 'GPT' });
+    const output = card.querySelector('.debate-model-card-output');
+
+    await selectTextInOutput(output, 0, 7);
+
+    const toolbar = document.getElementById('debateSelTb');
+    expect(toolbar.classList.contains('vis')).toBe(true);
+    expect(toolbar.style.top).toBeTruthy();
+    expect(toolbar.style.left).toBeTruthy();
+
+    const css = fs.readFileSync(path.join(__dirname, '..', 'styles.css'), 'utf8');
+    expect(css).toContain('.debate-sel-toolbar {\n    position: absolute;');
+    expect(css).toContain('background: #ffffff;');
+    expect(css).toContain('.debate-sel-toolbar .stb.col::before');
+    expect(css).toContain('.debate-sel-toolbar .stb.col[data-color="#fde68a"] { --swatch-color: #fde68a; }');
+    expect(css).toContain('.debate-sel-toolbar .stb[data-cmd="bold"]::before { content: "B"; }');
+    expect(css).toContain('.debate-sel-toolbar .stb[data-fav]::before');
+  });
+
+  test('model cards use 14px text, keep empty one-line cards, and cap long responses at five lines', async () => {
+    const css = fs.readFileSync(path.join(__dirname, '..', 'styles.css'), 'utf8');
+    expect(css).toContain('.debate-model-card,\n.debate-model-card :where(*) {\n    font-size: 14px !important;');
+    expect(css).toContain('min-height: var(--debate-card-line-height);');
+    expect(css).toContain('max-height: var(--debate-card-line-height);');
+    expect(css).not.toContain('min-height: calc(var(--debate-card-line-height) * 6);');
+    expect(css).toContain('max-height: calc(var(--debate-card-line-height) * 5);');
+    expect(css).toContain('.debate-model-card.has-overflow {');
+    expect(css).toContain('position: absolute;');
+
+    const shortText = ['Short 1', 'Short 2', 'Short 3'].join('\n');
+    const shortCard = addDebateCard({ id: 'msg-short-response', text: shortText, model: 'Gemini' });
+    window.__pipelineLifecycleDebug.syncDebateCardOutputLayout(shortCard);
+    const shortShowMore = shortCard.querySelector('.debate-card-show-more');
+    expect(shortShowMore).not.toBeNull();
+    expect(shortShowMore.hidden).toBe(true);
+    expect(shortCard.classList.contains('has-overflow')).toBe(false);
+    expect(shortCard.classList.contains('is-expanded')).toBe(false);
+
+    const longText = Array.from({ length: 10 }, (_, index) => `Line ${index + 1}`).join('\n');
+    const card = addDebateCard({ id: 'msg-show-more', text: longText, model: 'GPT' });
+    window.__pipelineLifecycleDebug.syncDebateCardOutputLayout(card);
+
+    const showMore = card.querySelector('.debate-card-show-more');
+    expect(showMore).not.toBeNull();
+    expect(showMore.hidden).toBe(false);
+    expect(card.classList.contains('is-expanded')).toBe(false);
+
+    showMore.click();
+    expect(card.classList.contains('is-expanded')).toBe(true);
+    expect(showMore.hidden).toBe(true);
+
+    const second = addDebateCard({ id: 'msg-dbl-expand', text: longText, model: 'Claude' });
+    window.__pipelineLifecycleDebug.syncDebateCardOutputLayout(second);
+    const secondName = second.querySelector('.debate-model-card-name');
+    secondName.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    expect(second.classList.contains('is-expanded')).toBe(true);
+    secondName.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    expect(second.classList.contains('is-expanded')).toBe(false);
+    expect(second.querySelector('.debate-card-show-more').hidden).toBe(false);
+  });
+
+  test('pipeline waiter ignores partial and wrong-batch responses until terminal response arrives', async () => {
+    const debug = window.__pipelineLifecycleDebug;
+    const context = {
+      pipelineRunId: 'run-1',
+      pipelineRoundId: 'r1',
+      pipelineBatchId: 'run-1:r1:g0'
+    };
+    let settled = false;
+    const waitPromise = debug.pipelineWaiter
+      .waitForModels(['GPT'], { timeoutMs: 200, context })
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+
+    expect(debug.pipelineWaiter.handlePartial({
+      type: 'LLM_PARTIAL_RESPONSE',
+      llmName: 'GPT',
+      answer: 'first chunk',
+      metadata: { ...context, status: 'GENERATING' }
+    })).toBe(true);
+    await delay(20);
+    expect(settled).toBe(false);
+
+    expect(debug.pipelineWaiter.handleFinal({
+      type: 'LLM_PARTIAL_RESPONSE',
+      llmName: 'GPT',
+      answer: 'old final',
+      metadata: { ...context, pipelineBatchId: 'old-run:r1:g0', status: 'SUCCESS' }
+    })).toBe(false);
+    await delay(20);
+    expect(settled).toBe(false);
+
+    expect(debug.pipelineWaiter.handleFinal({
+      type: 'LLM_PARTIAL_RESPONSE',
+      llmName: 'GPT',
+      answer: 'correct final',
+      metadata: { ...context, status: 'SUCCESS' }
+    })).toBe(true);
+
+    await expect(waitPromise).resolves.toMatchObject({
+      responses: { GPT: 'correct final' },
+      missing: [],
+      timedOut: false
+    });
+    expect(settled).toBe(true);
+  });
+
+  test('debate approval waiter rejects and cleans up on abort', async () => {
+    const debug = window.__pipelineLifecycleDebug;
+    const controller = new AbortController();
+    const approvalPromise = debug.waitForDebateApproval({ signal: controller.signal });
+    expect(debug.getApprovalWaiting()).toBe(true);
+
+    controller.abort();
+
+    await expect(approvalPromise).rejects.toMatchObject({ name: 'AbortError' });
+    expect(debug.getApprovalWaiting()).toBe(false);
+  });
+
+  test('pipeline output selection uses data-output keys instead of visible labels', () => {
+    const debug = window.__pipelineLifecycleDebug;
+    const selection = debug.getPipelineOutputSelection();
+
+    expect(selection).toEqual({
+      notes: true,
+      export: false,
+      exportHtml: true
+    });
+  });
+
+  test('pipeline runtime snapshot uses R1 Pipeline UI as source of truth', () => {
+    const debug = window.__pipelineLifecycleDebug;
+    const blocks = Array.from(document.querySelectorAll('#r1-models .model-block'));
+    blocks.forEach((block) => {
+      const name = block.querySelector('.model-name')?.textContent?.trim();
+      block.querySelector('.model-input-checkbox').checked = name === 'GPT';
+      block.querySelector('.model-send-checkbox').checked = name === 'GPT' || name === 'Claude';
+    });
+    const snapshot = debug.buildPipelineRuntimeSnapshot();
+
+    expect(snapshot.rounds[0].stage).toBe('models');
+    expect(snapshot.rounds[0].inputModels).toEqual(['GPT']);
+    expect(snapshot.rounds[0].sendModels).toEqual(expect.arrayContaining(['GPT', 'Claude']));
+    expect(snapshot.rounds[0].sendModels).toHaveLength(2);
+    const gptConfig = snapshot.config.modelStacks['r1-models'].items.find((item) => item.name === 'GPT');
+    expect(gptConfig).toMatchObject({
+      name: 'GPT',
+      input: true,
+      send: true
+    });
+  });
+
+  test('pipeline R1 mirrors selected top models before run when R1 is still default', () => {
+    const blocks = Array.from(document.querySelectorAll('#r1-models .model-block'));
+    blocks.forEach((block) => {
+      const name = block.querySelector('.model-name')?.textContent?.trim();
+      const isDefault = ['Claude', 'GPT', 'Gemini'].includes(name);
+      block.querySelector('.model-input-checkbox').checked = isDefault;
+      block.querySelector('.model-send-checkbox').checked = isDefault;
+    });
+
+    document.querySelectorAll('.llm-button').forEach((button) => {
+      button.classList.toggle('active', button.id === 'llm-lechat' || button.id === 'llm-perplexity');
+    });
+    document.dispatchEvent(new CustomEvent('llm-selection-change', {
+      detail: { selected: ['Le Chat', 'Perplexity'] }
+    }));
+
+    const snapshot = window.__pipelineLifecycleDebug.buildPipelineRuntimeSnapshot();
+
+    expect(snapshot.rounds[0].inputModels).toEqual(['Le Chat', 'Perplexity']);
+    expect(snapshot.rounds[0].sendModels).toEqual(['Le Chat', 'Perplexity']);
+    expect(snapshot.rounds[0].sendModels).not.toEqual(expect.arrayContaining(['Claude', 'GPT', 'Gemini']));
+  });
+
+  test('pipeline HTML export sanitizes model text before embedding it', () => {
+    const debug = window.__pipelineLifecycleDebug;
+    const html = debug.safePipelineMarkdownToHtml('**Safe** <img src=x onerror=alert(1)> [x](javascript:alert(2))');
+
+    expect(html).toContain('<strong>Safe</strong>');
+    expect(html).not.toContain('onerror');
+    expect(html).not.toContain('javascript:');
+    expect(html).not.toContain('<img');
+  });
+
+  test('pipeline HTML entrypoints expose mount points instead of hard-coded model blocks', () => {
+    ['pipeline_panel.html', 'result_new.html'].forEach((fileName) => {
+      const html = fs.readFileSync(path.join(__dirname, '..', fileName), 'utf8');
+      expect(html).toContain('pipeline/pipeline-runtime.js');
+      expect(html).toContain('data-render="pipeline-model-stack-r1"');
+      expect(html).toContain('data-render="pipeline-model-stack-r2"');
+      expect(html).toContain('data-render="pipeline-output-stack"');
+      expect(html).not.toContain('class="model-block');
+      expect(html).not.toContain('class="output-block');
+    });
+  });
+
+  test('pipeline moderator header has no status indicator and pending zone label CSS is removed', () => {
+    const panelHtml = fs.readFileSync(path.join(__dirname, '..', 'pipeline_panel.html'), 'utf8');
+    const css = fs.readFileSync(path.join(__dirname, '..', 'styles.css'), 'utf8');
+
+    expect(panelHtml).not.toContain('id="mod-status-indicator"');
+    expect(css).not.toContain('.debate-model-card.first-pending-zone-card::before');
+    expect(css).not.toContain('На утверждение');
   });
 });

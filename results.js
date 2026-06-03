@@ -2096,14 +2096,70 @@ document.addEventListener('click', (event) => {
     }
 
     let pipelineRunActive = false;
-    let resolveDebateApprovalGlobal = null;
+    const debateApprovalBridge = {
+        resolve: null
+    };
+    let activePipelineAbortController = null;
+    let activePipelineRunContext = null;
+    const makePipelineRunId = () => {
+        try {
+            if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+        } catch (_) {}
+        return `pipeline-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    };
+    const makePipelineBatchId = ({ runId, roundIndex, groupIndex = 0 } = {}) =>
+        `${runId || makePipelineRunId()}:r${roundIndex || 1}:g${groupIndex || 0}`;
+    const PIPELINE_TERMINAL_STATUSES = new Set([
+        'DONE',
+        'FINAL',
+        'SUCCESS',
+        'COPY_SUCCESS',
+        'PARTIAL',
+        'STREAM_TIMEOUT',
+        'STREAM_TIMEOUT_HIDDEN',
+        'ERROR',
+        'NO_SEND',
+        'EXTRACT_FAILED',
+        'TIMEOUT',
+        'FAILED',
+        'CANCELLED',
+        'STOPPED'
+    ]);
+    const normalizePipelineMessageEnvelope = (messageOrName, answer = '') => {
+        const message = typeof messageOrName === 'object' && messageOrName
+            ? messageOrName
+            : { llmName: messageOrName, answer };
+        const metadata = message.metadata || message.meta || {};
+        return {
+            ...message,
+            answer: message.answer ?? answer,
+            metadata,
+            pipelineRunId: message.pipelineRunId || metadata.pipelineRunId || null,
+            pipelineRoundId: message.pipelineRoundId || metadata.pipelineRoundId || metadata.roundId || null,
+            pipelineBatchId: message.pipelineBatchId || metadata.pipelineBatchId || metadata.batchId || null,
+            dispatchId: message.dispatchId || metadata.dispatchId || null,
+            status: message.status || metadata.status || metadata.finalStatus || metadata.modelFinalStatus || null
+        };
+    };
+    const isTerminalPipelineMessage = (message) => {
+        const envelope = normalizePipelineMessageEnvelope(message);
+        const status = String(envelope.status || '').trim().toUpperCase();
+        return (
+            envelope.type === 'LLM_FINAL_RESPONSE'
+            || envelope.type === 'FINAL_LLM_RESPONSE'
+            || envelope.metadata?.isFinal === true
+            || envelope.metadata?.terminal === true
+            || PIPELINE_TERMINAL_STATUSES.has(status)
+        );
+    };
     const pipelineWaiter = {
         runToken: 0,
         waiting: false,
-        pendingModels: new Set(),
+        pendingModels: new Map(),
         responses: {},
+        partialResponses: {},
         timeoutId: null,
-        waitForModels(models, { timeoutMs = 240000 } = {}) {
+        waitForModels(models, { timeoutMs = 240000, context = {}, signal = null } = {}) {
             const normalized = Array.isArray(models) ? models.filter(Boolean) : [];
             if (!normalized.length) {
                 return Promise.resolve({ responses: {}, missing: [], timedOut: false });
@@ -2111,13 +2167,20 @@ document.addEventListener('click', (event) => {
             this.runToken += 1;
             const token = this.runToken;
             this.waiting = true;
-            this.pendingModels = new Set(normalized);
+            this.pendingModels = new Map(normalized.map((name) => [name, {
+                llmName: name,
+                pipelineRunId: context.pipelineRunId || null,
+                pipelineRoundId: context.pipelineRoundId || null,
+                pipelineBatchId: context.pipelineBatchId || null,
+                dispatchId: context.dispatchId || null
+            }]));
             this.responses = {};
+            this.partialResponses = {};
             if (this.timeoutId) {
                 clearTimeout(this.timeoutId);
                 this.timeoutId = null;
             }
-            return new Promise((resolve) => {
+            return new Promise((resolve, reject) => {
                 const finalize = (timedOut = false) => {
                     if (token !== this.runToken) return;
                     const missing = normalized.filter((name) => !Object.prototype.hasOwnProperty.call(this.responses, name));
@@ -2129,29 +2192,70 @@ document.addEventListener('click', (event) => {
                     }
                     resolve({ responses: { ...this.responses }, missing, timedOut });
                 };
+                const abort = () => {
+                    if (token !== this.runToken) return;
+                    this.reset();
+                    reject(new DOMException('Pipeline run cancelled', 'AbortError'));
+                };
+                if (signal?.aborted) {
+                    abort();
+                    return;
+                }
+                signal?.addEventListener?.('abort', abort, { once: true });
                 this.timeoutId = setTimeout(() => finalize(true), timeoutMs);
                 this._finalize = finalize;
+                this._abort = abort;
             });
         },
-        handleResponse(llmName, answer) {
-            if (!this.waiting || !this.pendingModels.has(llmName)) return;
-            this.responses[llmName] = answer;
-            const allDone = Array.from(this.pendingModels).every((name) =>
+        isExpectedResponse(message) {
+            const envelope = normalizePipelineMessageEnvelope(message);
+            const pending = this.pendingModels.get(envelope.llmName);
+            if (!this.waiting || !pending) return false;
+            if (pending.pipelineRunId && envelope.pipelineRunId && pending.pipelineRunId !== envelope.pipelineRunId) return false;
+            if (pending.pipelineRoundId && envelope.pipelineRoundId && pending.pipelineRoundId !== envelope.pipelineRoundId) return false;
+            if (pending.pipelineBatchId && envelope.pipelineBatchId && pending.pipelineBatchId !== envelope.pipelineBatchId) return false;
+            if (pending.dispatchId && envelope.dispatchId && pending.dispatchId !== envelope.dispatchId) return false;
+            return true;
+        },
+        handlePartial(messageOrName, answer) {
+            const envelope = normalizePipelineMessageEnvelope(messageOrName, answer);
+            if (!this.isExpectedResponse(envelope)) return false;
+            this.partialResponses[envelope.llmName] = envelope.answer;
+            return true;
+        },
+        handleFinal(messageOrName, answer) {
+            const envelope = normalizePipelineMessageEnvelope(messageOrName, answer);
+            if (!this.isExpectedResponse(envelope)) return false;
+            if (!isTerminalPipelineMessage(envelope)) {
+                return this.handlePartial(envelope);
+            }
+            this.responses[envelope.llmName] = envelope.answer;
+            const allDone = Array.from(this.pendingModels.keys()).every((name) =>
                 Object.prototype.hasOwnProperty.call(this.responses, name)
             );
             if (allDone && typeof this._finalize === 'function') {
                 this._finalize(false);
             }
+            return true;
+        },
+        handleResponse(llmName, answer) {
+            return this.handleFinal({
+                llmName,
+                answer,
+                metadata: { terminal: true }
+            });
         },
         reset() {
             this.waiting = false;
             this.pendingModels.clear();
             this.responses = {};
+            this.partialResponses = {};
             if (this.timeoutId) {
                 clearTimeout(this.timeoutId);
                 this.timeoutId = null;
             }
             this._finalize = null;
+            this._abort = null;
         }
     };
 
@@ -2225,6 +2329,8 @@ document.addEventListener('click', (event) => {
             lastSaved: '',
             active: ''
         };
+        let pipelineR1ManualDirty = false;
+        let pipelineApplyingConfig = false;
 
         const togglePipelineListCollapsed = () => {
             if (!pipelineList) return;
@@ -2312,23 +2418,15 @@ document.addEventListener('click', (event) => {
             active: pipelineStore.active
         });
 
-        const PIPELINE_MODELS = [
-            { name: 'Claude', defaultActive: true },
-            { name: 'GPT', defaultActive: true },
-            { name: 'Gemini', defaultActive: true },
-            { name: 'Grok', defaultActive: false },
-            { name: 'Le Chat', defaultActive: false },
-            { name: 'Qwen', defaultActive: false },
-            { name: 'DeepSeek', defaultActive: false },
-            { name: 'Perplexity', defaultActive: false }
-        ];
+        const PipelineRuntime = window.PipelineRuntime;
+        if (!PipelineRuntime) {
+            console.warn('[RESULTS] PipelineRuntime module missing; Pipeline UI renderer unavailable.');
+        }
+        const PIPELINE_MODELS = PipelineRuntime?.MODELS || [];
         const PIPELINE_ROLE_BASE = ['Synthesis', 'Critic', 'Meta', 'Advocate'];
-        const DEFAULT_MODEL_INDICES = PIPELINE_MODELS.reduce((acc, model, index) => {
-            if (model.defaultActive) acc.push(index);
-            return acc;
-        }, []);
-        const DEFAULT_JUDGE_INDICES = PIPELINE_MODELS.length > 1 ? [0, 1] : [0];
-        const DEFAULT_LATE_JUDGE_INDICES = [0];
+        const DEFAULT_MODEL_INDICES = PipelineRuntime?.DEFAULT_MODEL_INDICES || [];
+        const DEFAULT_JUDGE_INDICES = PipelineRuntime?.DEFAULT_JUDGE_INDICES || [];
+        const DEFAULT_LATE_JUDGE_INDICES = PipelineRuntime?.DEFAULT_LATE_JUDGE_INDICES || [0];
 
         const getOrderedJudgePrompts = () => {
             const list = Array.isArray(judgeSystemPrompts) ? judgeSystemPrompts : [];
@@ -2376,47 +2474,28 @@ document.addEventListener('click', (event) => {
         };
 
         const buildJudgePromptOptionsHtml = (index) => {
-            const orderedPrompts = getOrderedJudgePrompts();
-            if (!orderedPrompts.length) return '';
-            const metaPrompt = orderedPrompts.find((prompt) => {
-                const id = String(prompt.id || '').toLowerCase();
-                return id.includes('meta_synthesis');
-            }) || orderedPrompts.find((prompt) => String(prompt.label || '').toLowerCase().includes('meta'));
-            const primaryPrompt = index > 0 ? (metaPrompt || orderedPrompts[0]) : orderedPrompts[0];
-            const ordered = [primaryPrompt, ...orderedPrompts.filter((prompt) => prompt !== primaryPrompt)];
-            return ordered
-                .map((prompt) => `<option value="${escapeHtml(prompt.id)}">${escapeHtml(prompt.label || prompt.id)}</option>`)
-                .join('');
+            return PipelineRuntime?.buildJudgePromptOptionsHtml?.({
+                index,
+                orderedPrompts: getOrderedJudgePrompts(),
+                escapeHtml
+            }) || '';
         };
 
         const buildModelBlocksHtml = (activeIndices = DEFAULT_MODEL_INDICES, withRole = false) => {
-            const activeSet = new Set(activeIndices);
-            return PIPELINE_MODELS.map((model, index) => {
-                const isActive = activeSet.has(index);
-                const roleHtml = withRole
-                    ? `<select class="role-selector judge-prompt-selector"${isActive ? '' : ' disabled'}>${buildJudgePromptOptionsHtml(index)}</select>`
-                    : '';
-                const inputAttrs = `${isActive ? ' checked' : ''} aria-label="Input" title="Input"`;
-                const sendAttrs = `${isActive ? ' checked' : ''}${isActive ? '' : ' disabled'} aria-label="Send" title="Send"`;
-                return `
-                    <div class="model-block ${isActive ? 'active' : 'inactive'}${withRole ? ' with-role' : ''}" data-index="${index}">
-                        <div class="model-header">
-                            <span class="status-indicator" data-llm-name="${escapeHtml(model.name)}"></span>
-                            <input type="checkbox" class="model-checkbox model-input-checkbox"${inputAttrs}>
-                            <span class="model-name">${escapeHtml(model.name)}</span>
-                            <input type="checkbox" class="model-checkbox model-send-checkbox"${sendAttrs}>
-                        </div>
-                        ${roleHtml}
-                    </div>
-                `;
-            }).join('');
+            return PipelineRuntime?.buildModelBlocksHtml?.({
+                activeIndices,
+                withRole,
+                orderedPrompts: getOrderedJudgePrompts(),
+                escapeHtml
+            }) || '';
         };
 
         const hydratePipelineStacks = () => {
-            const r1Stack = document.getElementById('r1-models');
-            if (r1Stack) replaceChildrenFromHtml(r1Stack, buildModelBlocksHtml(DEFAULT_MODEL_INDICES, false));
-            const r2Stack = document.getElementById('r2-models');
-            if (r2Stack) replaceChildrenFromHtml(r2Stack, buildModelBlocksHtml(DEFAULT_JUDGE_INDICES, true));
+            PipelineRuntime?.hydratePipelineStacks?.({
+                document,
+                escapeHtml,
+                orderedPrompts: getOrderedJudgePrompts()
+            });
         };
 
         const pipelineStyles = window.getComputedStyle(document.documentElement);
@@ -2521,29 +2600,11 @@ document.addEventListener('click', (event) => {
         };
 
         const captureModelStackState = (stackId) => {
-            const stack = document.getElementById(stackId);
-            if (!stack) return null;
-            const items = Array.from(stack.querySelectorAll('.model-block')).map((block) => {
-                const inputCb = block.querySelector('.model-input-checkbox');
-                const sendCb = block.querySelector('.model-send-checkbox');
-                const role = block.querySelector('.role-selector');
-                return {
-                    input: !!inputCb?.checked,
-                    send: !!sendCb?.checked,
-                    role: role ? role.value : null
-                };
-            });
-            return { items };
+            return PipelineRuntime?.captureModelStackState?.(document, stackId) || null;
         };
 
         const captureOutputStackState = (stackId) => {
-            const stack = document.getElementById(stackId);
-            if (!stack) return null;
-            const checks = Array.from(stack.querySelectorAll('.output-block')).map((block) => {
-                const cb = block.querySelector('.output-checkbox');
-                return !!cb?.checked;
-            });
-            return { checks };
+            return PipelineRuntime?.captureOutputStackState?.(document, stackId) || null;
         };
 
         const capturePipelineConfig = () => {
@@ -2560,6 +2621,10 @@ document.addEventListener('click', (event) => {
                 modelStacks,
                 outputStack: captureOutputStackState('output-stack')
             };
+        };
+
+        const clonePipelineConfig = (config) => {
+            return PipelineRuntime?.cloneConfig?.(config) || null;
         };
 
         const applyModelStackState = (stackId, state, sendOverrides = null) => {
@@ -2593,13 +2658,17 @@ document.addEventListener('click', (event) => {
         };
 
         const applyOutputStackState = (stackId, state) => {
-            if (!state || !Array.isArray(state.checks)) return;
+            if (!state || (!Array.isArray(state.checks) && !state.outputs)) return;
             const stack = document.getElementById(stackId);
             if (!stack) return;
             const blocks = Array.from(stack.querySelectorAll('.output-block'));
             blocks.forEach((block, index) => {
                 const cb = block.querySelector('.output-checkbox');
-                if (cb && typeof state.checks[index] === 'boolean') {
+                if (!cb) return;
+                const key = block.dataset.output || '';
+                if (key && typeof state.outputs?.[key] === 'boolean') {
+                    cb.checked = state.outputs[key];
+                } else if (Array.isArray(state.checks) && typeof state.checks[index] === 'boolean') {
                     cb.checked = state.checks[index];
                 }
             });
@@ -2843,9 +2912,11 @@ document.addEventListener('click', (event) => {
         };
 
         let debateApprovalResolver = null;
+        let debateApprovalRejecter = null;
+        let debateApprovalCleanup = null;
         const updateDebateButtonsUi = () => {
             if (debatePauseBtn) {
-                debatePauseBtn.textContent = debatePaused ? 'Resume' : 'Pause';
+                debatePauseBtn.textContent = pipelineRunActive ? 'Cancel' : (debatePaused ? 'Resume' : 'Pause');
             }
             if (debateStepBtn) {
                 const waiting = typeof debateApprovalResolver === 'function';
@@ -2856,13 +2927,36 @@ document.addEventListener('click', (event) => {
         };
         const resolveDebateApproval = () => {
             const resolver = debateApprovalResolver;
+            const cleanup = debateApprovalCleanup;
             debateApprovalResolver = null;
+            debateApprovalRejecter = null;
+            debateApprovalCleanup = null;
+            cleanup?.();
             if (typeof resolver === 'function') {
                 resolver(true);
             }
             updateDebateButtonsUi();
         };
-        resolveDebateApprovalGlobal = resolveDebateApproval;
+        debateApprovalBridge.resolve = resolveDebateApproval;
+        const rejectDebateApproval = (error) => {
+            const rejecter = debateApprovalRejecter;
+            const cleanup = debateApprovalCleanup;
+            debateApprovalResolver = null;
+            debateApprovalRejecter = null;
+            debateApprovalCleanup = null;
+            cleanup?.();
+            if (typeof rejecter === 'function') {
+                rejecter(error);
+            }
+            updateDebateButtonsUi();
+        };
+        const cleanupDebateApprovalWaiter = () => {
+            debateApprovalResolver = null;
+            debateApprovalRejecter = null;
+            debateApprovalCleanup?.();
+            debateApprovalCleanup = null;
+            updateDebateButtonsUi();
+        };
         const buildDebateActionPromptSuffix = () => {
         const selectedAction = debateActionSelect?.value || '';
         const actionMap = {
@@ -2890,12 +2984,32 @@ document.addEventListener('click', (event) => {
         if (actionInstruction) extra.push(`Moderator action: ${actionInstruction}`);
         return extra.length ? `\n\n${extra.join('\n')}` : '';
     };
-        const waitForDebateApproval = async () => {
+        const waitForDebateApproval = async ({ signal, timeoutMs = 0 } = {}) => {
             const isAuto = !!autoCheckbox?.checked;
             if (isAuto && !debatePaused) return true;
             if (debateApprovalResolver) return true;
-            await new Promise((resolve) => {
+            await new Promise((resolve, reject) => {
+                let timeoutId = null;
+                const abort = () => {
+                    if (timeoutId) clearTimeout(timeoutId);
+                    rejectDebateApproval(new DOMException('Pipeline approval cancelled', 'AbortError'));
+                };
+                if (signal?.aborted) {
+                    reject(new DOMException('Pipeline approval cancelled', 'AbortError'));
+                    return;
+                }
                 debateApprovalResolver = resolve;
+                debateApprovalRejecter = reject;
+                debateApprovalCleanup = () => {
+                    if (timeoutId) clearTimeout(timeoutId);
+                    signal?.removeEventListener?.('abort', abort);
+                };
+                signal?.addEventListener?.('abort', abort, { once: true });
+                if (timeoutMs > 0) {
+                    timeoutId = setTimeout(() => {
+                        rejectDebateApproval(new Error('Pipeline approval timeout'));
+                    }, timeoutMs);
+                }
                 updateDebateButtonsUi();
             });
             return true;
@@ -2903,39 +3017,82 @@ document.addEventListener('click', (event) => {
         updateDebateButtonsUi();
 
         const getRoundModelsState = (roundIndex) => {
-            const stack = document.getElementById(`r${roundIndex}-models`);
-            if (!stack) return null;
-            const models = Array.from(stack.querySelectorAll('.model-block'))
-                .map((block) => {
-                    const name = block.querySelector('.model-name')?.textContent?.trim();
-                    if (!name) return null;
-                    const input = !!block.querySelector('.model-input-checkbox')?.checked;
-                    const send = !!block.querySelector('.model-send-checkbox')?.checked;
-                    const promptId = block.querySelector('.role-selector')?.value || null;
-                    return { name, input, send, promptId };
-                })
-                .filter(Boolean);
-            const inputModels = models.filter((model) => model.input).map((model) => model.name);
-            const sendModels = models.filter((model) => model.send).map((model) => model.name);
-            return { models, inputModels, sendModels };
+            return PipelineRuntime?.getRoundModelsState?.(document, roundIndex) || null;
         };
 
-        const getPipelineOutputSelection = () => {
-            const outputStack = document.getElementById('output-stack');
-            const selection = { notes: false, export: false, exportHtml: false };
-            if (!outputStack) return selection;
-            outputStack.querySelectorAll('.output-block').forEach((block) => {
-                const label = block.querySelector('.output-name')?.textContent?.trim().toLowerCase();
-                const checked = !!block.querySelector('.output-checkbox')?.checked;
-                if (!label || !checked) return;
-                if (label.includes('note')) selection.notes = true;
-                if (label.includes('html')) {
-                    selection.exportHtml = true;
-                } else if (label.includes('export')) {
-                    selection.export = true;
+        const getRoundStage = (roundIndex) => PipelineRuntime?.getRoundStage?.(roundIndex) || (roundIndex === 1 ? 'models' : 'judge');
+
+        const buildPipelineRuntimeSnapshot = (config) => {
+            return PipelineRuntime?.buildPipelineRuntimeSnapshot?.({
+                config: config || capturePipelineConfig(),
+                roundCounter,
+                getRoundState: getRoundModelsState,
+                getOutputSelection: getPipelineOutputSelection
+            }) || { config: capturePipelineConfig(), rounds: [], outputSelection: getPipelineOutputSelection() };
+        };
+
+        const setPipelineEditingEnabled = (enabled) => {
+            if (!pipelinePanel) return;
+            const disabled = !enabled;
+            pipelinePanel
+                .querySelectorAll('.model-input-checkbox, .model-send-checkbox, .role-selector, .output-checkbox, #pipeline-add-round-btn, #removeRoundBtn, #pipeline-add-btn, #pipeline-delete-btn, #pipeline-import-btn')
+                .forEach((el) => {
+                    el.disabled = disabled;
+                });
+        };
+
+        const getPipelineOutputSelection = (outputState = null) => {
+            return PipelineRuntime?.getPipelineOutputSelection?.(document, outputState) || { notes: false, export: false, exportHtml: false };
+        };
+
+        const modelNameSetsEqual = (left = [], right = []) => {
+            const leftSet = new Set(left.filter(Boolean));
+            const rightSet = new Set(right.filter(Boolean));
+            if (leftSet.size !== rightSet.size) return false;
+            return Array.from(leftSet).every((name) => rightSet.has(name));
+        };
+
+        const getDefaultR1ModelNames = () => {
+            const models = Array.isArray(PipelineRuntime?.MODELS) ? PipelineRuntime.MODELS : [];
+            const indices = Array.isArray(PipelineRuntime?.DEFAULT_MODEL_INDICES)
+                ? PipelineRuntime.DEFAULT_MODEL_INDICES
+                : [];
+            return indices.map((index) => models[index]?.name).filter(Boolean);
+        };
+
+        const isR1DefaultSelection = () => {
+            const state = getRoundModelsState(1);
+            const defaults = getDefaultR1ModelNames();
+            if (!state || !defaults.length) return false;
+            return modelNameSetsEqual(state.inputModels, defaults)
+                && modelNameSetsEqual(state.sendModels, defaults);
+        };
+
+        const setR1ModelsFromSelectedLLMs = ({ force = false } = {}) => {
+            const selected = getSelectedLLMs();
+            if (!selected.length) return false;
+            if (!force && pipelineR1ManualDirty && !isR1DefaultSelection()) return false;
+            const selectedSet = new Set(selected);
+            const stack = document.getElementById('r1-models');
+            if (!stack) return false;
+            let changed = false;
+            stack.querySelectorAll('.model-block').forEach((block) => {
+                const name = block.querySelector('.model-name')?.textContent?.trim();
+                if (!name) return;
+                const checked = selectedSet.has(name);
+                const inputCb = block.querySelector('.model-input-checkbox');
+                const sendCb = block.querySelector('.model-send-checkbox');
+                if (inputCb && inputCb.checked !== checked) {
+                    inputCb.checked = checked;
+                    changed = true;
+                }
+                if (sendCb && sendCb.checked !== checked) {
+                    sendCb.checked = checked;
+                    changed = true;
                 }
             });
-            return selection;
+            if (changed) updatePipelineAll();
+            return changed;
         };
 
         const buildResponsesList = (responsesMap, orderedNames = []) => {
@@ -2959,7 +3116,9 @@ document.addEventListener('click', (event) => {
             attachments = [],
             forceNewTabs = true,
             useApiFallback = true,
-            timeoutMs = 240000
+            timeoutMs = 240000,
+            context = {},
+            signal = null
         }) => {
             if (!models.length) return { responses: {}, missing: [], timedOut: false };
             const payloadBase = {
@@ -2967,7 +3126,8 @@ document.addEventListener('click', (event) => {
                 prompt,
                 selectedLLMs: models,
                 forceNewTabs,
-                useApiFallback
+                useApiFallback,
+                pipelineContext: context
             };
 
             if (attachments.length) {
@@ -2996,7 +3156,7 @@ document.addEventListener('click', (event) => {
                 showNotification(`Pipeline: unexpected background response (${response?.status || 'no_response'})`, 'warn');
             }
 
-            return pipelineWaiter.waitForModels(models, { timeoutMs });
+            return pipelineWaiter.waitForModels(models, { timeoutMs, context, signal });
         };
 
         const formatPipelineFinalText = (result) => {
@@ -3021,13 +3181,25 @@ document.addEventListener('click', (event) => {
             pipelineConfig: result.pipelineConfig
         });
 
+        const safePipelineMarkdownToHtml = (text) => {
+            const stripped = String(text || '')
+                .replace(/<script\b[\s\S]*?<\/script>/gi, '')
+                .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+                .replace(/\s+srcdoc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+                .replace(/javascript\s*:/gi, '')
+                .replace(/data\s*:\s*text\/html/gi, '');
+            const escaped = escapeHtml(stripped);
+            const html = convertMarkdownToHTML(escaped);
+            return sanitizeInlineHtml(html);
+        };
+
         const buildPipelineFinalHtml = (result) => {
             const sections = [];
             Object.entries(result.finalOutputs || {}).forEach(([name, output]) => {
                 if (!output || (typeof output === 'string' && output.trim().startsWith('Error:'))) return;
                 const text = String(output).trim();
                 if (!text) return;
-                const htmlContent = convertMarkdownToHTML(text);
+                const htmlContent = safePipelineMarkdownToHtml(text);
                 const metadataLine = buildMetadataLine(name);
                 const metadataHtml = metadataLine ? `<p class="response-meta">${escapeHtml(metadataLine)}</p>` : '';
                 sections.push(`
@@ -3072,8 +3244,8 @@ document.addEventListener('click', (event) => {
 </html>`;
         };
 
-        const handlePipelineOutputs = async (result) => {
-            const selection = getPipelineOutputSelection();
+        const handlePipelineOutputs = async (result, outputSelection = null) => {
+            const selection = outputSelection || getPipelineOutputSelection(result?.pipelineConfig?.outputStack);
             const hasAny = selection.notes || selection.export || selection.exportHtml;
             if (!hasAny) return;
 
@@ -3136,86 +3308,107 @@ document.addEventListener('click', (event) => {
             }
 
             pipelineRunActive = true;
+            activePipelineAbortController = new AbortController();
+            activePipelineRunContext = {
+                pipelineRunId: makePipelineRunId(),
+                sessionId: debateTabsState?.activeSessionId || document.querySelector('.debate-session-tab.active')?.dataset?.sessionId || '1',
+                startedAt: Date.now()
+            };
             debateRunState.activeRole = String(debateRoleSelect?.value || '').trim();
             const moderatorEntryText = getModeratorDispatchText();
             syncModeratorSelectors();
             setPipelineRunUi(true);
+            updateDebateButtonsUi();
 
             try {
+                const signal = activePipelineAbortController.signal;
+                setR1ModelsFromSelectedLLMs();
+                const runSnapshot = buildPipelineRuntimeSnapshot(capturePipelineConfig());
+                const runConfig = runSnapshot.config;
+                const runtimeRounds = runSnapshot.rounds;
+                setPipelineEditingEnabled(false);
                 const pipelineNameText = (pipelineName?.textContent || '').trim();
                 const basePrompt = applySelectedModifiersToPrompt(rawPrompt) + buildDebateActionPromptSuffix();
                 const attachmentsPayload = await buildAttachmentPayload();
                 const useApiFallback = apiModeCheckbox ? apiModeCheckbox.checked : true;
-                const selectedTopModels = getDebateTargetModels();
+                const firstRoundState = runtimeRounds[0];
+                const selectedSystemPromptSnapshot = clonePipelineConfig(getSelectedJudgeSystemPrompt());
+                const orderedPromptsSnapshot = clonePipelineConfig(getOrderedJudgePrompts()) || [];
                 const moderatorOnly = String(debateReceiverSelect?.value || '').trim() === '__none__';
                 if (moderatorOnly) {
                     appendModeratorFeedEntry(moderatorEntryText);
                     clearModeratorComposer();
                     return;
                 }
-                if (!selectedTopModels.length) {
-                    console.warn('[RESULTS] Pipeline run blocked: no selected top models');
-                    showNotification('Select at least one recipient model.', 'warn');
+                if (!firstRoundState?.inputModels?.length) {
+                    console.warn('[RESULTS] Pipeline run blocked: no selected R1 input models');
+                    showNotification('Select at least one R1 Input model.', 'warn');
                     return;
                 }
                 debateFeedState.lastCommittedHashByModel = {};
                 appendModeratorFeedEntry(moderatorEntryText);
-                renderDebateModelCards(debateRunState.activeRole, selectedTopModels, { approvalSelectable: true });
+                renderDebateModelCards(debateRunState.activeRole, firstRoundState.inputModels, { approvalSelectable: true });
                 clearModeratorComposer();
 
                 const rounds = [];
                 let finalOutputs = {};
                 let responsesList = '';
 
-                for (let r = 1; r <= roundCounter; r++) {
-                    const baseRoundState = getRoundModelsState(r);
-                    if (!baseRoundState) {
+                for (let r = 1; r <= runtimeRounds.length; r++) {
+                    if (signal.aborted) {
+                        throw new DOMException('Pipeline run cancelled', 'AbortError');
+                    }
+                    const roundState = runtimeRounds[r - 1];
+                    if (!roundState) {
                         showNotification(`Pipeline: round R${r} is unavailable`, 'warn');
                         return;
                     }
 
-                    const isFirstRound = r === 1;
-                    const roundState = isFirstRound
-                        ? {
-                            ...baseRoundState,
-                            inputModels: selectedTopModels.slice(),
-                            sendModels: selectedTopModels.slice()
-                        }
-                        : baseRoundState;
+                    const isModelRound = roundState.stage === 'models';
+                    const isJudgeRound = roundState.stage === 'judge';
 
                     if (!roundState.inputModels.length) {
                         showNotification(`Pipeline: no Input models in R${r}`, 'warn');
                         return;
                     }
-                    const forceNewTabs = isFirstRound ? (newPagesCheckbox ? newPagesCheckbox.checked : true) : false;
+                    const forceNewTabs = isModelRound ? (newPagesCheckbox ? newPagesCheckbox.checked : true) : false;
                     let outputs = {};
                     let missing = [];
                     let timedOut = false;
                     let promptByModel = null;
                     let roundPrompt = null;
+                    const makeBatchContext = (groupIndex = 0) => ({
+                        ...activePipelineRunContext,
+                        pipelineRoundId: `r${r}`,
+                        pipelineBatchId: makePipelineBatchId({
+                            runId: activePipelineRunContext.pipelineRunId,
+                            roundIndex: r,
+                            groupIndex
+                        })
+                    });
 
-                    if (isFirstRound) {
+                    if (isModelRound) {
                         roundPrompt = basePrompt;
                         const roundResult = await runModelBatch({
                             prompt: basePrompt,
                             models: roundState.inputModels,
                             attachments: attachmentsPayload,
                             forceNewTabs,
-                            useApiFallback
+                            useApiFallback,
+                            context: makeBatchContext(0),
+                            signal
                         });
                         outputs = roundResult.responses || {};
                         missing = roundResult.missing || [];
                         timedOut = !!roundResult.timedOut;
-                    } else {
+                    } else if (isJudgeRound) {
                         // Manual moderation applies to inter-round routing, not the initial user send.
-                        await waitForDebateApproval();
+                        await waitForDebateApproval({ signal });
                         if (!responsesList) {
                             showNotification(`Pipeline: no Send outputs in R${r - 1}`, 'warn');
                             return;
                         }
-                        const selectedSystemPrompt = getSelectedJudgeSystemPrompt();
-                        const orderedPrompts = getOrderedJudgePrompts();
-                        const fallbackPrompt = selectedSystemPrompt || orderedPrompts[0] || null;
+                        const fallbackPrompt = selectedSystemPromptSnapshot || orderedPromptsSnapshot[0] || null;
                         const promptGroups = new Map();
 
                         roundState.models
@@ -3236,8 +3429,9 @@ document.addEventListener('click', (event) => {
                         }
 
                         promptByModel = {};
+                        let groupIndex = 0;
                         for (const [promptId, models] of promptGroups.entries()) {
-                            await waitForDebateApproval();
+                            await waitForDebateApproval({ signal });
                             const promptDef = getJudgePromptById(promptId) || fallbackPrompt;
                             const evaluationPrompt = buildJudgeEvaluationPrompt(
                                 promptDef ? promptDef.text : '',
@@ -3249,7 +3443,9 @@ document.addEventListener('click', (event) => {
                                 models,
                                 attachments: [],
                                 forceNewTabs,
-                                useApiFallback
+                                useApiFallback,
+                                context: makeBatchContext(groupIndex),
+                                signal
                             });
                             outputs = { ...outputs, ...(batchResult.responses || {}) };
                             missing = missing.concat(batchResult.missing || []);
@@ -3257,12 +3453,16 @@ document.addEventListener('click', (event) => {
                             models.forEach((name) => {
                                 promptByModel[name] = promptDef?.id || promptId;
                             });
+                            groupIndex += 1;
                         }
+                    } else {
+                        showNotification(`Pipeline: unsupported stage in R${r}`, 'warn');
+                        return;
                     }
 
                     rounds.push({
                         round: r,
-                        stage: r === 1 ? 'Models' : 'Judge',
+                        stage: isModelRound ? 'Models' : 'Judge',
                         prompt: roundPrompt,
                         promptByModel,
                         models: roundState.models,
@@ -3274,7 +3474,7 @@ document.addEventListener('click', (event) => {
                     });
 
                     const { list } = buildResponsesList(outputs, roundState.sendModels);
-                    if (r < roundCounter) {
+                    if (r < runtimeRounds.length) {
                         if (!list) {
                             showNotification(`Pipeline: no Send outputs in R${r}`, 'warn');
                             return;
@@ -3295,31 +3495,81 @@ document.addEventListener('click', (event) => {
                     resolvedPrompt: basePrompt,
                     rounds,
                     finalOutputs,
-                    pipelineConfig: capturePipelineConfig()
+                    pipelineConfig: runConfig
                 };
 
-                await handlePipelineOutputs(result);
+                await handlePipelineOutputs(result, runSnapshot.outputSelection);
 
                 if (newPagesCheckbox && newPagesCheckbox.checked) {
                     newPagesCheckbox.checked = false;
                     storeNewPagesState(false);
                 }
             } catch (err) {
+                if (err?.name === 'AbortError') {
+                    showNotification('Pipeline: cancelled', 'warn');
+                    return;
+                }
                 console.error('[RESULTS] Pipeline run failed', err);
                 showNotification(`Pipeline: error (${err?.message || String(err)})`, 'error');
             } finally {
                 if (debateFeedState.pendingApproval) {
                     setDebateApprovalCandidate(null);
                 }
-                debateApprovalResolver = null;
+                cleanupDebateApprovalWaiter();
                 debateRunState.activeRole = '';
                 pipelineRunActive = false;
+                activePipelineAbortController = null;
+                activePipelineRunContext = null;
                 pipelineWaiter.reset();
+                setPipelineEditingEnabled(true);
                 setPipelineRunUi(false);
                 updateDebateButtonsUi();
             }
         };
+        const cancelPipelineRun = async () => {
+            if (!pipelineRunActive) return false;
+            activePipelineAbortController?.abort();
+            pipelineWaiter.reset();
+            rejectDebateApproval(new DOMException('Pipeline run cancelled', 'AbortError'));
+            try {
+                await sendToBackground({
+                    type: 'CANCEL_PIPELINE_RUN',
+                    pipelineRunId: activePipelineRunContext?.pipelineRunId || null
+                });
+            } catch (err) {
+                try {
+                    await sendToBackground({ type: 'STOP_ALL' });
+                } catch (fallbackErr) {
+                    console.warn('[RESULTS] Pipeline cancel background cleanup failed', fallbackErr || err);
+                }
+            }
+            return true;
+        };
         window.runPipeline = runPipeline;
+        window.cancelPipelineRun = cancelPipelineRun;
+        if (
+            (typeof process !== 'undefined' && process?.env?.NODE_ENV === 'test')
+            || (typeof window !== 'undefined' && window.__RESULTS_TEST_DEBUG__ === true)
+        ) {
+            window.__pipelineLifecycleDebug = {
+                pipelineWaiter,
+                isTerminalPipelineMessage,
+                makePipelineBatchId,
+                waitForDebateApproval,
+                resolveDebateApproval,
+                rejectDebateApproval,
+                cleanupDebateApprovalWaiter,
+                cancelPipelineRun,
+                getPipelineOutputSelection,
+                buildPipelineRuntimeSnapshot,
+                setR1ModelsFromSelectedLLMs,
+                isR1DefaultSelection,
+                syncDebateCardOutputLayout,
+                setDebateCardExpanded,
+                safePipelineMarkdownToHtml,
+                getApprovalWaiting: () => typeof debateApprovalResolver === 'function'
+            };
+        }
         triggerPipelineRun = (event) => {
             if (event) {
                 event.preventDefault();
@@ -3407,6 +3657,7 @@ document.addEventListener('click', (event) => {
 
         const applyPipelineConfig = (config = {}) => {
             if (!config || typeof config !== 'object') return;
+            pipelineApplyingConfig = true;
             const targetRounds = Math.max(1, Number(config.roundCounter) || 1);
             while (roundCounter > targetRounds) {
                 removeLastRound();
@@ -3425,6 +3676,8 @@ document.addEventListener('click', (event) => {
                 applyOutputStackState('output-stack', config.outputStack);
             }
 
+            pipelineApplyingConfig = false;
+            pipelineR1ManualDirty = !!modelStacks['r1-models'];
             updatePipelineAll();
         };
 
@@ -3896,6 +4149,13 @@ document.addEventListener('click', (event) => {
         pipelinePanel.addEventListener('change', (event) => {
             const target = event.target;
             if (!target) return;
+            if (
+                !pipelineApplyingConfig
+                && target.closest?.('#r1-models')
+                && target.matches('.model-input-checkbox, .model-send-checkbox')
+            ) {
+                pipelineR1ManualDirty = true;
+            }
             if (target.matches('.model-input-checkbox')) {
                 const block = target.closest('.model-block');
                 const sendCb = block?.querySelector('.model-send-checkbox');
@@ -3908,6 +4168,10 @@ document.addEventListener('click', (event) => {
             }
         });
 
+        document.addEventListener('llm-selection-change', () => {
+            setR1ModelsFromSelectedLLMs();
+        });
+
         pipelineResetBtn?.addEventListener('click', resetPipeline);
         pipelineSaveBtn?.addEventListener('click', savePipeline);
         pipelineDeleteBtn?.addEventListener('click', deleteActivePipeline);
@@ -3915,7 +4179,11 @@ document.addEventListener('click', (event) => {
         pipelineImportBtn?.addEventListener('click', importPipelines);
         pipelineRunBtn?.addEventListener('click', triggerPipelineRun);
         debateStartBtn?.addEventListener('click', triggerPipelineRun);
-        debatePauseBtn?.addEventListener('click', () => {
+        debatePauseBtn?.addEventListener('click', async () => {
+            if (pipelineRunActive) {
+                await cancelPipelineRun();
+                return;
+            }
             debatePaused = !debatePaused;
             if (!debatePaused && debateApprovalResolver) {
                 resolveDebateApproval();
@@ -11017,8 +11285,8 @@ document.addEventListener('click', (event) => {
             autoMode = autoCheckbox.checked;
             if (autoMode) {
                 approvePendingDebateCandidate();
-                if (typeof resolveDebateApprovalGlobal === 'function') {
-                    resolveDebateApprovalGlobal();
+                    if (typeof debateApprovalBridge.resolve === 'function') {
+                        debateApprovalBridge.resolve();
                 }
             }
             syncDebateAutoPauseButton();
@@ -11244,7 +11512,11 @@ document.addEventListener('click', (event) => {
                     } else {
                         storeResponseForManualMode(message.llmName, message.answer, message.answerHtml || message.html || '');
                     }
-                    pipelineWaiter.handleResponse(message.llmName, message.answer);
+                    if (isTerminalPipelineMessage(message)) {
+                        pipelineWaiter.handleFinal(message);
+                    } else {
+                        pipelineWaiter.handlePartial(message);
+                    }
                     if (message.metadata || message.requestId) {
                         mergeLLMMetadata(message.llmName, {
                             requestId: message.requestId,
@@ -11257,6 +11529,11 @@ document.addEventListener('click', (event) => {
                         ingestLogs(message.llmName, message.logs);
                         syncStatusFromDiagnosticEntries(message.llmName, message.logs);
                     }
+                    break;
+                }
+                case 'LLM_FINAL_RESPONSE':
+                case 'FINAL_LLM_RESPONSE': {
+                    pipelineWaiter.handleFinal(message);
                     break;
                 }
                 // --- V2.0 START: Status Update Handler ---
@@ -12532,7 +12809,6 @@ function checkCompareButtonState() {
                 }
             }
         });
-        firstPending?.classList.add('first-pending-zone-card');
         firstApproved?.classList.add('first-approved-zone-card');
         debateModelCards.scrollTop = debateModelCards.scrollHeight;
     }
@@ -12569,6 +12845,70 @@ function checkCompareButtonState() {
             card.appendChild(printingEl);
         }
         printingEl.textContent = `[${llmName}] printing`;
+    }
+    const DEBATE_CARD_COLLAPSED_LINES = 5;
+    function getDebateCardOutputTextLength(outputEl) {
+        return String(outputEl?.innerText || outputEl?.textContent || '').trim().length;
+    }
+    function estimateDebateCardLineCount(outputEl) {
+        const text = String(outputEl?.innerText || outputEl?.textContent || '');
+        if (!text.trim()) return 0;
+        return text.split(/\r?\n/).reduce((count, line) => {
+            return count + Math.max(1, Math.ceil(line.length / 96));
+        }, 0);
+    }
+    function ensureDebateShowMoreButton(card) {
+        if (!(card instanceof HTMLElement)) return null;
+        let btn = card.querySelector('.debate-card-show-more');
+        if (btn) return btn;
+        btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'debate-card-show-more';
+        btn.textContent = 'Show more';
+        btn.hidden = true;
+        btn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setDebateCardExpanded(card, true);
+        });
+        const outputEl = card.querySelector('.debate-model-card-output');
+        if (outputEl) outputEl.insertAdjacentElement('afterend', btn);
+        return btn;
+    }
+    function setDebateCardExpanded(card, expanded) {
+        if (!(card instanceof HTMLElement)) return;
+        card.dataset.expanded = expanded ? 'true' : 'false';
+        card.classList.toggle('is-expanded', !!expanded);
+        const btn = card.querySelector('.debate-card-show-more');
+        if (btn) btn.hidden = !!expanded ? true : !card.classList.contains('has-overflow');
+    }
+    function syncDebateCardOutputLayout(card) {
+        if (!(card instanceof HTMLElement)) return;
+        const outputEl = card.querySelector('.debate-model-card-output');
+        if (!outputEl) return;
+        const isEmpty = outputEl.classList.contains('debate-model-card-empty') || getDebateCardOutputTextLength(outputEl) === 0;
+        if (isEmpty) {
+            card.classList.remove('has-response', 'has-overflow', 'is-expanded');
+            card.dataset.expanded = 'false';
+            const btn = card.querySelector('.debate-card-show-more');
+            if (btn) btn.hidden = true;
+            return;
+        }
+        card.classList.add('has-response');
+        if (card.dataset.expanded !== 'true') {
+            setDebateCardExpanded(card, false);
+        }
+        const btn = ensureDebateShowMoreButton(card);
+        const updateOverflowState = () => {
+            const expanded = card.dataset.expanded === 'true';
+            const domOverflow = outputEl.scrollHeight > outputEl.clientHeight + 1;
+            const estimatedOverflow = estimateDebateCardLineCount(outputEl) > DEBATE_CARD_COLLAPSED_LINES;
+            const hasOverflow = domOverflow || estimatedOverflow;
+            card.classList.toggle('has-overflow', hasOverflow);
+            if (btn) btn.hidden = expanded || !hasOverflow;
+        };
+        updateOverflowState();
+        requestAnimationFrame(updateOverflowState);
     }
     function normalizeDebateCardState(card) {
         if (!(card instanceof HTMLElement) || !card.classList.contains('debate-model-card')) return;
@@ -12608,6 +12948,7 @@ function checkCompareButtonState() {
             }
             card.classList.remove('is-approved');
         }
+        syncDebateCardOutputLayout(card);
     }
     function getFirstPendingCard(sessionId = debateTabsState.activeSessionId) {
         if (!debateModelCards) return null;
@@ -12618,9 +12959,18 @@ function checkCompareButtonState() {
                 && card.dataset.approved !== 'true'
             )) || null;
     }
-    function insertDebateCard(card) {
+    function insertDebateCard(card, options = {}) {
         if (!debateModelCards || !card) return;
         normalizeDebateCardState(card);
+        const sessionId = String(card.dataset.sessionId || debateTabsState.activeSessionId || '1');
+        const zone = options.zone || (card.dataset.approved === 'true' ? 'approved' : 'pending');
+        if (zone === 'approved') {
+            const firstPending = getFirstPendingCard(sessionId);
+            if (firstPending && firstPending !== card) {
+                debateModelCards.insertBefore(card, firstPending);
+                return;
+            }
+        }
         if (card.parentElement !== debateModelCards) {
             debateModelCards.appendChild(card);
         }
@@ -12846,6 +13196,7 @@ function checkCompareButtonState() {
                     body.textContent = normalizedText;
                 }
             }
+            syncDebateCardOutputLayout(liveCard);
             setDebatePrintingState(liveCard, llmName, !isFinal);
             patchDebateCardMessage(liveCard, {
                 kind: 'model',
@@ -12898,6 +13249,7 @@ function checkCompareButtonState() {
         } else {
             body.textContent = normalizedText;
         }
+        syncDebateCardOutputLayout(card);
         setDebatePrintingState(card, llmName, !isFinal);
         bindApprovalCheckbox(card);
         ensureDebateCardMessage(card, {
@@ -13149,12 +13501,15 @@ function checkCompareButtonState() {
         if (!rect || !wrapRect) return;
         debateSelectionState.range = range;
         debateSelectionState.target = target;
-        const top = Math.max(4, rect.top - wrapRect.top - 36);
-        let left = rect.left - wrapRect.left + rect.width / 2 - 80;
-        left = Math.max(4, Math.min(left, wrapRect.width - 170));
+        debateSelToolbar.classList.add('vis');
+        const toolbarWidth = debateSelToolbar.offsetWidth || 190;
+        const toolbarHeight = debateSelToolbar.offsetHeight || 36;
+        const gap = 8;
+        const top = Math.max(4, rect.top - wrapRect.top - toolbarHeight - gap);
+        let left = rect.left - wrapRect.left + rect.width / 2 - toolbarWidth / 2;
+        left = Math.max(4, Math.min(left, wrapRect.width - toolbarWidth - 4));
         debateSelToolbar.style.top = `${top}px`;
         debateSelToolbar.style.left = `${left}px`;
-        debateSelToolbar.classList.add('vis');
     }
     function getDebateSelectionText() {
         const rangeText = String(debateSelectionState.range?.toString?.() || '').trim();
@@ -13169,6 +13524,7 @@ function checkCompareButtonState() {
             text: String(outputEl?.innerText || outputEl?.textContent || '').trim(),
             html: String(outputEl?.innerHTML || '').trim()
         });
+        syncDebateCardOutputLayout(sourceCard);
     }
     function wrapDebateSelectionRange(tagName, stylePatch = {}) {
         const range = debateSelectionState.range;
@@ -13267,6 +13623,7 @@ function checkCompareButtonState() {
             html: escapeHtml(text),
             timeLabel: `${hh}:${mm}`
         });
+        syncDebateCardOutputLayout(card);
         debateModelCards.appendChild(card);
         applyDebateSessionFilter();
         hideDebateSelectionToolbar();
@@ -14476,8 +14833,8 @@ function exportSingleTemplate(templateName, sourceData = null) {
     debateSessionDeleteBtn?.addEventListener('click', () => removeDebateSession());
     debateAutoPauseBtn?.addEventListener('click', () => {
         debatePaused = !debatePaused;
-        if (!debatePaused && typeof resolveDebateApprovalGlobal === 'function') {
-            resolveDebateApprovalGlobal();
+        if (!debatePaused && typeof debateApprovalBridge.resolve === 'function') {
+            debateApprovalBridge.resolve();
         }
         syncDebateAutoPauseButton();
     });
@@ -14513,6 +14870,10 @@ function exportSingleTemplate(templateName, sourceData = null) {
             applyDebateSessionFilter();
             return;
         }
+        if (event.target.closest('.debate-card-show-more')) {
+            setDebateCardExpanded(card, true);
+            return;
+        }
 
         const outputEl = card.querySelector('.debate-model-card-output');
         const text = outputEl?.innerText?.trim() || '';
@@ -14544,6 +14905,14 @@ function exportSingleTemplate(templateName, sourceData = null) {
                 promptInput.focus();
             }
         }
+    });
+    debateModelCards?.addEventListener('dblclick', (event) => {
+        const nameEl = event.target.closest('.debate-model-card-name');
+        if (!nameEl) return;
+        const card = nameEl.closest('.debate-model-card');
+        if (!card || !debateModelCards.contains(card)) return;
+        event.preventDefault();
+        setDebateCardExpanded(card, card.dataset.expanded !== 'true');
     });
     debateModelCards?.addEventListener('change', (event) => {
         const approvalCheck = event.target.closest?.('.debate-approval-check');
@@ -14615,6 +14984,7 @@ function exportSingleTemplate(templateName, sourceData = null) {
         }
     });
     document.addEventListener('mouseup', (event) => {
+        if (event.target?.closest?.('#debateSelTb')) return;
         const target = event.target?.closest?.('.debate-model-card-output, #mod-message-body');
         if (!target) {
             hideDebateSelectionToolbar();

@@ -308,7 +308,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     await startProcess(message.prompt, message.selectedLLMs, sender.tab.id, {
                         forceNewTabs,
                         useApiFallback,
-                        attachments: Array.isArray(message.attachments) ? message.attachments : []
+                        attachments: Array.isArray(message.attachments) ? message.attachments : [],
+                        pipelineContext: message.pipelineContext || null
                     });
                     sendResponse({ status: 'process_started' });
                 })();
@@ -1014,6 +1015,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     await chrome.storage.local.set({ global_command: cmd });
                     stopAllProcesses('stop_all_command', { closeTabs: false });
                     sendResponse({ success: true });
+                })();
+                return true;
+            }
+
+            case 'CANCEL_PIPELINE_RUN': {
+                (async () => {
+                    const cmd = {
+                        action: 'STOP_ALL',
+                        timestamp: Date.now(),
+                        pipelineRunId: message.pipelineRunId || null,
+                        reason: 'cancel_pipeline_run'
+                    };
+                    await chrome.storage.local.set({ global_command: cmd });
+                    stopAllProcesses('cancel_pipeline_run', { closeTabs: false });
+                    sendResponse({ success: true, pipelineRunId: message.pipelineRunId || null });
                 })();
                 return true;
             }

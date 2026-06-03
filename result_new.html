@@ -1,6 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
+<html lang="en"><head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Comparison</title>
@@ -16,7 +15,7 @@
                         <input type="text" class="notes-search" id="notes-search" placeholder="Search..." aria-label="Search notes">
                         <button type="button" class="notes-search-clear" id="notes-search-clear" aria-label="Clear search" title="Clear search">
                             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                                <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                                <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
                             </svg>
                         </button>
                     </div>
@@ -82,7 +81,7 @@
                             <!-- Template select hidden: functionality moved to tuning/notes. -->
                             <div class="select-tooltip hidden" data-tooltip="Load a saved prompt template or create a new one.">
                                 <select id="template-select" class="dropdown">
-                                    <option value="manual" selected>Select Template...</option>
+                                    <option value="manual" selected="">Select Template...</option>
                                     <option value="create">Create Template…</option>
                                 </select>
                             </div>
@@ -129,7 +128,7 @@
                     <div class="top-bar-right">
                         <label class="top-new-pages-toggle" data-tooltip="Open each model's answer in a new tab for comparison.">
                             <span class="top-new-pages-text">New Pages</span>
-                            <input type="checkbox" id="new-pages-checkbox" class="top-new-pages-checkbox" checked>
+                            <input type="checkbox" id="new-pages-checkbox" class="top-new-pages-checkbox" checked="">
                             <span class="top-toggle-track"><span class="top-toggle-thumb"></span></span>
                         </label>
                         <!-- Auto checkbox hidden in header; functionality handled elsewhere. -->
@@ -148,7 +147,7 @@
         <div class="container">
         <div class="main-controls-wrapper"></div>
         <div class="visually-hidden">
-            <input type="checkbox" id="api-mode-checkbox" checked>
+            <input type="checkbox" id="api-mode-checkbox" checked="">
         </div>
             <div id="variable-inputs"></div>
     <div class="input-section">
@@ -163,7 +162,7 @@
     <div id="suffix-container" class="modifier-chips-container"></div>
     
     <!-- Кнопки копирования и очистки теперь внутри обертки, но позиционируются абсолютно -->
-    <input type="file" id="prompt-attach-input" class="visually-hidden" multiple>
+    <input type="file" id="prompt-attach-input" class="visually-hidden" multiple="">
     <button type="button" id="prompt-attach-btn" class="prompt-export-btn" title="Attach file" aria-label="Attach file">+</button>
     <button type="button" id="prompt-copy-btn" class="prompt-copy-btn" title="Copy prompt" aria-label="Copy prompt">⧉</button>
     <button type="button" id="prompt-export-html-btn" class="prompt-export-btn" title="Export as HTML" aria-label="Export as HTML">⬆</button>
@@ -196,16 +195,10 @@
         </span>
         <div class="select-tooltip tuning-preset-slot" data-tooltip="Choose which modifier preset to load.">
             <select id="modifier-preset-select" class="dropdown preset-dropdown tuning-preset-select">
-                <option value="default" selected>Loading presets…</option>
+                <option value="default" selected="">Loading presets…</option>
             </select>
         </div>
-        <button type="button"
-                id="toggle-modifiers-btn"
-                class="toggle-modifiers-btn"
-                aria-expanded="false"
-                aria-controls="modifiers-container"
-                aria-label="Show modifiers"
-                title="Show modifiers">
+        <button type="button" id="toggle-modifiers-btn" class="toggle-modifiers-btn" aria-expanded="false" aria-controls="modifiers-container" aria-label="Show modifiers" title="Show modifiers">
         </button>
         <span class="modifiers-toggle-label" data-mod-type="suffix" aria-hidden="true"></span>
     </div>
@@ -235,7 +228,7 @@
             <span class="modifiers-toggle-label-pro">LLM Stream</span>
             </span>
             <div class="llm-action-block" role="group" aria-label="Send and evaluator controls">
-                <button id="compare-button" class="action-button" disabled aria-label="Send" title="Send">►</button>
+                <button id="compare-button" class="action-button" disabled="" aria-label="Send" title="Send">►</button>
                 <select id="judge-system-prompt-select" class="dropdown dropdown-judge dropdown-judge-prompt action-select" aria-label="System prompt"></select>
                 <select id="evaluator-select" class="dropdown dropdown-judge action-select">
                     <option value="Claude">Claude</option>
@@ -244,7 +237,7 @@
                     <option value="Grok">Grok</option>
                     <option value="Le Chat">Le Chat</option>
                 </select>
-                <button id="smart-compare-button" class="action-button" disabled aria-label="Smart" title="Smart">◼</button>
+                <button id="smart-compare-button" class="action-button" disabled="" aria-label="Smart" title="Smart">◼</button>
             </div>
         </div>
     </div>
@@ -288,19 +281,18 @@
                 <button id="get-it-button" class="control-button">Get answers!</button>
                 <button type="button" id="justice-toggle-btn" class="justice-toggle-btn" aria-label="Toggle LLM Stream controls" aria-pressed="false" title="Toggle LLM Stream controls">
                     <svg class="justice-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                        <path d="M12 3v15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                        <path d="M6 7h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                        <path d="M4 7l-2.5 4h5L4 7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-                        <path d="M20 7l-2.5 4h5L20 7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-                        <path d="M8.5 19h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                        <path d="M12 3v15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                        <path d="M6 7h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                        <path d="M4 7l-2.5 4h5L4 7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path>
+                        <path d="M20 7l-2.5 4h5L20 7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path>
+                        <path d="M8.5 19h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
                     </svg>
                 </button>
             </div>
             <div class="llm-header-right">
               <button id="copy-all-btn" class="control-icon-btn" title="Copy all responses" aria-label="Copy all responses">⧉</button>
                 <button id="export-html-btn" class="control-icon-btn" data-format="html" data-label="⬆ HTML" title="Export all responses as HTML">⬆</button>
-                <button id="clear-all-btn" class="panel-action-btn panel-clear-response-btn clear-all-btn"
-                    title="Clear all responses" aria-label="Clear all responses">🗑️</button>
+                <button id="clear-all-btn" class="panel-action-btn panel-clear-response-btn clear-all-btn" title="Clear all responses" aria-label="Clear all responses">🗑️</button>
             </div>
         </div>
 
@@ -468,7 +460,7 @@
         <!-- Template Modal -->
         <div class="modal" id="create-template-modal">
              <div class="modal-container">
-                <button class="close">&times;</button>
+                <button class="close">×</button>
                 <div class="modal-content">
                     <!-- Левая панель -->
                     <div class="form-panel">
@@ -553,7 +545,7 @@
    <!-- V2.0: API Keys Modal -->
         <div class="modal" id="api-keys-modal">
             <div class="modal-container">
-                <button class="close" id="close-api-keys-modal">&times;</button>
+                <button class="close" id="close-api-keys-modal">×</button>
                 <div class="modal-content modal-devtools-stack">
                     <div class="devtools-tablist" role="tablist" aria-label="Developer tools sections">
                         <button class="devtools-tab is-active" id="telemetry-tab" role="tab" aria-selected="true" aria-controls="telemetry-tabpanel" data-tab-target="telemetry-tabpanel">
@@ -653,7 +645,7 @@
                                 </article>
                                 <article class="devtools-card telemetry-smart-card is-collapsed" data-collapsible="telemetry-smart">
                                     <div class="devtools-card-header">
-                                        <h2>SMART & Acceptance</h2>
+                                        <h2>SMART &amp; Acceptance</h2>
                                     </div>
                                     <div class="devtools-card-body">
                                         <div class="diag-smart-summary" id="diag-smart-summary">
@@ -681,7 +673,7 @@
                             </div>
                         </section>
 
-                        <section class="devtools-tabpanel" id="selectors0-tabpanel" role="tabpanel" aria-labelledby="selectors0-tab" tabindex="0" hidden>
+                        <section class="devtools-tabpanel" id="selectors0-tabpanel" role="tabpanel" aria-labelledby="selectors0-tab" tabindex="0" hidden="">
                             <div class="selectors0-shell">
                                 <div class="selectors0-hero">
                                 </div>
@@ -735,7 +727,7 @@
                                             <div class="selectors-footer selectors0-workbench-footer">
                                                 <span class="selectors-status-text" id="selectors-workbench-status" aria-live="polite"></span>
                                             </div>
-                                            <input class="selectors-file-input selectors0-file-input" type="file" accept="application/json" />
+                                            <input class="selectors-file-input selectors0-file-input" type="file" accept="application/json">
                                         </article>
 
                                     </div>
@@ -790,7 +782,7 @@
                                 </div>
                             </div>
                         </section>
-                        <section class="devtools-tabpanel" id="api-tabpanel" role="tabpanel" aria-labelledby="api-tab" tabindex="0" hidden>
+                        <section class="devtools-tabpanel" id="api-tabpanel" role="tabpanel" aria-labelledby="api-tab" tabindex="0" hidden="">
                             <div class="form-panel">
                                 <div class="api-keys-header-row">
                                     <h1>API Keys</h1>
@@ -890,72 +882,7 @@
 
                         <div class="stage-column" id="round1">
                             <div class="stage-label"><span class="round-badge">R1</span> Models</div>
-                            <div class="model-stack" id="r1-models">
-                                <div class="model-block active" data-index="0">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Claude"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" checked aria-label="Input" title="Input">
-                                        <span class="model-name">Claude</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" checked aria-label="Send" title="Send">
-                                    </div>
-                                </div>
-                                <div class="model-block active" data-index="1">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="GPT"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" checked aria-label="Input" title="Input">
-                                        <span class="model-name">GPT</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" checked aria-label="Send" title="Send">
-                                    </div>
-                                </div>
-                                <div class="model-block active" data-index="2">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Gemini"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" checked aria-label="Input" title="Input">
-                                        <span class="model-name">Gemini</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" checked aria-label="Send" title="Send">
-                                    </div>
-                                </div>
-                                <div class="model-block inactive" data-index="3">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Grok"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" aria-label="Input" title="Input">
-                                        <span class="model-name">Grok</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" disabled aria-label="Send" title="Send">
-                                    </div>
-                                </div>
-                                <div class="model-block inactive" data-index="4">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Le Chat"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" aria-label="Input" title="Input">
-                                        <span class="model-name">Le Chat</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" disabled aria-label="Send" title="Send">
-                                    </div>
-                                </div>
-                                <div class="model-block inactive" data-index="5">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Qwen"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" aria-label="Input" title="Input">
-                                        <span class="model-name">Qwen</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" disabled aria-label="Send" title="Send">
-                                    </div>
-                                </div>
-                                <div class="model-block inactive" data-index="6">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="DeepSeek"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" aria-label="Input" title="Input">
-                                        <span class="model-name">DeepSeek</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" disabled aria-label="Send" title="Send">
-                                    </div>
-                                </div>
-                                <div class="model-block inactive" data-index="7">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Perplexity"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" aria-label="Input" title="Input">
-                                        <span class="model-name">Perplexity</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" disabled aria-label="Send" title="Send">
-                                    </div>
-                                </div>
-                            </div>
+                            <div class="model-stack" id="r1-models" data-render="pipeline-model-stack-r1"><!-- pipeline-model-stack-r1 rendered by pipeline/pipeline-runtime.js --></div>
                         </div>
 
                         <div class="connector-group" data-round="2">
@@ -964,120 +891,7 @@
 
                         <div class="stage-column" id="round2" data-round="2">
                             <div class="stage-label"><span class="round-badge">R2</span> Judge</div>
-                            <div class="model-stack" id="r2-models">
-                                <div class="model-block active with-role" data-index="0">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Claude"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" checked aria-label="Input" title="Input">
-                                        <span class="model-name">Claude</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" checked aria-label="Send" title="Send">
-                                    </div>
-                                    <select class="role-selector">
-                                        <option>Synthesis</option>
-                                        <option>Critic</option>
-                                        <option>Meta</option>
-                                        <option>Advocate</option>
-                                    </select>
-                                </div>
-                                <div class="model-block active with-role" data-index="1">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="GPT"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" checked aria-label="Input" title="Input">
-                                        <span class="model-name">GPT</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" checked aria-label="Send" title="Send">
-                                    </div>
-                                    <select class="role-selector">
-                                        <option>Critic</option>
-                                        <option>Synthesis</option>
-                                        <option>Meta</option>
-                                        <option>Advocate</option>
-                                    </select>
-                                </div>
-                                <div class="model-block inactive with-role" data-index="2">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Gemini"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" aria-label="Input" title="Input">
-                                        <span class="model-name">Gemini</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" disabled aria-label="Send" title="Send">
-                                    </div>
-                                    <select class="role-selector" disabled>
-                                        <option>Meta</option>
-                                        <option>Synthesis</option>
-                                        <option>Critic</option>
-                                        <option>Advocate</option>
-                                    </select>
-                                </div>
-                                <div class="model-block inactive with-role" data-index="3">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Grok"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" aria-label="Input" title="Input">
-                                        <span class="model-name">Grok</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" disabled aria-label="Send" title="Send">
-                                    </div>
-                                    <select class="role-selector" disabled>
-                                        <option>Advocate</option>
-                                        <option>Synthesis</option>
-                                        <option>Critic</option>
-                                        <option>Meta</option>
-                                    </select>
-                                </div>
-                                <div class="model-block inactive with-role" data-index="4">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Le Chat"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" aria-label="Input" title="Input">
-                                        <span class="model-name">Le Chat</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" disabled aria-label="Send" title="Send">
-                                    </div>
-                                    <select class="role-selector" disabled>
-                                        <option>Synthesis</option>
-                                        <option>Critic</option>
-                                        <option>Meta</option>
-                                        <option>Advocate</option>
-                                    </select>
-                                </div>
-                                <div class="model-block inactive with-role" data-index="5">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Qwen"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" aria-label="Input" title="Input">
-                                        <span class="model-name">Qwen</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" disabled aria-label="Send" title="Send">
-                                    </div>
-                                    <select class="role-selector" disabled>
-                                        <option>Critic</option>
-                                        <option>Synthesis</option>
-                                        <option>Meta</option>
-                                        <option>Advocate</option>
-                                    </select>
-                                </div>
-                                <div class="model-block inactive with-role" data-index="6">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="DeepSeek"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" aria-label="Input" title="Input">
-                                        <span class="model-name">DeepSeek</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" disabled aria-label="Send" title="Send">
-                                    </div>
-                                    <select class="role-selector" disabled>
-                                        <option>Meta</option>
-                                        <option>Synthesis</option>
-                                        <option>Critic</option>
-                                        <option>Advocate</option>
-                                    </select>
-                                </div>
-                                <div class="model-block inactive with-role" data-index="7">
-                                    <div class="model-header">
-                                        <span class="status-indicator" data-llm-name="Perplexity"></span>
-                                        <input type="checkbox" class="model-checkbox model-input-checkbox" aria-label="Input" title="Input">
-                                        <span class="model-name">Perplexity</span>
-                                        <input type="checkbox" class="model-checkbox model-send-checkbox" disabled aria-label="Send" title="Send">
-                                    </div>
-                                    <select class="role-selector" disabled>
-                                        <option>Advocate</option>
-                                        <option>Synthesis</option>
-                                        <option>Critic</option>
-                                        <option>Meta</option>
-                                    </select>
-                                </div>
-                            </div>
+                            <div class="model-stack" id="r2-models" data-render="pipeline-model-stack-r2"><!-- pipeline-model-stack-r2 rendered by pipeline/pipeline-runtime.js --></div>
                         </div>
 
                         <div id="insertionPoint"></div>
@@ -1088,29 +902,7 @@
 
                         <div class="stage-column" id="outputColumn">
                             <div class="stage-label">Output</div>
-                            <div class="output-stack" id="output-stack">
-                                <div class="output-block" data-index="0">
-                                    <div class="output-header">
-                                        <input type="checkbox" class="output-checkbox" checked>
-                                        <span class="output-name">Notes</span>
-                                    </div>
-                                    <div class="output-desc">Save to DATA</div>
-                                </div>
-                                <div class="output-block" data-index="1">
-                                    <div class="output-header">
-                                        <input type="checkbox" class="output-checkbox" checked>
-                                        <span class="output-name">Export</span>
-                                    </div>
-                                    <div class="output-desc">MD / JSON</div>
-                                </div>
-                                <div class="output-block inactive" data-index="2">
-                                    <div class="output-header">
-                                        <input type="checkbox" class="output-checkbox">
-                                        <span class="output-name">Export HTML</span>
-                                    </div>
-                                    <div class="output-desc">HTML</div>
-                                </div>
-                            </div>
+                            <div class="output-stack" id="output-stack" data-render="pipeline-output-stack"><!-- pipeline-output-stack rendered by pipeline/pipeline-runtime.js --></div>
                         </div>
                 </div>
 
@@ -1126,7 +918,7 @@
                     </div>
                     <div class="pipeline-items" id="pipelineItems">
                         <div class="pipeline-item active" data-name="Research &amp; Analysis">
-                            <input type="radio" name="pipeline" class="pipeline-radio" checked>
+                            <input type="radio" name="pipeline" class="pipeline-radio" checked="">
                             <span class="pipeline-item-name" title="Research &amp; Analysis">Research &amp; Anal...</span>
                             <span class="last-badge">last</span>
                         </div>
@@ -1150,11 +942,13 @@
     <script src="notes/notes-constants.js"></script>
     <script src="notes/notes-client.js"></script>
     <script src="utils/api-key-storage.js"></script>
+    <script src="pipeline/pipeline-runtime.js"></script>
     <script src="results.js"></script>
     <script src="results-devtools.js"></script>
 <div id="comparative-analysis" class="comparative-analysis hidden" aria-hidden="true">
   <!-- Comparative Analysis content будет заполняться скриптом -->
 </div>
 
-</body>
-</html>
+
+
+</body></html>

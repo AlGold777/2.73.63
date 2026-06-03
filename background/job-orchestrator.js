@@ -2532,6 +2532,9 @@ async function startProcess(prompt, selectedLLMs, resultsTab, options = {}) {
   const forceNewTabs = options.forceNewTabs !== undefined ? options.forceNewTabs : true;
   const useApiFallback = options.useApiFallback !== undefined ? options.useApiFallback : true;
   const attachments = Array.isArray(options.attachments) ? options.attachments : [];
+  const pipelineContext = options.pipelineContext && typeof options.pipelineContext === 'object'
+    ? { ...options.pipelineContext }
+    : null;
   console.log(`[BACKGROUND] Starting process. Force new tabs: ${forceNewTabs}. Use API: ${useApiFallback}. LLMs:`, selectedLLMs);
   resultsTabId = resultsTab;
   jobMetadata.clear();
@@ -2562,7 +2565,8 @@ async function startProcess(prompt, selectedLLMs, resultsTab, options = {}) {
       focusSwitches: 0,
       boundTabIds: [],
       telemetrySampled,
-      telemetrySampleRate: TELEMETRY_SAMPLE_RATE
+      telemetrySampleRate: TELEMETRY_SAMPLE_RATE,
+      pipelineContext
     },
     attachments
   };
