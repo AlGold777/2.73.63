@@ -26,6 +26,7 @@ importScripts(
   '../utils/api-key-storage.js',
   '../shared/status-contract.js',
   '../shared/model-run-state.js',
+  '../shared/pipeline-fsm.js',
   'shared-state.js',
   'llm-targets.js',
   'telemetry-logs.js',

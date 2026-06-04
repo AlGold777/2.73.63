@@ -3,6 +3,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Comparison</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/dist/tabler-icons.min.css">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -163,11 +164,13 @@
     
     <!-- Кнопки копирования и очистки теперь внутри обертки, но позиционируются абсолютно -->
     <input type="file" id="prompt-attach-input" class="visually-hidden" multiple="">
-    <button type="button" id="prompt-attach-btn" class="prompt-export-btn" title="Attach file" aria-label="Attach file">+</button>
-    <button type="button" id="prompt-copy-btn" class="prompt-copy-btn" title="Copy prompt" aria-label="Copy prompt">⧉</button>
-    <button type="button" id="prompt-export-html-btn" class="prompt-export-btn" title="Export as HTML" aria-label="Export as HTML">⬆</button>
-    <!-- JSON export button removed per latest UI request -->
-    <button type="button" id="clear-prompt-btn" class="prompt-clear-btn" title="Clear prompt">🗑️</button>
+    <div class="prompt-action-rail" aria-label="Prompt actions">
+        <button type="button" id="prompt-attach-btn" class="prompt-export-btn" title="Attach file" aria-label="Attach file">+</button>
+        <button type="button" id="prompt-copy-btn" class="prompt-copy-btn" title="Copy prompt" aria-label="Copy prompt"><i class="ti ti-copy"></i></button>
+        <button type="button" id="prompt-export-html-btn" class="prompt-export-btn" title="Export as HTML" aria-label="Export as HTML"><i class="ti ti-download"></i></button>
+        <!-- JSON export button removed per latest UI request -->
+        <button type="button" id="clear-prompt-btn" class="prompt-clear-btn" title="Clear prompt" aria-label="Clear prompt"><i class="ti ti-trash"></i></button>
+    </div>
     <button id="start-button" class="send-button send-button-floating" title="Send prompt">▶</button>
 </div>
 <div class="attachment-bar" id="prompt-attachment-bar" aria-live="polite"></div>

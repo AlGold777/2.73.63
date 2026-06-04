@@ -776,6 +776,8 @@ async function attachFilesToComposer(target, attachments = []) {
     try {
         window.dispatchEvent(new CustomEvent('EXT_ATTACH', {
             detail: {
+                bridgeToken: window.ContentUtils?.getMainBridgeToken?.(),
+                bridgeSource: 'content-script',
                 attachments,
                 dropSelectors: [
                     'div[contenteditable=\"true\"]',
@@ -998,6 +1000,8 @@ async function injectAndGetResponse(prompt, attachments = [], meta = null) {
                 await ensureMainWorldBridge();
                 window.dispatchEvent(new CustomEvent('EXT_SET_TEXT', {
                     detail: {
+                        bridgeToken: window.ContentUtils?.getMainBridgeToken?.(),
+                        bridgeSource: 'content-script',
                         text: prompt,
                         selectors: [
                             'div[contenteditable="true"]',

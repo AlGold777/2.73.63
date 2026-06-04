@@ -19,6 +19,15 @@
     }
   };
 
+  let mainBridgeToken = null;
+  let storedPipelineRunId = null;
+  const getMainBridgeToken = () => mainBridgeToken || null;
+  const setMainBridgeToken = (token) => {
+    mainBridgeToken = typeof token === 'string' && token.trim() ? token.trim() : null;
+    return mainBridgeToken;
+  };
+  const getPipelineRunId = () => storedPipelineRunId || null;
+
   const cleanupKeyByLlm = {
     'GPT': 'chatgpt',
     'Gemini': 'gemini',
@@ -118,6 +127,9 @@
       storedSessionId = storedSessionId || runSessionId;
       window.__CURRENT_SESSION_ID__ = storedSessionId;
     }
+    if (meta.pipelineRunId) {
+      storedPipelineRunId = meta.pipelineRunId;
+    }
     if (meta.dispatchId) {
       storedDispatchId = meta.dispatchId;
     }
@@ -141,6 +153,9 @@
     }
     if (storedTabSessionId && !base.tabSessionId) {
       base.tabSessionId = storedTabSessionId;
+    }
+    if (storedPipelineRunId && !base.pipelineRunId) {
+      base.pipelineRunId = storedPipelineRunId;
     }
     if (llmName && !base.llmName) {
       base.llmName = llmName;
@@ -766,6 +781,9 @@
     sleep,
     isElementInteractable,
     isExtensionContextValid,
+    getMainBridgeToken,
+    setMainBridgeToken,
+    getPipelineRunId,
     safeRuntimeSendMessage,
     storeSessionId,
     storeDispatchMeta,

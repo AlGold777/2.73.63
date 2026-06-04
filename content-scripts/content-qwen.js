@@ -2508,6 +2508,8 @@ const keepAliveMutex = (() => {
     try {
       window.dispatchEvent(new CustomEvent('EXT_ATTACH', {
         detail: {
+          bridgeToken: window.ContentUtils?.getMainBridgeToken?.(),
+          bridgeSource: 'content-script',
           attachments,
           dropSelectors: [
             'div[contenteditable="true"]',

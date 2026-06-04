@@ -1296,7 +1296,9 @@ document.addEventListener('click', (event) => {
     const startButton = document.getElementById('start-button');
     const promptInput = document.getElementById('modTa') || document.getElementById('prompt-input');
     const promptNoteView = document.getElementById('prompt-note-view');
-    const promptContainer = document.querySelector('.prompt-container.prompt-sandwich') || document.querySelector('.prompt-container');
+    const promptContainer = document.querySelector('.prompt-container.prompt-sandwich.debate-composer')
+        || document.querySelector('.prompt-container.prompt-sandwich')
+        || document.querySelector('.prompt-container');
     let useInputRichMode = false;
     let editorState = null;
     let applyRichInputContent = null;
@@ -2107,9 +2109,25 @@ document.addEventListener('click', (event) => {
         } catch (_) {}
         return `pipeline-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     };
-    const makePipelineBatchId = ({ runId, roundIndex, groupIndex = 0 } = {}) =>
-        `${runId || makePipelineRunId()}:r${roundIndex || 1}:g${groupIndex || 0}`;
-    const PIPELINE_TERMINAL_STATUSES = new Set([
+        const makePipelineBatchId = ({ runId, roundIndex, groupIndex = 0 } = {}) =>
+            `${runId || makePipelineRunId()}:r${roundIndex || 1}:g${groupIndex || 0}`;
+        const notifyPipelineControlState = async (state, extra = {}) => {
+            if (!activePipelineRunContext?.pipelineRunId) return;
+            try {
+                await sendToBackground({
+                    type: 'PIPELINE_FSM_EVENT',
+                    event: {
+                        pipelineRunId: activePipelineRunContext.pipelineRunId,
+                        sessionId: activePipelineRunContext.sessionId || null,
+                        state,
+                        ...extra
+                    }
+                });
+            } catch (err) {
+                console.warn('[RESULTS] Failed to persist pipeline control state', err);
+            }
+        };
+        const PIPELINE_TERMINAL_STATUSES = new Set([
         'DONE',
         'FINAL',
         'SUCCESS',
@@ -3314,6 +3332,12 @@ document.addEventListener('click', (event) => {
                 sessionId: debateTabsState?.activeSessionId || document.querySelector('.debate-session-tab.active')?.dataset?.sessionId || '1',
                 startedAt: Date.now()
             };
+            await notifyPipelineControlState('STARTING', {
+                stage: 'dispatch',
+                payload: {
+                    pipelineName: (pipelineName?.textContent || '').trim() || 'Pipeline Run'
+                }
+            });
             debateRunState.activeRole = String(debateRoleSelect?.value || '').trim();
             const moderatorEntryText = getModeratorDispatchText();
             syncModeratorSelectors();
@@ -3388,6 +3412,11 @@ document.addEventListener('click', (event) => {
                     });
 
                     if (isModelRound) {
+                        await notifyPipelineControlState('DISPATCHING', {
+                            round: `r${r}`,
+                            stage: 'models',
+                            payload: { models: roundState.inputModels.slice(), sendModels: roundState.sendModels.slice() }
+                        });
                         roundPrompt = basePrompt;
                         const roundResult = await runModelBatch({
                             prompt: basePrompt,
@@ -3403,7 +3432,17 @@ document.addEventListener('click', (event) => {
                         timedOut = !!roundResult.timedOut;
                     } else if (isJudgeRound) {
                         // Manual moderation applies to inter-round routing, not the initial user send.
+                        await notifyPipelineControlState('AWAITING_APPROVAL', {
+                            round: `r${r}`,
+                            stage: 'judge',
+                            payload: { waitingForApproval: true }
+                        });
                         await waitForDebateApproval({ signal });
+                        await notifyPipelineControlState('DISPATCHING', {
+                            round: `r${r}`,
+                            stage: 'judge',
+                            payload: { waitingForApproval: false }
+                        });
                         if (!responsesList) {
                             showNotification(`Pipeline: no Send outputs in R${r - 1}`, 'warn');
                             return;
@@ -3499,6 +3538,10 @@ document.addEventListener('click', (event) => {
                 };
 
                 await handlePipelineOutputs(result, runSnapshot.outputSelection);
+                await notifyPipelineControlState('COMPLETED', {
+                    stage: 'complete',
+                    payload: { finalOutputs: Object.keys(finalOutputs).length }
+                });
 
                 if (newPagesCheckbox && newPagesCheckbox.checked) {
                     newPagesCheckbox.checked = false;
@@ -3506,9 +3549,17 @@ document.addEventListener('click', (event) => {
                 }
             } catch (err) {
                 if (err?.name === 'AbortError') {
+                    await notifyPipelineControlState('CANCELLED', {
+                        stage: 'cancelled',
+                        reason: 'abort_error'
+                    });
                     showNotification('Pipeline: cancelled', 'warn');
                     return;
                 }
+                await notifyPipelineControlState('FAILED', {
+                    stage: 'failed',
+                    reason: err?.message || String(err)
+                });
                 console.error('[RESULTS] Pipeline run failed', err);
                 showNotification(`Pipeline: error (${err?.message || String(err)})`, 'error');
             } finally {
@@ -3528,6 +3579,10 @@ document.addEventListener('click', (event) => {
         };
         const cancelPipelineRun = async () => {
             if (!pipelineRunActive) return false;
+            await notifyPipelineControlState('CANCELLED', {
+                stage: 'cancelled',
+                reason: 'user_cancel'
+            });
             activePipelineAbortController?.abort();
             pipelineWaiter.reset();
             rejectDebateApproval(new DOMException('Pipeline run cancelled', 'AbortError'));
@@ -12653,6 +12708,12 @@ function checkCompareButtonState() {
         if (index > 0) return ids[index - 1];
         return ids[0];
     }
+    function syncPromptSandwichLayoutState(sessionId = debateTabsState.activeSessionId) {
+        if (!promptContainer) return;
+        const session = ensureDebateSession(sessionId);
+        const hasDebateFeed = Array.isArray(session.messages) && session.messages.length > 0;
+        promptContainer.classList.toggle('has-debate-feed', hasDebateFeed);
+    }
     function readDebateCardMessageSnapshot(card) {
         const outputEl = card?.querySelector?.('.debate-model-card-output');
         const timeEl = card?.querySelector?.('.debate-model-card-time');
@@ -12810,6 +12871,7 @@ function checkCompareButtonState() {
             }
         });
         firstApproved?.classList.add('first-approved-zone-card');
+        syncPromptSandwichLayoutState(activeSessionId);
         debateModelCards.scrollTop = debateModelCards.scrollHeight;
     }
     function getDebateTargetModels() {
@@ -13671,6 +13733,7 @@ function checkCompareButtonState() {
         debateFeedState.placeholders = new Set(
             Array.from(debateFeedState.placeholders).filter((key) => !String(key).startsWith(`${activeSessionId}:`))
         );
+        syncPromptSandwichLayoutState(activeSessionId);
     }
 
     //-- 2.1. Выносим функцию сборки промпта в общую область видимости --//

@@ -559,8 +559,8 @@ function getAttachDenyPrefixes(llmName) {
 }
 
 function isEligibleTabForLlm(llmName, tab) {
-  if (!llmName || !tab || !tab.url) return false;
-  const url = tab.url;
+  const url = tab?.url || tab?.pendingUrl || '';
+  if (!llmName || !tab || !url) return false;
   if (url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('edge://')) {
     return false;
   }
@@ -578,6 +578,7 @@ function buildTabSnapshot(tab) {
   return {
     tabId: tab.id,
     url: tab.url || '',
+    pendingUrl: tab.pendingUrl || '',
     status: tab.status || '',
     discarded: tab.discarded === true,
     active: tab.active === true,
@@ -812,22 +813,53 @@ function waitForTabComplete(tabId, timeoutMs = TAB_READY_TIMEOUT_MS) {
       resolve(false);
       return;
     }
+    let pollTimer = null;
+    let timer = null;
     let settled = false;
     const done = (ok) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
+      if (pollTimer) clearInterval(pollTimer);
       chrome.tabs.onUpdated.removeListener(listener);
       resolve(ok);
     };
+    const checkCurrentTab = () => {
+      chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+          done(false);
+          return;
+        }
+        if (tab.status === 'complete' && (tab.url || tab.pendingUrl) && !isPlaceholderTabUrl(tab.url || '')) {
+          done(true);
+        }
+      });
+    };
     const listener = (updatedTabId, changeInfo) => {
-      if (updatedTabId === tabId && changeInfo.status === 'complete') {
-        done(true);
+      if (updatedTabId === tabId && (changeInfo.status === 'complete' || changeInfo.url)) {
+        checkCurrentTab();
       }
     };
     chrome.tabs.onUpdated.addListener(listener);
-    const timer = setTimeout(() => done(false), Math.max(0, timeoutMs));
+    pollTimer = setInterval(checkCurrentTab, 250);
+    checkCurrentTab();
+    timer = setTimeout(() => done(false), Math.max(0, timeoutMs));
   });
+}
+
+function isPlaceholderTabUrl(url = '') {
+  const normalized = String(url || '').trim().toLowerCase();
+  return !normalized
+    || normalized === 'about:blank'
+    || normalized === 'chrome://newtab'
+    || normalized === 'chrome://newtab/'
+    || normalized.startsWith('chrome://new-tab-page');
+}
+
+function shouldWaitForInitialTabUrl(tab) {
+  if (!tab) return false;
+  if (tab.status !== 'complete') return true;
+  return isPlaceholderTabUrl(tab.url || '');
 }
 
 function reloadTab(tabId) {
@@ -854,13 +886,16 @@ async function ensureTabReadyForDispatch(tabId, llmName, { reason = 'unknown' } 
     });
     return { ok: false, reason: 'tab_missing', snapshot: initialSnapshot };
   }
-  if (!isEligibleTabForLlm(llmName, initialTab)) {
+  if (!shouldWaitForInitialTabUrl(initialTab) && !isEligibleTabForLlm(llmName, initialTab)) {
     emitTelemetry(llmName, 'TAB_READY_FAIL', {
       details: 'tab_ineligible',
       level: 'warning',
       meta: { snapshot: initialSnapshot || null, reason, ...buildTabTimingMeta(initialSnapshot) }
     });
     return { ok: false, reason: 'tab_ineligible', snapshot: initialSnapshot };
+  }
+  if (!initialTab.discarded && isEligibleTabForLlm(llmName, initialTab)) {
+    return { ok: true, tab: initialTab, snapshot: initialSnapshot };
   }
   if (initialTab.discarded) {
     emitTelemetry(llmName, 'TAB_DISCARDED_RELOAD', {
@@ -890,7 +925,7 @@ async function ensureTabReadyForDispatch(tabId, llmName, { reason = 'unknown' } 
       });
       return { ok: false, reason: 'tab_reload_timeout', snapshot: initialSnapshot };
     }
-  } else if (initialTab.status !== 'complete') {
+  } else if (shouldWaitForInitialTabUrl(initialTab)) {
     const loadStart = Date.now();
     const loaded = await waitForTabComplete(tabId, TAB_READY_TIMEOUT_MS);
     emitTelemetry(llmName, 'TAB_READY_WAIT_END', {

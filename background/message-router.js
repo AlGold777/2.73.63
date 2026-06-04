@@ -504,7 +504,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         entry.csBusyUntil = 0;
                         entry.confirmedDispatchId = incomingDispatchId || entry?.lastDispatchMeta?.dispatchId || null;
                         entry.submitSource = 'content';
-                        saveJobState(jobState);
+                        if (self.PipelineFSM?.markSubmitted) {
+                            const currentControl = jobState?.session?.pipelineControl || self.PipelineFSM.normalizeControlState?.({
+                                pipelineRunId: jobState?.session?.pipelineRunId || null,
+                                sessionId: jobState?.session?.startTime || null,
+                                state: jobState?.session?.pipelineState || 'IDLE',
+                                stage: jobState?.session?.pipelineStage || null,
+                                round: jobState?.session?.pipelineRoundId || null
+                            });
+                            const nextControl = self.PipelineFSM.markSubmitted(currentControl, {
+                                llmName,
+                                dispatchId: entry.confirmedDispatchId,
+                                tabSessionId: normalizedMeta.tabSessionId || null,
+                                pipelineRunId: incomingRunSessionId || expectedRunSessionId || null,
+                                stage: 'submitted',
+                                reason: 'prompt_submitted'
+                            });
+                            if (nextControl) {
+                                jobState.session = jobState.session || {};
+                                jobState.session.pipelineControl = nextControl;
+                                jobState.session.pipelineRunId = nextControl.pipelineRunId || jobState.session.pipelineRunId || null;
+                                jobState.session.pipelineState = nextControl.state || jobState.session.pipelineState || 'IDLE';
+                                jobState.session.pipelineStage = nextControl.stage || jobState.session.pipelineStage || null;
+                                saveJobState(jobState);
+                                try { chrome.storage.session.set({ [self.PipelineFSM.STORAGE_KEY]: nextControl }); } catch (_) {}
+                            }
+                        }
                         if (self.DispatchStateManager) {
                             const machine = self.DispatchStateManager.get(llmName);
                             const states = self.DISPATCH_STATES || {};
@@ -604,6 +629,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         tabSessionId
                     });
                     const dispatchId = jobState?.llms?.[llmName]?.lastDispatchMeta?.dispatchId || null;
+                    if (self.PipelineFSM?.markReady) {
+                        const currentControl = jobState?.session?.pipelineControl || self.PipelineFSM.normalizeControlState?.({
+                            pipelineRunId: jobState?.session?.pipelineRunId || null,
+                            sessionId: jobState?.session?.startTime || null,
+                            state: jobState?.session?.pipelineState || 'IDLE',
+                            stage: jobState?.session?.pipelineStage || null,
+                            round: jobState?.session?.pipelineRoundId || null
+                        });
+                        const nextControl = self.PipelineFSM.markReady(currentControl, {
+                            llmName,
+                            dispatchId,
+                            tabId,
+                            tabSessionId,
+                            pipelineRunId: jobState?.session?.pipelineRunId || null,
+                            stage: 'ready',
+                            reason: 'script_ready'
+                        });
+                        if (nextControl) {
+                            jobState.session = jobState.session || {};
+                            jobState.session.pipelineControl = nextControl;
+                            jobState.session.pipelineRunId = nextControl.pipelineRunId || jobState.session.pipelineRunId || null;
+                            jobState.session.pipelineState = nextControl.state || jobState.session.pipelineState || 'IDLE';
+                            jobState.session.pipelineStage = nextControl.stage || jobState.session.pipelineStage || null;
+                            saveJobState(jobState);
+                            try { chrome.storage.session.set({ [self.PipelineFSM.STORAGE_KEY]: nextControl }); } catch (_) {}
+                        }
+                    }
                     const ackPayload = {
                         type: 'ACK_READY',
                         llmName,
@@ -902,6 +954,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         entry.lifecycleReadyMeta = message.meta || {};
                         entry.earlyTerminalGuard = null;
                         entry.earlyTerminalGuardNextPingAt = 0;
+                        if (self.PipelineFSM?.markAwaitingFinal) {
+                            const currentControl = jobState?.session?.pipelineControl || self.PipelineFSM.normalizeControlState?.({
+                                pipelineRunId: jobState?.session?.pipelineRunId || null,
+                                sessionId: jobState?.session?.startTime || null,
+                                state: jobState?.session?.pipelineState || 'IDLE',
+                                stage: jobState?.session?.pipelineStage || null,
+                                round: jobState?.session?.pipelineRoundId || null
+                            });
+                            const nextControl = self.PipelineFSM.markAwaitingFinal(currentControl, {
+                                llmName: message.llmName,
+                                dispatchId: entry?.lastDispatchMeta?.dispatchId || null,
+                                tabId: entry?.tabId || null,
+                                pipelineRunId: jobState?.session?.pipelineRunId || null,
+                                stage: 'awaiting_final',
+                                reason: 'response_ready'
+                            });
+                            if (nextControl) {
+                                jobState.session = jobState.session || {};
+                                jobState.session.pipelineControl = nextControl;
+                                jobState.session.pipelineRunId = nextControl.pipelineRunId || jobState.session.pipelineRunId || null;
+                                jobState.session.pipelineState = nextControl.state || jobState.session.pipelineState || 'IDLE';
+                                jobState.session.pipelineStage = nextControl.stage || jobState.session.pipelineStage || null;
+                                saveJobState(jobState);
+                                try { chrome.storage.session.set({ [self.PipelineFSM.STORAGE_KEY]: nextControl }); } catch (_) {}
+                            }
+                        }
                         if (self.commitModelRunTransition) {
                             self.commitModelRunTransition(message.llmName, entry, 'LIFECYCLE_READY', {
                                 status: 'RECEIVING',
@@ -1021,15 +1099,70 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             case 'CANCEL_PIPELINE_RUN': {
                 (async () => {
+                    const requestedRunId = message.pipelineRunId || null;
+                    const currentRunId = jobState?.session?.pipelineRunId || jobState?.session?.pipelineControl?.pipelineRunId || null;
+                    if (requestedRunId && currentRunId && requestedRunId !== currentRunId) {
+                        sendResponse({ success: true, ignored: true, reason: 'stale_pipeline_run', pipelineRunId: requestedRunId, currentRunId });
+                        return;
+                    }
                     const cmd = {
                         action: 'STOP_ALL',
                         timestamp: Date.now(),
-                        pipelineRunId: message.pipelineRunId || null,
+                        pipelineRunId: requestedRunId || currentRunId || null,
                         reason: 'cancel_pipeline_run'
                     };
                     await chrome.storage.local.set({ global_command: cmd });
+                    if (self.PipelineFSM?.cancelRun) {
+                        const control = jobState?.session?.pipelineControl || self.PipelineFSM.createState?.({ pipelineRunId: requestedRunId || currentRunId, sessionId: jobState?.session?.startTime || null }) || null;
+                        const nextControl = self.PipelineFSM.cancelRun(control || { pipelineRunId: requestedRunId || currentRunId }, {
+                            pipelineRunId: requestedRunId || currentRunId || null,
+                            reason: 'cancel_pipeline_run',
+                            stage: 'cancelled'
+                        });
+                        if (nextControl) {
+                            jobState.session = jobState.session || {};
+                            jobState.session.pipelineControl = nextControl;
+                            jobState.session.pipelineRunId = nextControl.pipelineRunId || currentRunId || requestedRunId || null;
+                            jobState.session.pipelineState = nextControl.state || 'CANCELLED';
+                            jobState.session.pipelineStage = nextControl.stage || 'cancelled';
+                            saveJobState(jobState);
+                            try { await chrome.storage.session.set({ [self.PipelineFSM.STORAGE_KEY]: nextControl }); } catch (_) {}
+                        }
+                    }
                     stopAllProcesses('cancel_pipeline_run', { closeTabs: false });
-                    sendResponse({ success: true, pipelineRunId: message.pipelineRunId || null });
+                    sendResponse({ success: true, pipelineRunId: requestedRunId || currentRunId || null });
+                })();
+                return true;
+            }
+
+            case 'PIPELINE_FSM_EVENT': {
+                (async () => {
+                    try {
+                        const event = message.event && typeof message.event === 'object' ? { ...message.event } : {};
+                        const currentControl = jobState?.session?.pipelineControl || self.PipelineFSM?.normalizeControlState?.({
+                            pipelineRunId: jobState?.session?.pipelineRunId || null,
+                            sessionId: jobState?.session?.startTime || null,
+                            state: jobState?.session?.pipelineState || 'IDLE',
+                            stage: jobState?.session?.pipelineStage || null,
+                            round: jobState?.session?.pipelineRoundId || null
+                        });
+                        const nextControl = self.PipelineFSM?.transition
+                            ? self.PipelineFSM.transition(currentControl, event)
+                            : currentControl;
+                        if (nextControl) {
+                            jobState.session = jobState.session || {};
+                            jobState.session.pipelineControl = nextControl;
+                            jobState.session.pipelineRunId = nextControl.pipelineRunId || jobState.session.pipelineRunId || null;
+                            jobState.session.pipelineState = nextControl.state || jobState.session.pipelineState || 'IDLE';
+                            jobState.session.pipelineStage = nextControl.stage || jobState.session.pipelineStage || null;
+                            jobState.session.pipelineRoundId = nextControl.round || jobState.session.pipelineRoundId || null;
+                            saveJobState(jobState);
+                            try { await chrome.storage.session.set({ [self.PipelineFSM.STORAGE_KEY]: nextControl }); } catch (_) {}
+                        }
+                        sendResponse({ success: true, state: nextControl?.state || null, pipelineRunId: nextControl?.pipelineRunId || null });
+                    } catch (err) {
+                        sendResponse({ success: false, error: err?.message || String(err) });
+                    }
                 })();
                 return true;
             }

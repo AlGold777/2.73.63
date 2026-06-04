@@ -1,5 +1,27 @@
 ## Change Log — Codex
 
+### 2026-06-03 07:16 CEST — v2.74.44
+
+- Для чего: сделать Pipeline FSM реальным источником истины для pipeline-level state transitions. Изменение: добавлен `PipelineFSM.transition(...)` и `PipelineFSM.completeRun(...)`, а `PIPELINE_FSM_EVENT` в background теперь проходит через transition вместо прямого вызова model-level `markFinal`.
+- Для чего: закрыть bypass для cancelled run. Изменение: `PipelineFSM.markFinal(...)` теперь отказывает в переходе, если текущий control state уже `CANCELLED`, `STOPPED` или `FAILED`; cancelled pipeline не может вернуться в `COMPLETED`.
+- Для чего: переживать restart service worker даже если full `jobState` не был восстановлен. Изменение: `loadJobState()` теперь восстанавливает минимальный pipeline control snapshot из `chrome.storage.session`, если `jobState` отсутствует.
+- Для чего: не хранить большие runtime payloads без политики. Изменение: `DEFAULT_LIMITS` расширен `maxPayloadBytes`, `maxSnapshotsPerModel`, `maxRoundsRetained`, `maxAgeMs`, `dropPartialAfterFinal`, `dropPayloadAfterExport`; `compactJobStateForStorage()` теперь режет payload/log/history/snapshot хвосты по явным retention rules.
+- Для чего: убрать bridge token из page-readable DOM/URL. Изменение: `content-bootstrap.js` теперь инжектит main-world bridge как inline script из fetched source, `content-bridge.js` использует token placeholder, а `content-utils.js` хранит bridge token только в isolated-world state.
+- Для чего: зафиксировать invariants в тестах. Изменение: `tests/pipeline-fsm.test.js` проверяет terminal-state lockout, compaction policy, bridge token mismatch и отсутствие `data-bridge-token` в DOM.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.44`. Файл: `manifest.json`.
+- Проверка: `npx jest --config tests/jest.config.js --runInBand` (`23/23` suites, `106/106` tests).
+
+### 2026-06-03 07:16 CEST — v2.74.43
+
+- Для чего: ввести Pipeline FSM для MV3 lifecycle. Изменение: добавлен `shared/pipeline-fsm.js` со state machine для `STARTING`, `DISPATCHING`, `AWAITING_APPROVAL`, `AWAITING_FINAL`, `COMPLETED`, `CANCELLED`, `FAILED`, `STOPPED`, а background и results теперь публикуют и восстанавливают контрольное состояние через FSM.
+- Для чего: переживать restart service worker между approve/dispatch/final. Изменение: critical control state (`pipelineRunId`, `pipelineState`, `dispatchId`, tab/session scope) сохраняется в `chrome.storage.session`, а `jobState` при сохранении компактуется вместо хранения неограниченных payload.
+- Для чего: сделать cancel scoped по конкретному run. Изменение: `CANCEL_PIPELINE_RUN` теперь сравнивает `pipelineRunId` и игнорирует stale cancel/late final для другого запуска.
+- Для чего: не принимать дубли финалов и поздние ответы после retry/cancel. Изменение: `shouldAcceptEvent()` отсекает duplicate final, stale tab/session и late final для cancelled run.
+- Для чего: защитить web-UI automation bridge от fake `CustomEvent`. Изменение: `content-bootstrap.js` внедряет bridge token, `content-bridge.js` принимает только trusted events с валидным token/source, а content scripts прокидывают token в bridge-вызовы.
+- Для чего: покрыть обязательные lifecycle/threat сценарии. Изменение: добавлен `tests/pipeline-fsm.test.js` для restart/reload/duplicate final/late final/fake event/compaction сценариев.
+- Для чего: зафиксировать выпуск. Изменение: версия расширения обновлена до `2.74.43`. Файл: `manifest.json`.
+- Проверка: `npx jest --config tests/jest.config.js --runInBand` (`23/23` suites, `105/105` tests).
+
 ### 2026-06-03 06:05 CEST — v2.74.42
 
 - Для чего: уменьшить карточку ответа с 6 строк до 5 строк в collapsed state. Изменение: `.debate-model-card-output` теперь ограничен `max-height: calc(var(--debate-card-line-height) * 5)`.

@@ -137,7 +137,7 @@ chrome.runtime.onInstalled.addListener((details) => {
       }
     });
     if (chrome?.storage?.session) {
-      chrome.storage.session.remove(CIRCUIT_BREAKER_STORAGE_KEY, () => {});
+      chrome.storage.session.remove([CIRCUIT_BREAKER_STORAGE_KEY, 'llm_pipeline_fsm_v1'], () => {});
     }
   }
 });

@@ -154,7 +154,7 @@
     <div class="input-section">
             <div class="prompt-group">
                 <!-- 1.1. Оборачиваем поле ввода в "сэндвич-контейнер" -->
-<div class="prompt-container prompt-sandwich">
+<div class="prompt-container prompt-sandwich debate-composer">
     <div id="prefix-container" class="modifier-chips-container"></div>
 
     <!-- Кнопки копирования и очистки теперь внутри обертки, но позиционируются абсолютно -->
@@ -204,26 +204,7 @@
                 </select>
             </div>
             <div class="msg-head-right">
-                <span class="msg-time" id="mod-time">--:--</span>
-                <button type="button" id="mod-copy-btn" class="ib" title="Copy" aria-label="Copy">⧉</button>
-                <button type="button" id="mod-export-btn" class="ib" title="Export HTML" aria-label="Export HTML">⬆</button>
-                <button type="button" id="mod-clear-btn" class="ib" title="Clear" aria-label="Clear">🗑️</button>
-            </div>
-        </div>
-        <div class="mod-middle">
-            <div class="mod-divider-label">Moderator</div>
-            <div id="mod-message-body" class="mod-message-body"></div>
-            <textarea id="modTa" placeholder="Ваш комментарий или управляющий запрос…" oninput="growTA(this)"></textarea>
-        </div>
-        <div class="mod-footer">
-            <div class="mod-footer-left">
                 <div class="mod-controls">
-                    <select id="debate-mode-select" class="mod-select mod-select-compact" aria-label="Debate mode">
-                        <option value="debate" selected="">Debate</option>
-                        <option value="research">Research</option>
-                        <option value="brainstorm">Brainstorm</option>
-                        <option value="expert">Expert</option>
-                    </select>
                     <select id="debate-length-select" class="mod-select mod-select-compact" aria-label="Debate length">
                         <option value="300">300</option>
                         <option value="500" selected="">500</option>
@@ -245,7 +226,13 @@
                 </div>
                 <div class="mod-mini-prompts" id="mod-mini-prompts"></div>
             </div>
-            <button type="button" id="mod-send-btn" class="mod-send-btn" title="Send"><i class="ti ti-send"></i></button>
+        </div>
+        <div class="mod-middle">
+            <div id="mod-message-body" class="mod-message-body"></div>
+            <div class="mod-compose-row">
+                <textarea id="modTa" placeholder="Ваш комментарий или управляющий запрос…" oninput="growTA(this)"></textarea>
+                <button type="button" id="mod-send-btn" class="mod-send-btn" title="Send"><i class="ti ti-send"></i></button>
+            </div>
         </div>
     </div>
     <div id="suffix-container" class="modifier-chips-container"></div>

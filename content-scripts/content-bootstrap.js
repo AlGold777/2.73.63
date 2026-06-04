@@ -37,6 +37,11 @@
         root.ContentUtils.storeSessionId(runSessionId);
       }
     }
+    if (meta.pipelineRunId) {
+      if (root.ContentUtils?.storeDispatchMeta) {
+        root.ContentUtils.storeDispatchMeta({ pipelineRunId: meta.pipelineRunId });
+      }
+    }
     if (root.ContentUtils?.storeDispatchMeta) {
       root.ContentUtils.storeDispatchMeta(meta);
     }
@@ -48,7 +53,8 @@
         runSessionId: meta.runSessionId || message?.runSessionId || null,
         sessionId: meta.sessionId || message?.sessionId || null,
         dispatchId: meta.dispatchId || message?.dispatchId || null,
-        tabSessionId: meta.tabSessionId || message?.tabSessionId || null
+        tabSessionId: meta.tabSessionId || message?.tabSessionId || null,
+        pipelineRunId: meta.pipelineRunId || message?.pipelineRunId || null
       };
       captureDispatchMeta(merged);
     });
@@ -117,10 +123,22 @@
   try {
     if (!root.__LLMMainBridgeInjected) {
       root.__LLMMainBridgeInjected = true;
-      const s = document.createElement('script');
-      s.src = chrome.runtime?.getURL('content-scripts/content-bridge.js');
-      s.onload = () => { try { s.remove(); } catch (_) {} };
-      (document.documentElement || document.head || document.body).appendChild(s);
+      const bridgeToken = `bridge_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      root.ContentUtils?.setMainBridgeToken?.(bridgeToken);
+      void (async () => {
+        try {
+          const bridgeUrl = chrome.runtime?.getURL('content-scripts/content-bridge.js');
+          const bridgeSource = await fetch(bridgeUrl).then((resp) => resp.text());
+          const bridgedSource = bridgeSource.replaceAll('__LLM_BRIDGE_TOKEN__', JSON.stringify(bridgeToken));
+          const s = document.createElement('script');
+          s.textContent = bridgedSource;
+          s.onload = () => { try { s.remove(); } catch (_) {} };
+          (document.documentElement || document.head || document.body).appendChild(s);
+          try { s.remove(); } catch (_) {}
+        } catch (err) {
+          console.warn('[content-bootstrap] Failed to inject bridge script', err);
+        }
+      })();
     }
   } catch (_) {}
 

@@ -709,6 +709,8 @@ async function attachFilesToComposer(target, attachments = []) {
   try {
     window.dispatchEvent(new CustomEvent('EXT_ATTACH', {
       detail: {
+        bridgeToken: window.ContentUtils?.getMainBridgeToken?.(),
+        bridgeSource: 'content-script',
         attachments,
         dropSelectors: [
           'textarea[data-testid="search-input"]',

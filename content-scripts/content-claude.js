@@ -101,6 +101,8 @@ const waitForElement = async (selectors, timeoutMs = 3000, intervalMs = 150) => 
     try {
       window.dispatchEvent(new CustomEvent('EXT_ATTACH', {
         detail: {
+          bridgeToken: window.ContentUtils?.getMainBridgeToken?.(),
+          bridgeSource: 'content-script',
           attachments,
           dropSelectors: [
             '[data-testid*=\"composer\"]',

@@ -1759,7 +1759,9 @@ const waitForRound0Binding = async (llmName, sessionId, timeoutMs = ROUND0_BIND_
     const boundTabId = resolveBoundTabIdForOrchestrator(llmName, entry);
     if (isValidTabId(boundTabId)) {
       const tab = await getTabSafe(boundTabId);
-      if (tab) return true;
+      if (tab && (typeof isEligibleTabForLlm !== 'function' || isEligibleTabForLlm(llmName, tab))) {
+        return true;
+      }
     }
     await orchestratorSleepMs(ROUND0_BIND_POLL_MS);
   }
@@ -2400,19 +2402,20 @@ function clearSessionTimers() {
 //-- 11.1. Ð¡Ð¾Ñ…Ñ€Ð°Ð½ÐµÐ½Ð¸Ðµ Ð¸ Ð·Ð°Ð³Ñ€ÑƒÐ·ÐºÐ° jobState Ð¸Ð· storage --//
 async function saveJobState(state) {
   try {
-    const persisted = (() => {
-      if (!state) return state;
-      const copy = { ...state };
-      if (Array.isArray(state.attachments)) {
-        copy.attachments = state.attachments.map((f) => ({
-          name: f?.name,
-          size: f?.size,
-          type: f?.type
-        }));
-      }
-      return copy;
-    })();
+    const persisted = self.PipelineFSM?.compactJobStateForStorage
+      ? self.PipelineFSM.compactJobStateForStorage(state)
+      : state;
     await CompressedStorage.set('jobState', persisted);
+    if (self.PipelineFSM?.persistControlState) {
+      const control = self.PipelineFSM.normalizeControlState?.(state?.session?.pipelineControl || {
+        pipelineRunId: state?.session?.pipelineRunId || null,
+        sessionId: state?.session?.startTime || null,
+        state: state?.session?.pipelineState || 'IDLE',
+        stage: state?.session?.pipelineStage || null,
+        round: state?.session?.pipelineRoundId || null
+      });
+      void self.PipelineFSM.persistControlState(control);
+    }
     console.log('[BACKGROUND] Job state saved to storage (compressed)');
   } catch (e) {
     console.error('[BACKGROUND] Failed to save job state:', e);
@@ -2424,15 +2427,62 @@ async function loadJobState() {
     const saved = await CompressedStorage.get('jobState');
     if (saved) {
       jobState = saved;
+      const control = self.PipelineFSM?.loadControlState ? await self.PipelineFSM.loadControlState() : null;
+      if (self.PipelineFSM?.hydrateJobState) {
+        self.PipelineFSM.hydrateJobState(jobState, control);
+      }
       console.log('[BACKGROUND] Job state loaded from storage');
       if (hasPendingHumanVisits()) {
         scheduleHumanPresenceLoop();
       }
       broadcastHumanVisitStatus();
+      return;
+    }
+    const control = self.PipelineFSM?.loadControlState ? await self.PipelineFSM.loadControlState() : null;
+    if (control && control.state && control.state !== 'IDLE') {
+      jobState = {
+        session: {
+          startTime: control.sessionId || null,
+          pipelineRunId: control.pipelineRunId || null,
+          pipelineState: control.state || 'IDLE',
+          pipelineStage: control.stage || null,
+          pipelineRoundId: control.round || null,
+          pipelineControl: control
+        },
+        llms: {}
+      };
+      console.log('[BACKGROUND] Job state restored from session control state');
     }
   } catch (e) {
     console.error('[BACKGROUND] Failed to load job state:', e);
   }
+}
+
+function getActivePipelineControlState() {
+  return jobState?.session?.pipelineControl || (self.PipelineFSM?.normalizeControlState ? self.PipelineFSM.normalizeControlState({
+    pipelineRunId: jobState?.session?.pipelineRunId || null,
+    sessionId: jobState?.session?.startTime || null,
+    state: jobState?.session?.pipelineState || 'IDLE',
+    stage: jobState?.session?.pipelineStage || null,
+    round: jobState?.session?.pipelineRoundId || null
+  }) : {
+    pipelineRunId: jobState?.session?.pipelineRunId || null,
+    sessionId: jobState?.session?.startTime || null,
+    state: jobState?.session?.pipelineState || 'IDLE'
+  });
+}
+
+function persistPipelineControlState(nextControl = null) {
+  if (!self.PipelineFSM?.persistControlState) return;
+  const control = nextControl || getActivePipelineControlState();
+  if (jobState?.session) {
+    jobState.session.pipelineControl = control;
+    jobState.session.pipelineRunId = control.pipelineRunId || null;
+    jobState.session.pipelineState = control.state || jobState.session.pipelineState || 'IDLE';
+    jobState.session.pipelineStage = control.stage || null;
+    jobState.session.pipelineRoundId = control.round || null;
+  }
+  void self.PipelineFSM.persistControlState(control);
 }
 
 function stopAllProcesses(reason = 'unspecified', { closeTabs = false } = {}) {
@@ -2524,6 +2574,13 @@ function stopAllProcesses(reason = 'unspecified', { closeTabs = false } = {}) {
       chrome.storage.local.remove(['jobState']);
     } catch (_) {}
   }
+  if (self.PipelineFSM?.stopRun) {
+    const control = getActivePipelineControlState();
+    const nextControl = String(reason || '').toLowerCase().includes('cancel')
+      ? self.PipelineFSM.cancelRun(control, { reason, pipelineRunId: control.pipelineRunId || null, stage: 'cancelled' })
+      : self.PipelineFSM.stopRun(control, { reason, pipelineRunId: control.pipelineRunId || null, stage: 'stopped' });
+    persistPipelineControlState(nextControl);
+  }
   jobState = {};
   broadcastGlobalState();
 }
@@ -2566,12 +2623,30 @@ async function startProcess(prompt, selectedLLMs, resultsTab, options = {}) {
       boundTabIds: [],
       telemetrySampled,
       telemetrySampleRate: TELEMETRY_SAMPLE_RATE,
+      pipelineRunId: pipelineContext?.pipelineRunId || null,
+      pipelineState: 'STARTING',
+      pipelineStage: 'dispatch',
+      pipelineRoundId: null,
+      pipelineBatchId: null,
       pipelineContext
     },
     attachments
   };
   humanPresencePaused = false;
   humanPresenceManuallyStopped = false;
+  if (self.PipelineFSM?.startRun) {
+    jobState.session.pipelineControl = self.PipelineFSM.startRun({
+      pipelineRunId: pipelineContext?.pipelineRunId || null,
+      sessionId: sessionStartTime,
+      stage: 'dispatch',
+      state: self.PipelineFSM.STATES?.STARTING || 'STARTING',
+      payload: {
+        pipelineContext,
+        selectedModels: Array.isArray(selectedLLMs) ? selectedLLMs.slice() : [],
+        totalModels: selectedLLMs.length
+      }
+    });
+  }
   saveJobState(jobState);
 
   initializeCircuitBreakers(selectedLLMs);
@@ -2893,50 +2968,8 @@ async function dispatchRound1Sequentially(selectedLLMs, prompt, attachments = []
       continue;
     }
     endMeta.tabId = tabId;
-    let readiness = await ensureTabReadyForDispatch(tabId, llmName, { reason: 'round1' });
-    if (!readiness.ok) {
-      const retryTabId = await resolveTabForLlmNameAsync(llmName);
-      if (isValidTabId(retryTabId) && retryTabId !== tabId) {
-        const retryReadiness = await ensureTabReadyForDispatch(retryTabId, llmName, { reason: 'round1_retry' });
-        if (retryReadiness.ok) {
-          emitTelemetry(llmName, 'ROUND1_RETRY_OK', {
-            details: 'resolved tabId on retry',
-            meta: { previousTabId: tabId, tabId: retryTabId }
-          });
-          tabId = retryTabId;
-          endMeta.tabId = tabId;
-          readiness = retryReadiness;
-        }
-      }
-    }
-    if (!readiness.ok && ['tab_ineligible', 'tab_ineligible_after_wait', 'tab_missing', 'tab_missing_after_wait'].includes(String(readiness.reason || ''))) {
-      const recovered = await recoverRound1TabReadiness(llmName, prompt, attachments, sessionId, tabId, `round1_${readiness.reason}`);
-      if (recovered?.readiness?.ok && isValidTabId(recovered.tabId)) {
-        tabId = recovered.tabId;
-        endMeta.tabId = tabId;
-        readiness = recovered.readiness;
-      }
-    }
-    if (!readiness.ok) {
-      const readinessReason = readiness.reason || 'tab_not_ready';
-      broadcastDiagnostic(llmName, {
-        type: 'DISPATCH',
-        label: 'ROUND1_SKIP',
-        details: readinessReason,
-        level: 'warning'
-      });
-      endLevel = 'warning';
-      endDetails = `dispatch skipped | ${readinessReason}`;
-      endMeta.reason = readinessReason;
-      emitModelRoundTelemetry(llmName, 1, 'END', endDetails, {
-        level: endLevel,
-        meta: { ...endMeta, durationMs: Date.now() - roundStart }
-      });
-      continue;
-    }
-    await prepareTabForUse(tabId, llmName);
-    initRequestMetadata(llmName, tabId, readiness.tab?.url || '');
-    startBudgetPhase(llmName, 'dispatch', null, { tabId });
+    const dispatchTab = await getTabSafe(tabId);
+    initRequestMetadata(llmName, tabId, dispatchTab?.url || dispatchTab?.pendingUrl || '');
     //- 1.1. Round 1: режим "Спринт". Не ждем подтверждения, чтобы Gemini и Claude получили промпт мгновенно -//
     await dispatchPromptToTab(llmName, tabId, prompt, attachments, 'round1', {
       forceFocus: true,
@@ -4120,6 +4153,9 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
 
   const entry = jobState.llms?.[llmName];
   const metaObj = meta && typeof meta === 'object' ? meta : null;
+  const pipelineControl = getActivePipelineControlState();
+  const incomingPipelineRunId = metaObj?.pipelineRunId || metaObj?.runSessionId || jobState?.session?.pipelineRunId || pipelineControl?.pipelineRunId || null;
+  const incomingTabSessionId = metaObj?.tabSessionId || metaObj?.responseMeta?.tabSessionId || metaObj?.pipelineTabSessionId || null;
   if (entry && metaObj) {
     const expectedSessionId = Number(jobState?.session?.startTime || 0) || null;
     const incomingSessionId = metaObj?.sessionId ? Number(metaObj.sessionId) : null;
@@ -4141,6 +4177,29 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
         label: 'Response ignored (unknown dispatchId)',
         details: incomingDispatchId,
         level: 'warning'
+      });
+      return;
+    }
+  }
+  if (self.PipelineFSM?.shouldAcceptEvent) {
+    const acceptance = self.PipelineFSM.shouldAcceptEvent(pipelineControl, {
+      pipelineRunId: incomingPipelineRunId,
+      llmName,
+      dispatchId: metaObj?.dispatchId || entry?.lastDispatchMeta?.dispatchId || null,
+      tabSessionId: incomingTabSessionId,
+      kind: 'final'
+    });
+    if (!acceptance.ok) {
+      appendLogEntry(llmName, {
+        type: 'RESPONSE',
+        label: 'Response ignored (pipeline control)',
+        details: acceptance.reason || 'pipeline_control_reject',
+        level: 'warning',
+        meta: {
+          pipelineRunId: incomingPipelineRunId || null,
+          dispatchId: metaObj?.dispatchId || entry?.lastDispatchMeta?.dispatchId || null,
+          reason: acceptance.reason || null
+        }
       });
       return;
     }
@@ -4740,6 +4799,21 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
   const tabId = entry?.tabId || null;
   if (typeof self.clearScriptRuntimeHardStop === 'function') {
     self.clearScriptRuntimeHardStop(llmName, dispatchId || null);
+  }
+  if (self.PipelineFSM?.markFinal) {
+    const control = jobState?.session?.pipelineControl || getActivePipelineControlState();
+    const finalControl = self.PipelineFSM.markFinal(control, {
+      llmName,
+      dispatchId,
+      tabSessionId: incomingTabSessionId || null,
+      pipelineRunId: incomingPipelineRunId || null,
+      finalStatus,
+      reason: finalReason,
+      sessionId: jobState?.session?.startTime || null
+    });
+    if (finalControl?.ok && finalControl.state) {
+      persistPipelineControlState(finalControl.state);
+    }
   }
   const finalEmitKey = `${modelFinalStatus}::${doneReason || ''}::${dispatchId || ''}`;
   const finalEmitAt = Number(entry?.lastFinalEmittedAt || 0);
@@ -5418,6 +5492,8 @@ function sendCleanupCommand(llmName) {
   self.buildFinalizationEvidence = buildFinalizationEvidence;
   self.recordModelRunState = recordModelRunState;
   self.emitFinalizationDecision = emitFinalizationDecision;
+  self.getActivePipelineControlState = getActivePipelineControlState;
+  self.persistPipelineControlState = persistPipelineControlState;
   self.registerSessionTimer = registerSessionTimer;
   self.deregisterSessionTimer = deregisterSessionTimer;
   self.clearSessionTimers = clearSessionTimers;

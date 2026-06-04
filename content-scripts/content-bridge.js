@@ -1,6 +1,25 @@
 (function () {
   if (window.__ExtMainBridge) return;
   window.__ExtMainBridge = true;
+  const bridgeToken = (() => {
+    try {
+      return '__LLM_BRIDGE_TOKEN__';
+    } catch (_) {
+      return null;
+    }
+  })();
+  const isTrustedBridgeEvent = (ev) => {
+    const detail = ev?.detail && typeof ev.detail === 'object' ? ev.detail : null;
+    if (!detail) return false;
+    if (!bridgeToken) return false;
+    return detail.bridgeToken === bridgeToken && detail.bridgeSource === 'content-script';
+  };
+  if (window.__RESULTS_TEST_DEBUG__) {
+    window.__ExtMainBridgeTestHooks = {
+      isTrustedBridgeEvent,
+      bridgeToken
+    };
+  }
 
   const dataUrlToFile = (item) => {
     try {
@@ -105,6 +124,7 @@
 
   window.addEventListener('EXT_ATTACH', (ev) => {
     try {
+      if (!isTrustedBridgeEvent(ev)) return;
       const d = ev.detail || {};
       const files = toFiles(d.attachments);
       if (!files.length) return;
@@ -159,6 +179,7 @@
 
   window.addEventListener('EXT_SET_TEXT', (ev) => {
     try {
+      if (!isTrustedBridgeEvent(ev)) return;
       const d = ev.detail || {};
       const text = d.text || '';
       const shadowRoots = collectShadowRoots();

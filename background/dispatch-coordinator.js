@@ -708,6 +708,7 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
     }
   }
   const capturedSessionId = jobState?.session?.startTime || null;
+  const pipelineRunId = jobState?.session?.pipelineRunId || jobState?.session?.pipelineControl?.pipelineRunId || null;
   const flags = resolveDispatchFlags(llmName, entry);
   if (isTerminalLlmEntry(entry)) return;
   if (reason === 'retry_supervisor' && isTypingGuardActive(entry)) return;
@@ -767,12 +768,34 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
     stopHumanPresenceLoop();
     const lockAcquiredAt = Date.now();
     const machine = resolveDispatchFlags(llmName, entry).machine;
-    entry.lastDispatchAt = Date.now();
-    entry.lastDispatchMeta = { dispatchReason: reason, sessionId, dispatchId };
-    entry.dispatchSource = 'web';
-    entry.recentDispatchIds = Array.isArray(entry.recentDispatchIds) ? entry.recentDispatchIds : [];
-    entry.recentDispatchIds = [...entry.recentDispatchIds.filter(Boolean), dispatchId].slice(-8);
-    saveJobState(jobState);
+  entry.lastDispatchAt = Date.now();
+  entry.lastDispatchMeta = { dispatchReason: reason, sessionId, dispatchId };
+  entry.dispatchSource = 'web';
+  entry.pipelineRunId = pipelineRunId || entry.pipelineRunId || null;
+  entry.recentDispatchIds = Array.isArray(entry.recentDispatchIds) ? entry.recentDispatchIds : [];
+  entry.recentDispatchIds = [...entry.recentDispatchIds.filter(Boolean), dispatchId].slice(-8);
+  if (self.PipelineFSM?.registerDispatch) {
+    const currentControl = typeof self.getActivePipelineControlState === 'function'
+      ? self.getActivePipelineControlState()
+      : (jobState?.session?.pipelineControl || null);
+    const seedState = currentControl || (self.PipelineFSM.createState ? self.PipelineFSM.createState({ pipelineRunId, sessionId }) : null);
+    if (seedState) {
+      const nextControl = self.PipelineFSM.registerDispatch(seedState, {
+        llmName,
+        dispatchId,
+        tabId,
+        tabSessionId: null,
+        pipelineRunId,
+        sessionId,
+        stage: reason,
+        reason: 'dispatch_registered'
+      });
+      if (typeof self.persistPipelineControlState === 'function') {
+        self.persistPipelineControlState(nextControl);
+      }
+    }
+  }
+  saveJobState(jobState);
     let submitTimeoutMs = getPromptSubmitTimeoutMs(llmName);
     if (llmName === 'Claude' && !options.skipTypingGuard) {
       const promptLength = String(prompt || '').length;
@@ -948,6 +971,7 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
             dispatchReason: reason,
             runSessionId: sessionId,
             sessionId,
+            pipelineRunId,
             dispatchId,
             tabSessionId: readyInfo?.tabSessionId || null
           }
@@ -1005,6 +1029,7 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
               dispatchReason: reason,
               runSessionId: sessionId,
               sessionId,
+              pipelineRunId,
               dispatchId,
               tabSessionId: readyInfo?.tabSessionId || null
             }
@@ -1034,6 +1059,7 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
             dispatchReason: reason,
             runSessionId: sessionId,
             sessionId,
+            pipelineRunId,
             dispatchId,
             tabSessionId: readyInfo?.tabSessionId || null
           }
