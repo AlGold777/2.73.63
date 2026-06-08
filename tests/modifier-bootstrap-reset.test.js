@@ -1,0 +1,186 @@
+const fs = require('fs');
+const path = require('path');
+
+const delay = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function renderBootstrapDom() {
+  document.body.innerHTML = `
+    <div class="prompt-sandwich">
+      <div class="debate-sel-toolbar" id="debateSelTb"></div>
+      <div id="debate-session-tabs">
+        <button type="button" class="debate-session-tab active" data-session-id="1">1</button>
+      </div>
+      <div class="llm-buttons">
+        <button class="llm-button" id="llm-gpt">GPT</button>
+      </div>
+      <button id="debate-session-add-btn" type="button">+</button>
+      <button id="debate-session-delete-btn" type="button">−</button>
+      <button id="debate-session-copy-btn" type="button">copy</button>
+      <button id="debate-session-export-btn" type="button">export</button>
+      <button id="debate-session-clear-btn" type="button">clear</button>
+      <div id="pipeline-panel"></div>
+      <textarea id="prompt-input"></textarea>
+      <div id="modifiers-header"></div>
+      <div id="modifiers-row"></div>
+      <div id="modifiers-container"></div>
+      <div id="prefix-cards-container"></div>
+      <div id="secondary-prefix-cards-container"></div>
+      <div id="suffix-cards-container"></div>
+      <div id="secondary-suffix-cards-container"></div>
+      <div id="debate-model-cards"></div>
+      <div id="create-template-modal" class="modal">
+        <button class="close" type="button">x</button>
+        <div class="model-selector"></div>
+      </div>
+      <select id="template-select"></select>
+      <button id="cancel-template" type="button"></button>
+      <button id="save-template" type="button"></button>
+      <button id="add-variable" type="button"></button>
+      <input id="template-name">
+      <textarea id="template-prompt"></textarea>
+      <div id="template-preview"></div>
+      <div id="variables-list"></div>
+      <div id="saved-templates-list"></div>
+      <div id="system-templates-list"></div>
+      <div id="saved-templates-box"></div>
+      <button id="saved-templates-toggle" type="button"></button>
+      <div id="saved-templates-content"></div>
+      <div id="system-templates-box"></div>
+      <button id="system-templates-toggle" type="button"></button>
+      <div id="system-templates-content"></div>
+      <div id="variable-inputs"></div>
+      <button id="export-templates-btn" type="button"></button>
+      <button id="import-templates-btn" type="button"></button>
+      <input id="import-file-input" type="file">
+      <div id="confirm-modal" class="modal"></div>
+      <div id="confirm-message"></div>
+      <button id="delete-confirm" type="button"></button>
+      <button id="cancel-confirm" type="button"></button>
+      <div id="notification-modal" class="modal"></div>
+      <div id="notification-message"></div>
+      <button id="notification-ok-btn" type="button"></button>
+      <input id="file-input" type="file">
+      <div id="file-name-display"></div>
+    </div>
+  `;
+}
+
+function installMocks() {
+  chrome.runtime.getURL = jest.fn((value) => value);
+  chrome.storage.local._store.clear();
+
+  window.ResultsShared = {
+    escapeHtml: (value = '') => String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\"/g, '&quot;')
+      .replace(/'/g, '&#39;'),
+    stripHtmlToPlainText: (html = '') => String(html).replace(/<[^>]*>/g, ''),
+    buildResponseCopyHtmlBlock: () => '',
+    wrapResponsesHtmlBundle: (sections = '') => sections,
+    fallbackCopyViaTextarea: jest.fn(),
+    flashButtonFeedback: jest.fn(),
+    writeRichContentToClipboard: jest.fn()
+  };
+
+  window.fetch = jest.fn(async (url = '') => {
+    const pathValue = String(url);
+    let payload = { templates: [] };
+    if (pathValue.includes('system_templates/index.json')) {
+      payload = [];
+    } else if (pathValue.includes('Modifiers/modifier-presets.json')) {
+      payload = [{ id: 'base', label: 'Base', file: 'modifiers.json' }];
+    } else if (pathValue.includes('Modifiers/modifiers.json')) {
+      payload = [
+        {
+          id: 'mod-a',
+          label: 'A',
+          groupLabel: 'Group A',
+          order: 1,
+          defaultSelected: true
+        },
+        {
+          id: 'mod-b',
+          label: 'B',
+          groupLabel: 'Group A',
+          order: 2,
+          defaultSelected: true
+        }
+      ];
+    }
+    return {
+      ok: true,
+      json: async () => payload
+    };
+  });
+
+  document.execCommand = jest.fn();
+  window.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+  window.scrollBy = jest.fn();
+
+  Object.defineProperty(window.Range.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => ({
+      width: 120,
+      height: 20,
+      top: 20,
+      left: 20,
+      right: 140,
+      bottom: 40,
+      x: 20,
+      y: 20,
+      toJSON() { return this; }
+    })
+  });
+
+  Object.defineProperty(window.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => ({
+      width: 640,
+      height: 320,
+      top: 0,
+      left: 0,
+      right: 640,
+      bottom: 320,
+      x: 0,
+      y: 0,
+      toJSON() { return this; }
+    })
+  });
+}
+
+async function loadResultsScript() {
+  const pipelineRuntime = fs.readFileSync(path.join(__dirname, '..', 'pipeline', 'pipeline-runtime.js'), 'utf8');
+  window.eval(pipelineRuntime);
+  const script = fs.readFileSync(path.join(__dirname, '..', 'results.js'), 'utf8');
+  window.eval(script);
+  document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }));
+  await delay(80);
+}
+
+describe('modifier bootstrap reset', () => {
+  beforeEach(() => {
+    renderBootstrapDom();
+    installMocks();
+  });
+
+  test('refresh clears stored selections and does not restore them in the UI', async () => {
+    chrome.storage.local._store.set('llmComparatorSelected', ['mod-a', 'mod-b']);
+    chrome.storage.local._store.set('llmComparatorSelectedByPreset', { base: ['mod-a', 'mod-b'] });
+    chrome.storage.local._store.set('llmComparatorSelectedByPresetPipeline', { base: ['mod-a', 'mod-b'] });
+    const removeSpy = jest.spyOn(chrome.storage.local, 'remove');
+
+    await loadResultsScript();
+
+    const checked = Array.from(document.querySelectorAll('#modifiers-container input[type="checkbox"]'))
+      .filter((checkbox) => checkbox.checked)
+      .map((checkbox) => checkbox.dataset.modId);
+
+    expect(checked).toEqual([]);
+    expect(removeSpy).toHaveBeenCalled();
+    expect(chrome.storage.local._store.has('llmComparatorSelected')).toBe(false);
+    expect(chrome.storage.local._store.has('llmComparatorSelectedByPreset')).toBe(false);
+    expect(chrome.storage.local._store.has('llmComparatorSelectedByPresetPipeline')).toBe(false);
+  });
+});

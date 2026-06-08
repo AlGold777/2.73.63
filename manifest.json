@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "A_Codex_Vision_73.16",
-  "version": "2.74.44",
+  "version": "2.74.66",
   "description": "Compares LLMs.",
   "permissions": [
     "storage",
@@ -81,6 +81,7 @@
         "selector-manager.js",
         "content-scripts/pipeline-config.js",
         "content-scripts/answer-pipeline-selectors.js",
+        "content-scripts/model-selection-toolbar.js",
         "content-scripts/selectors-finder-lite.js",
         "content-scripts/selectors-metrics.js",
         "content-scripts/selectors-circuit.js",

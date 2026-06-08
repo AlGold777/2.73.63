@@ -514,6 +514,8 @@
     const incomingDispatchId = normalizeId(envelope.dispatchId);
     const incomingTabSessionId = normalizeId(envelope.tabSessionId);
     const kind = normalizeId(envelope.kind) || 'response';
+    const incomingFinalStatus = normalizeId(envelope.finalStatus);
+    const allowRecoveredFinal = envelope.allowRecoveredFinal === true;
     if (current.state === STATES.CANCELLED) {
       if (!pipelineRunId || !currentRunId || pipelineRunId === currentRunId) {
         return { ok: false, reason: 'pipeline_cancelled' };
@@ -532,6 +534,11 @@
       return { ok: false, reason: 'stale_ready' };
     }
     if (kind === 'final' && dispatch?.finalStatus && dispatch.dispatchId === incomingDispatchId) {
+      const previousFailure = ['ERROR', 'CRITICAL_ERROR', 'UNRESPONSIVE', 'CIRCUIT_OPEN', 'API_FAILED', 'NO_SEND', 'EXTRACT_FAILED', 'STREAM_TIMEOUT'].includes(String(dispatch.finalStatus || '').toUpperCase());
+      const incomingSuccess = ['COPY_SUCCESS', 'SUCCESS', 'DONE', 'COMPLETE', 'PARTIAL', 'STREAM_TIMEOUT_HIDDEN'].includes(String(incomingFinalStatus || '').toUpperCase());
+      if (allowRecoveredFinal && previousFailure && incomingSuccess) {
+        return { ok: true, reason: 'recovered_final_override' };
+      }
       return { ok: false, reason: 'duplicate_final' };
     }
     return { ok: true, reason: 'accepted' };

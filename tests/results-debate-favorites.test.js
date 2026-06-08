@@ -441,7 +441,7 @@ describe('Pipeline debate favorites view', () => {
     expect(css).toContain('.debate-sel-toolbar {\n    position: absolute;');
     expect(css).toContain('background: #ffffff;');
     expect(css).toContain('.debate-sel-toolbar .stb.col::before');
-    expect(css).toContain('.debate-sel-toolbar .stb.col[data-color="#fde68a"] { --swatch-color: #fde68a; }');
+    expect(css).toContain('.debate-sel-toolbar .stb.col[data-color="#FFEB3B"] { --swatch-color: #FFEB3B; }');
     expect(css).toContain('.debate-sel-toolbar .stb[data-cmd="bold"]::before { content: "B"; }');
     expect(css).toContain('.debate-sel-toolbar .stb[data-fav]::before');
   });

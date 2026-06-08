@@ -72,6 +72,8 @@ const PRE_TERMINAL_MATERIALIZE_VISIT_MAX_MS = 7600;
 const PRE_TERMINAL_MATERIALIZE_SCROLL_MAX_MS = 5600;
 const PRE_TERMINAL_MATERIALIZE_SETTLE_MS = 1100;
 const PRE_TERMINAL_MATERIALIZE_COOLDOWN_MS = 45000;
+const MATERIALIZE_LATEST_RETRY_WAIT_MS = 1800;
+const MATERIALIZE_LATEST_RETRY_MODELS = new Set(['Qwen', 'Gemini', 'Le Chat', 'Perplexity', 'DeepSeek']);
 const FAST_PING_RETRY_DELAYS_MS = Object.freeze([700, 1500, 2600]);
 const HARD_STOP_PING_RETRY_DELAYS_MS = Object.freeze([350, 900, 1700, 2800]);
 const MODEL_FINAL_DEDUP_WINDOW_MS = 20000;
@@ -843,6 +845,159 @@ function acceptLateCollectResult(llmName, result, meta = {}) {
   return true;
 }
 
+function validateMaterializedAnswerEvidence(llmName, text = '', meta = {}) {
+  const value = String(text || '').trim();
+  const source = meta?.source || 'unknown';
+  if (!value) {
+    return { valid: false, rejectReason: 'empty', source, length: 0, hash: null };
+  }
+  if (value.length < DOM_SNAPSHOT_RECOVERY_MIN_CHARS) {
+    return { valid: false, rejectReason: 'too_short', source, length: value.length, hash: hashEvidenceText(value) };
+  }
+  if (/^error\s*:/i.test(value)) {
+    return { valid: false, rejectReason: 'status_error_text', source, length: value.length, hash: hashEvidenceText(value) };
+  }
+  if (isPromptEchoAnswerCandidate(value, jobState?.prompt || '')) {
+    return { valid: false, rejectReason: 'prompt_echo', source, length: value.length, hash: hashEvidenceText(value) };
+  }
+  return {
+    valid: true,
+    rejectReason: null,
+    source,
+    length: value.length,
+    hash: hashEvidenceText(value)
+  };
+}
+
+function buildMaterializedEvidenceSummary(llmName, candidate = {}, validation = {}) {
+  const text = String(candidate.text || '').trim();
+  return {
+    llmName,
+    source: candidate.source || validation.source || 'unknown',
+    text,
+    html: String(candidate.html || ''),
+    length: text.length,
+    hash: validation.hash || (text ? hashEvidenceText(text) : null),
+    extractedAt: Date.now(),
+    valid: !!validation.valid,
+    rejectReason: validation.rejectReason || null,
+    status: candidate.status || null,
+    candidates: Number(candidate.candidates || candidate.candidateCount || 0),
+    selectorUsed: candidate.selectorUsed || null
+  };
+}
+
+async function materializeLatestAnswerEvidence(llmName, entry, context = {}) {
+  const tabId = context.tabId || resolveBoundTabIdForOrchestrator(llmName, entry);
+  const sessionId = context.sessionId || context.runSessionId || getActiveSessionId();
+  const dispatchId = context.dispatchId || entry?.lastDispatchMeta?.dispatchId || entry?.confirmedDispatchId || null;
+  const reason = context.reason || 'terminal_failure';
+  const emitEvidence = (label, summary, level = null) => {
+    emitTelemetry(llmName, label, {
+      level: level || (summary?.valid ? 'success' : 'warning'),
+      details: `${summary?.source || 'none'} len=${Number(summary?.length || 0)}${summary?.rejectReason ? ` reject=${summary.rejectReason}` : ''}`,
+      meta: {
+        reason,
+        tabId: isValidTabId(tabId) ? tabId : null,
+        dispatchId,
+        evidenceSource: summary?.source || null,
+        evidenceLen: Number(summary?.length || 0),
+        evidenceHash: summary?.hash || null,
+        rejectReason: summary?.rejectReason || null,
+        status: summary?.status || null,
+        candidates: Number(summary?.candidates || 0),
+        selectorUsed: summary?.selectorUsed || null
+      },
+      force: true
+    });
+  };
+  const consider = (candidate = {}) => {
+    const validation = validateMaterializedAnswerEvidence(llmName, candidate.text || '', {
+      source: candidate.source || 'unknown'
+    });
+    const summary = buildMaterializedEvidenceSummary(llmName, candidate, validation);
+    emitEvidence(validation.valid ? 'MATERIALIZE_EVIDENCE_ACCEPTED' : 'MATERIALIZE_EVIDENCE_REJECTED', summary);
+    return summary;
+  };
+
+  const preservedCandidates = [
+    { source: 'preserved_pending', text: entry?.pendingFinalAnswer, html: entry?.pendingFinalAnswerHtml },
+    { source: 'preserved_answer', text: entry?.answer, html: entry?.answerHtml }
+  ].filter((candidate) => String(candidate.text || '').trim());
+  for (const candidate of preservedCandidates) {
+    const summary = consider(candidate);
+    if (summary.valid) return { ok: true, summary, result: { ok: true, text: summary.text, html: summary.html, source: summary.source, status: 'preserved' } };
+  }
+
+  if (isValidTabId(tabId)) {
+    const cached = await readAnswerSnapshotCache({ llmName, runSessionId: sessionId, dispatchId, tabId });
+    if (cached?.text) {
+      const summary = consider({
+        source: 'snapshot_cache',
+        text: cached.text,
+        html: cached.html || '',
+        status: 'partial_from_snapshot'
+      });
+      if (summary.valid) return { ok: true, summary, result: { ok: true, text: summary.text, html: summary.html, source: summary.source, status: 'partial_from_snapshot' } };
+    }
+
+    const collectOnce = async (collectReason) => lateCollectAnswer({
+      llmName,
+      tabId,
+      reason: collectReason,
+      meta: {
+        ...(context.meta || {}),
+        preTerminalMaterialize: true,
+        materializeLatestEvidence: true,
+        source: collectReason,
+        runSessionId: sessionId,
+        sessionId,
+        dispatchId,
+        forceEmitOnUnchanged: true
+      },
+      minChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+    });
+    let result = await collectOnce(`materialize_latest:${reason}`);
+    if ((!result?.ok || !result.text) && MATERIALIZE_LATEST_RETRY_MODELS.has(llmName)) {
+      emitTelemetry(llmName, 'MATERIALIZE_EVIDENCE_RETRY_WAIT', {
+        level: 'warning',
+        details: `${MATERIALIZE_LATEST_RETRY_WAIT_MS}ms`,
+        meta: { reason, tabId, dispatchId, firstStatus: result?.status || null, firstReason: result?.reason || null },
+        force: true
+      });
+      await orchestratorSleepMs(MATERIALIZE_LATEST_RETRY_WAIT_MS);
+      result = await collectOnce(`materialize_latest_retry:${reason}`);
+    }
+    if (result?.ok && result.text) {
+      const summary = consider({
+        source: result.source || 'late_collect',
+        text: result.text,
+        html: result.html || '',
+        status: result.status || null,
+        candidates: result.candidates || result.candidateCount || 0,
+        selectorUsed: result.selectorUsed || null
+      });
+      if (summary.valid) return { ok: true, summary, result };
+      return { ok: false, summary, result, reason: summary.rejectReason || 'invalid_evidence' };
+    }
+    const missSummary = buildMaterializedEvidenceSummary(llmName, {
+      source: result?.source || 'none',
+      text: '',
+      status: result?.status || null,
+      candidates: result?.candidates || result?.candidateCount || 0
+    }, { valid: false, rejectReason: result?.reason || result?.status || 'no_answer_extracted', source: result?.source || 'none' });
+    emitEvidence('MATERIALIZE_EVIDENCE_MISS', missSummary, 'warning');
+    return { ok: false, summary: missSummary, result, reason: missSummary.rejectReason };
+  }
+
+  const missingTabSummary = buildMaterializedEvidenceSummary(llmName, {
+    source: 'none',
+    text: ''
+  }, { valid: false, rejectReason: 'tab_not_collectable', source: 'none' });
+  emitEvidence('MATERIALIZE_EVIDENCE_MISS', missingTabSummary, 'warning');
+  return { ok: false, summary: missingTabSummary, reason: 'tab_not_collectable' };
+}
+
 function hasFullSnapshotCompletionEvidence(entry, textLength, completionReason, responseSource) {
   const length = Number(textLength || 0);
   if (!entry || length < 500) return false;
@@ -938,6 +1093,7 @@ function shouldMaterializeBeforeTerminal(llmName, finalStatus, finalReason, erro
   if (!PRE_TERMINAL_MATERIALIZE_MODELS.has(llmName)) return false;
   if (metaObj?.preTerminalMaterializeFinal || metaObj?.manualRecovery || metaObj?.responseMeta?.manualRecovery) return false;
   const status = String(finalStatus || '').toUpperCase();
+  if (Array.isArray(FAILURE_STATUSES) && FAILURE_STATUSES.includes(status)) return true;
   if (!PRE_TERMINAL_MATERIALIZE_STATUSES.has(status)) return false;
   const errorType = String(error?.type || '').toLowerCase();
   const reason = String(finalReason || error?.message || '').toLowerCase();
@@ -1015,26 +1171,30 @@ async function runPreTerminalMaterializeRecovery(llmName, tabId, sessionId, reas
     if (!afterVisit || isFinalizedEntry(afterVisit)) {
       return { ok: false, reason: 'finalized_during_materialize' };
     }
-    const result = await lateCollectAnswer({
-      llmName,
+    const evidence = await materializeLatestAnswerEvidence(llmName, afterVisit, {
       tabId,
+      sessionId,
+      runSessionId: sessionId,
+      dispatchId: meta?.dispatchId || entry?.lastDispatchMeta?.dispatchId || null,
       reason: `materialize_recovery:${reason}`,
-      meta: {
-        ...(meta || {}),
-        preTerminalMaterialize: true,
-        source: `materialize_recovery:${reason}`
-      },
-      minChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+      meta
     });
-    if (result?.ok && result.text) {
+    const result = evidence?.result || null;
+    if (evidence?.ok && result?.text) {
       const accepted = acceptLateCollectResult(llmName, result, {
         ...(meta || {}),
         preTerminalMaterialize: true,
+        materializeLatestEvidence: true,
         responseMeta: {
           source: result.source || 'materialize_recovery',
           completionReason: result.status === 'partial_from_snapshot' ? 'soft_timeout' : 'materialize_recovery',
           sanityConfidence: result.status === 'partial_from_snapshot' ? 0.72 : 0.86,
-          partial: result.status === 'partial_from_snapshot'
+          partial: result.status === 'partial_from_snapshot',
+          recovered: true,
+          recoverySource: result.source || evidence.summary?.source || 'materialize_recovery',
+          evidenceSource: evidence.summary?.source || result.source || null,
+          evidenceHash: evidence.summary?.hash || hashEvidenceText(result.text),
+          evidenceLength: evidence.summary?.length || String(result.text || '').length
         }
       });
       emitTelemetry(llmName, accepted ? 'MATERIALIZE_RECOVERY_SUCCESS' : 'MATERIALIZE_RECOVERY_REJECTED', {
@@ -1054,18 +1214,22 @@ async function runPreTerminalMaterializeRecovery(llmName, tabId, sessionId, reas
     }
     emitTelemetry(llmName, 'MATERIALIZE_RECOVERY_MISS', {
       level: 'warning',
-      details: result?.reason || result?.status || 'no_answer',
+      details: evidence?.reason || result?.reason || result?.status || 'no_answer',
       meta: {
         tabId,
         reason,
         status: result?.status || null,
         candidates: result?.candidates || result?.candidateCount || 0,
         source: result?.source || null,
+        evidenceSource: evidence?.summary?.source || null,
+        evidenceLen: Number(evidence?.summary?.length || 0),
+        evidenceHash: evidence?.summary?.hash || null,
+        rejectReason: evidence?.summary?.rejectReason || null,
         dispatchId: meta?.dispatchId || null
       },
       force: true
     });
-    return { ok: false, reason: result?.reason || result?.status || 'missed', result };
+    return { ok: false, reason: evidence?.reason || result?.reason || result?.status || 'missed', result, evidence: evidence?.summary || null };
   } catch (err) {
     emitTelemetry(llmName, 'MATERIALIZE_RECOVERY_ERROR', {
       level: 'warning',
@@ -3859,6 +4023,82 @@ function resolveModelDoneReason({ completionReason, finalStatus, finalReason, er
   return 'unknown';
 }
 
+function classifyFailure(error = null, context = {}) {
+  const responseMeta = context.responseMeta && typeof context.responseMeta === 'object' ? context.responseMeta : {};
+  const explicitClass = String(responseMeta.failureClass || context.failureClass || '').trim().toLowerCase();
+  const allowedClasses = new Set(['transport', 'lease_lifecycle', 'page_readiness', 'dispatch', 'generation', 'extraction', 'semantic', 'unknown']);
+  const rawType = String(error?.type || context.errorType || context.finalReason || '').trim();
+  const type = rawType.toLowerCase();
+  const message = String(error?.message || context.message || '').toLowerCase();
+  const reason = String(context.finalReason || responseMeta.completionReason || responseMeta.answerReason || '').toLowerCase();
+  const source = String(responseMeta.source || responseMeta.answerSource || context.responseSource || '').toLowerCase();
+  const haystack = [type, message, reason, source].filter(Boolean).join(' ');
+  const result = (failureClass, recoveryFirst = true, terminalRequiresEvidenceMiss = true) => ({
+    class: failureClass,
+    type: rawType || null,
+    reason: context.finalReason || error?.message || rawType || null,
+    source: responseMeta.source || responseMeta.answerSource || context.responseSource || null,
+    recoveryFirst: !!recoveryFirst,
+    terminalRequiresEvidenceMiss: !!terminalRequiresEvidenceMiss
+  });
+
+  if (explicitClass && allowedClasses.has(explicitClass)) {
+    return result(explicitClass, explicitClass !== 'semantic', true);
+  }
+  if (!error && context.isSuccess) return result('unknown', false, false);
+  if (!error && !rawType && !haystack) return result('unknown', false, false);
+
+  if (
+    /transport|message_channel|message channel|message port|port closed|receiving end|connection|could not establish|ping_transport|runtime\.lasterror/.test(haystack)
+  ) {
+    return result('transport', true, true);
+  }
+  if (
+    /script_runtime_hard_stop|background-force-stop|force_stop|tab_closed|tab closed|lifecycle|concurrent_request|request already running/.test(haystack)
+  ) {
+    return result('lease_lifecycle', true, true);
+  }
+  if (
+    /wrong_page|page_ready|page readiness|login|required_login|captcha|tab_not_ready|ack_timeout|handshake_timeout|script_not_ready/.test(haystack)
+  ) {
+    return result('page_readiness', true, true);
+  }
+  if (
+    /send_failed|no_send|submit_timeout|prompt_submit|prompt_submitted_timeout|dispatch_error|dispatch_send|tab reference|tab not found|circuit_open/.test(haystack)
+  ) {
+    return result('dispatch', true, true);
+  }
+  if (
+    /hard_timeout|soft_timeout|stream_start_timeout|streaming_incomplete|generation|busy|stop_visible|content_growing/.test(haystack)
+  ) {
+    return result('generation', true, true);
+  }
+  if (
+    /extract_failed|empty_answer|answer_element_missing|no_answer_extracted|selector|late_collect_failed|answer_missing/.test(haystack)
+  ) {
+    return result('extraction', true, true);
+  }
+  if (
+    /answer_prompt_echo|prompt_echo|status text|non-answer|rate_limit|rate limit|policy|blocked|semantic/.test(haystack)
+  ) {
+    return result('semantic', false, true);
+  }
+  return result('unknown', true, true);
+}
+
+function deriveFailureFinalStatus(error = null, sendConfirmed = null, failure = null) {
+  const type = String(error?.type || failure?.type || '').toLowerCase();
+  const failureClass = String(failure?.class || '').toLowerCase();
+  if (sendConfirmed === false) return 'NO_SEND';
+  if (type === 'send_failed' || type === 'no_send') return 'NO_SEND';
+  if (failureClass === 'dispatch' && /send|submit|dispatch|no_send/.test(type)) return type === 'no_send' || /send|submit/.test(type) ? 'NO_SEND' : 'ERROR';
+  if (['extract_failed', 'empty_answer', 'answer_element_missing', 'answer_prompt_echo'].includes(type)) return 'EXTRACT_FAILED';
+  if (['extraction', 'semantic'].includes(failureClass) && !/^rate_limit|captcha/.test(type)) return 'EXTRACT_FAILED';
+  if (type === 'stream_start_timeout') return 'STREAM_TIMEOUT';
+  if (failureClass === 'generation' && /stream_start_timeout/.test(type)) return 'STREAM_TIMEOUT';
+  return 'ERROR';
+}
+
 
 function normalizeEvidenceText(value = '') {
   return String(value || '')
@@ -3986,6 +4226,14 @@ function buildFinalizationEvidence(llmName, entry, context = {}) {
   const error = context.error || null;
   const finalStatus = String(context.finalStatus || '').toUpperCase();
   const responseMeta = context.responseMeta && typeof context.responseMeta === 'object' ? context.responseMeta : {};
+  const failureClassification = context.failureClassification && typeof context.failureClassification === 'object'
+    ? context.failureClassification
+    : classifyFailure(context.error || null, {
+      responseMeta,
+      responseSource: context.responseSource || null,
+      finalReason: context.finalReason || null,
+      isSuccess: SUCCESS_STATUSES.includes(String(context.finalStatus || '').toUpperCase())
+    });
   const dispatchId = context.dispatchId || context.metaObj?.dispatchId || entry?.lastDispatchMeta?.dispatchId || null;
   const promptSubmittedAt = Number(entry?.promptSubmittedAt || 0) || null;
   const lastDispatchAt = Number(entry?.lastDispatchAt || 0) || null;
@@ -4038,6 +4286,9 @@ function buildFinalizationEvidence(llmName, entry, context = {}) {
     completionReason: context.completionReason || null,
     errorType: error?.type || null,
     errorMessage: error?.message || null,
+    failureClass: failureClassification?.class || null,
+    failureRecoveryFirst: failureClassification?.recoveryFirst ?? null,
+    terminalRequiresEvidenceMiss: failureClassification?.terminalRequiresEvidenceMiss ?? null,
     preFinalRecovery,
     manualRecovery,
     terminalFailure,
@@ -4153,6 +4404,47 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
 
   const entry = jobState.llms?.[llmName];
   const metaObj = meta && typeof meta === 'object' ? meta : null;
+  const earlyResponseMeta = (() => {
+    if (!metaObj || typeof metaObj !== 'object') return {};
+    const merged = {};
+    [metaObj.response, metaObj.responseMeta, metaObj.answerMeta, metaObj.pipelineMeta].forEach((candidate) => {
+      if (candidate && typeof candidate === 'object') Object.assign(merged, candidate);
+    });
+    return merged;
+  })();
+  const earlyAnswerText = (() => {
+    if (answer && typeof answer === 'object') return String(answer.text || answer.answer || '');
+    return typeof answer === 'string' ? answer : String(answer ?? '');
+  })().trim();
+  const earlyIsSuccess = !error && !!earlyAnswerText && !/^error\s*:/i.test(earlyAnswerText);
+  const earlyFailureClassification = earlyIsSuccess
+    ? null
+    : classifyFailure(error, {
+      responseMeta: earlyResponseMeta,
+      responseSource: earlyResponseMeta?.source || metaObj?.source || null
+    });
+  const earlyFinalStatus = earlyIsSuccess
+    ? (earlyResponseMeta?.partial ? 'PARTIAL' : 'SUCCESS')
+    : deriveFailureFinalStatus(error, null, earlyFailureClassification);
+  const earlySource = String(earlyResponseMeta?.source || metaObj?.source || '').toLowerCase();
+  const allowRecoveredFinalOverride = Boolean(
+    earlyIsSuccess
+    && (
+      metaObj?.manualRecovery
+      || metaObj?.preTerminalMaterialize
+      || metaObj?.preTerminalMaterializeFinal
+      || metaObj?.materializeLatestEvidence
+      || earlyResponseMeta?.manualRecovery
+      || earlyResponseMeta?.manualOverride
+      || earlyResponseMeta?.preTerminalMaterialize
+      || earlyResponseMeta?.recovered
+      || earlyResponseMeta?.forceTerminalSuccess
+      || earlyResponseMeta?.lateCollectFinal
+      || earlySource.includes('late_collect')
+      || earlySource.includes('materialize')
+      || earlySource.includes('snapshot')
+    )
+  );
   const pipelineControl = getActivePipelineControlState();
   const incomingPipelineRunId = metaObj?.pipelineRunId || metaObj?.runSessionId || jobState?.session?.pipelineRunId || pipelineControl?.pipelineRunId || null;
   const incomingTabSessionId = metaObj?.tabSessionId || metaObj?.responseMeta?.tabSessionId || metaObj?.pipelineTabSessionId || null;
@@ -4187,7 +4479,9 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
       llmName,
       dispatchId: metaObj?.dispatchId || entry?.lastDispatchMeta?.dispatchId || null,
       tabSessionId: incomingTabSessionId,
-      kind: 'final'
+      kind: 'final',
+      finalStatus: earlyFinalStatus,
+      allowRecoveredFinal: allowRecoveredFinalOverride
     });
     if (!acceptance.ok) {
       appendLogEntry(llmName, {
@@ -4235,6 +4529,13 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
     : (typeof responseMeta?.confirmed === 'boolean' ? responseMeta.confirmed : null);
   const sendMethod = responseMeta?.sendMethod || responseMeta?.method || null;
   const responseSource = responseMeta?.source || responseMeta?.answerSource || null;
+  const failureClassification = classifyFailure(error, {
+    responseMeta,
+    responseSource,
+    sendConfirmed,
+    finalReason: error?.type || error?.message || null,
+    isSuccess: false
+  });
   const manualTerminalOverrideRequested = Boolean(
     metaObj?.manualRecovery
     || responseMeta?.manualRecovery
@@ -4402,17 +4703,8 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
     finalStatus = isPartial ? (streamTimeoutHidden ? 'STREAM_TIMEOUT_HIDDEN' : 'PARTIAL') : 'SUCCESS';
     const normalizedReason = (!isPartial && completionSuggestsPartial) ? 'ok' : completionReason;
     finalReason = normalizedReason || (isPartial ? 'partial' : 'ok');
-  } else if (error?.type === 'send_failed' || error?.type === 'no_send' || sendConfirmed === false) {
-    finalStatus = 'NO_SEND';
-    finalReason = error?.type || 'no_send';
-  } else if (error?.type === 'extract_failed' || error?.type === 'empty_answer' || error?.type === 'answer_element_missing' || error?.type === 'answer_prompt_echo') {
-    finalStatus = 'EXTRACT_FAILED';
-    finalReason = error?.type || 'extract_failed';
-  } else if (error?.type === 'stream_start_timeout') {
-    finalStatus = 'STREAM_TIMEOUT';
-    finalReason = error?.type || 'stream_start_timeout';
   } else {
-    finalStatus = 'ERROR';
+    finalStatus = deriveFailureFinalStatus(error, sendConfirmed, failureClassification);
     finalReason = error?.type || error?.message || 'error';
   }
 
@@ -4701,6 +4993,7 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
     trimmedAnswer,
     sendConfirmed,
     completionReason,
+    failureClassification: isSuccess ? null : failureClassification,
     allowTerminalUpgrade
   });
   const finalizationEvidence = answerEvaluation.evidence;
@@ -4780,13 +5073,17 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
       hardStopReason,
       sanityWarnings,
       sanityConfidence,
+      failureClass: isSuccess ? null : failureClassification?.class || 'unknown',
+      failureRecoveryFirst: isSuccess ? null : !!failureClassification?.recoveryFirst,
+      terminalRequiresEvidenceMiss: isSuccess ? null : !!failureClassification?.terminalRequiresEvidenceMiss,
       finalizationEvidence
     }
   });
   updateModelState(llmName, finalStatus, {
     message: finalReason || '',
     completionReason,
-    hardStopReason
+    hardStopReason,
+    failureClass: isSuccess ? null : failureClassification?.class || 'unknown'
   });
   clearBudgetPhases(llmName);
   clearAdaptiveCollectTimer(llmName);
@@ -4872,6 +5169,9 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
       reason: finalReason,
       completionReason,
       hardStopReason,
+      failureClass: isSuccess ? null : failureClassification?.class || 'unknown',
+      failureRecoveryFirst: isSuccess ? null : !!failureClassification?.recoveryFirst,
+      terminalRequiresEvidenceMiss: isSuccess ? null : !!failureClassification?.terminalRequiresEvidenceMiss,
       finalizationEvidence
     },
     logs: getLogSnapshot(llmName)
@@ -4879,10 +5179,17 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
 
   const alreadyFinalized = entry?.finalStatusRecorded && entry?.finalizedAt && entry?.finalStatus;
   if (entry) {
+    const projectedResponseMeta = isSuccess ? responseMeta : {
+      ...(responseMeta || {}),
+      failureClass: failureClassification?.class || 'unknown',
+      failureType: failureClassification?.type || error?.type || null,
+      failureRecoveryFirst: !!failureClassification?.recoveryFirst,
+      terminalRequiresEvidenceMiss: !!failureClassification?.terminalRequiresEvidenceMiss
+    };
     const finalProjection = {
       earlyTerminalGuard: null,
       earlyTerminalGuardNextPingAt: 0,
-      responseMeta
+      responseMeta: projectedResponseMeta
     };
     if (!alreadyFinalized || allowTerminalUpgrade || allowManualTerminalOverride) {
       finalProjection.answer = normalizedAnswer;
@@ -4920,6 +5227,8 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
         runSessionId: jobState?.session?.startTime || null,
         manualRecovery: allowManualTerminalOverride,
         allowTerminalUpgrade,
+        failureClass: isSuccess ? null : failureClassification?.class || 'unknown',
+        failureType: isSuccess ? null : failureClassification?.type || error?.type || null,
         source: 'handleLLMResponse_final_projection'
       };
       if (self.commitModelRunTransition) {
@@ -4981,6 +5290,7 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
     } else {
       self.DispatchCircuit.recordDispatchFailure(llmName, {
         type: error?.type || finalReason || finalStatus || 'error',
+        failureClass: failureClassification?.class || 'unknown',
         message: error?.message || ''
       });
     }
@@ -5485,6 +5795,8 @@ function sendCleanupCommand(llmName) {
   self.buildEarlyTerminalGuardSignature = buildEarlyTerminalGuardSignature;
   self.maybeDeferEarlyTerminalSuccess = maybeDeferEarlyTerminalSuccess;
   self.normalizeEvidenceText = normalizeEvidenceText;
+  self.classifyFailure = classifyFailure;
+  self.deriveFailureFinalStatus = deriveFailureFinalStatus;
   self.isPromptEchoAnswerCandidate = isPromptEchoAnswerCandidate;
   self.buildAnswerCandidate = buildAnswerCandidate;
   self.evaluateAnswerCandidate = evaluateAnswerCandidate;

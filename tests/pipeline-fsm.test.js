@@ -136,6 +136,49 @@ describe('PipelineFSM lifecycle guard', () => {
     expect(cancelled.state).toBe('CANCELLED');
   });
 
+  test('allows recovered success to override a recoverable failure final', () => {
+    const control = PipelineFSM.startRun({
+      pipelineRunId: 'run-recovery',
+      sessionId: 4004,
+      stage: 'awaiting_final'
+    });
+    PipelineFSM.registerDispatch(control, {
+      llmName: 'Qwen',
+      dispatchId: 'dispatch-recovery',
+      tabId: 9,
+      tabSessionId: 'tab-session-recovery',
+      pipelineRunId: 'run-recovery',
+      sessionId: 4004
+    });
+    expect(PipelineFSM.markFinal(control, {
+      llmName: 'Qwen',
+      dispatchId: 'dispatch-recovery',
+      tabSessionId: 'tab-session-recovery',
+      pipelineRunId: 'run-recovery',
+      finalStatus: 'NO_SEND',
+      reason: 'prompt_not_confirmed'
+    }).ok).toBe(true);
+
+    expect(PipelineFSM.shouldAcceptEvent(control, {
+      pipelineRunId: 'run-recovery',
+      llmName: 'Qwen',
+      dispatchId: 'dispatch-recovery',
+      tabSessionId: 'tab-session-recovery',
+      kind: 'final',
+      finalStatus: 'SUCCESS'
+    }).reason).toBe('duplicate_final');
+
+    expect(PipelineFSM.shouldAcceptEvent(control, {
+      pipelineRunId: 'run-recovery',
+      llmName: 'Qwen',
+      dispatchId: 'dispatch-recovery',
+      tabSessionId: 'tab-session-recovery',
+      kind: 'final',
+      finalStatus: 'SUCCESS',
+      allowRecoveredFinal: true
+    }).reason).toBe('recovered_final_override');
+  });
+
   test('compacts large jobState payloads before persistence', () => {
     const compacted = PipelineFSM.compactJobStateForStorage({
       prompt: 'prompt',

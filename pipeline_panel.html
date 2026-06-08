@@ -7,7 +7,7 @@
     <title>LLM Comparison</title>
     <link rel="stylesheet" href="styles.css">
 </head>
-<body>
+<body class="pipeline-page">
     <div class="app-shell">
         <aside class="app-sidebar app-sidebar-left" id="notes-sidebar" aria-label="Notes">
             <div class="notes-top">
@@ -33,12 +33,12 @@
                             <input type="checkbox" id="notes-select-all" aria-label="Select all notes">
                             <span></span>
                         </label>
-                        <button type="button" class="notes-action-btn notes-export-btn" id="notes-export-btn" aria-label="Export selected" title="Export selected">⬆</button>
-                        <button type="button" class="notes-action-btn notes-delete-btn" id="notes-delete-btn" aria-label="Delete selected" title="Delete selected">🗑️</button>
+                        <button type="button" class="notes-action-btn notes-export-btn" id="notes-export-btn" aria-label="Export selected" title="Export selected"><i class="ti ti-download" aria-hidden="true"></i></button>
+                        <button type="button" class="notes-action-btn notes-delete-btn" id="notes-delete-btn" aria-label="Delete selected" title="Delete selected"><i class="ti ti-trash" aria-hidden="true"></i></button>
                     </div>
                     <div class="sessions-toolbar" id="sessions-toolbar" aria-label="Sessions toolbar">
                         <button type="button" class="sessions-action-btn sessions-save-btn" id="sessions-save-btn" aria-label="Save session">Save</button>
-                        <button type="button" class="sessions-action-btn sessions-delete-btn" id="sessions-delete-btn" aria-label="Delete session">🗑️</button>
+                        <button type="button" class="sessions-action-btn sessions-delete-btn" id="sessions-delete-btn" aria-label="Delete session"><i class="ti ti-trash" aria-hidden="true"></i></button>
                     </div>
                 </div>
                 <div class="notes-tabs-bar">
@@ -59,7 +59,7 @@
                 <div class="sidebar-hint">
                     <span id="notes-status">Stored locally on this device.</span>
                     <div class="sidebar-hint-actions">
-                        <button type="button" class="sidebar-hint-action" id="notes-hint-backup-export" title="Export backup" aria-label="Export notes and sessions">↑</button>
+                        <button type="button" class="sidebar-hint-action" id="notes-hint-backup-export" title="Export backup" aria-label="Export notes and sessions"><i class="ti ti-download" aria-hidden="true"></i></button>
                         <button type="button" class="sidebar-hint-action" id="notes-hint-backup-import" title="Import backup" aria-label="Import notes and sessions">↓</button>
                     </div>
                 </div>
@@ -71,7 +71,13 @@
                 <div class="top-control-bar">
                     <div class="top-bar-left">
                         <button type="button" class="sidebar-toggle-btn" id="left-sidebar-toggle" aria-pressed="false" data-tooltip="Notes panel" aria-label="Notes">
-                            <span class="sidebar-toggle-icon" aria-hidden="true">⍈</span>
+                            <svg class="sidebar-toggle-icon sidebar-toggle-icon-note" viewBox="0 0 80 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                <path d="M6,0 L56,0 L80,26 L80,84 Q80,90 74,90 L6,90 Q0,90 0,84 L0,6 Q0,0 6,0 Z" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"></path>
+                                <path d="M56,0 L56,26 L80,26" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                                <line x1="14" y1="44" x2="66" y2="44" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></line>
+                                <line x1="14" y1="58" x2="66" y2="58" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></line>
+                                <line x1="14" y1="72" x2="66" y2="72" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></line>
+                            </svg>
                             <span class="sr-only">Notes</span>
                         </button>
                         <div class="logo-badge">
@@ -133,13 +139,16 @@
                             <input type="checkbox" id="new-pages-checkbox" class="top-new-pages-checkbox" checked="">
                             <span class="top-toggle-track"><span class="top-toggle-thumb"></span></span>
                         </label>
-                        <label class="top-new-pages-toggle" data-tooltip="Auto debate mode: ON = without moderator confirmation, OFF = with manual moderator confirmation.">
-                            <span class="top-new-pages-text">Auto</span>
-                            <input type="checkbox" id="auto-checkbox" class="top-new-pages-checkbox">
-                            <span class="top-toggle-track"><span class="top-toggle-thumb"></span></span>
-                        </label>
                         <button type="button" class="sidebar-toggle-btn right-sidebar-toggle-btn" id="right-sidebar-toggle" aria-pressed="false" aria-controls="pipeline-sidebar" data-tooltip="Pipeline panel" aria-label="Pipeline">
-                            <span class="sidebar-toggle-icon" aria-hidden="true">⍈</span>
+                            <svg class="sidebar-toggle-icon sidebar-toggle-icon-branch-v3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <circle cx="6" cy="3" r="2"></circle>
+                                <line x1="6" y1="5" x2="6" y2="10"></line>
+                                <circle cx="6" cy="12" r="2"></circle>
+                                <line x1="6" y1="14" x2="6" y2="17"></line>
+                                <circle cx="6" cy="19" r="2"></circle>
+                                <circle cx="18" cy="3" r="2"></circle>
+                                <path d="M8 12 C18 12 18 8 18 5"></path>
+                            </svg>
                             <span class="sr-only">Pipeline</span>
                         </button>
 
@@ -160,9 +169,9 @@
     <!-- Кнопки копирования и очистки теперь внутри обертки, но позиционируются абсолютно -->
     <input type="file" id="prompt-attach-input" class="visually-hidden" multiple="">
     <div class="debate-sel-toolbar" id="debateSelTb" aria-label="Selected text actions">
-        <button class="stb col" style="background:#fde68a;border-color:#f59e0b" data-color="#fde68a" title="Yellow highlight" aria-label="Yellow highlight"><span class="stb-label">Yellow</span></button>
-        <button class="stb col" style="background:#bbf7d0;border-color:#22c55e" data-color="#bbf7d0" title="Green highlight" aria-label="Green highlight"><span class="stb-label">Green</span></button>
-        <button class="stb col" style="background:#bfdbfe;border-color:#3b82f6" data-color="#bfdbfe" title="Blue highlight" aria-label="Blue highlight"><span class="stb-label">Blue</span></button>
+        <button class="stb col" style="background:#FFEB3B;border-color:#fbc02d" data-color="#FFEB3B" title="Yellow highlight" aria-label="Yellow highlight"><span class="stb-label">Yellow</span></button>
+        <button class="stb col" style="background:#05e56d;border-color:#00c853" data-color="#05e56d" title="Green highlight" aria-label="Green highlight"><span class="stb-label">Green</span></button>
+        <button class="stb col" style="background:#f44336;border-color:#d32f2f" data-color="#f44336" title="Blue highlight" aria-label="Blue highlight"><span class="stb-label">Blue</span></button>
         <div style="width:1px;background:rgba(255,255,255,.2);margin:2px 3px;height:14px;flex-shrink:0"></div>
         <button class="stb" data-cmd="bold" title="Bold" aria-label="Bold"><span class="stb-label">Bold</span></button>
         <button class="stb" data-cmd="italic" title="Italic" aria-label="Italic"><span class="stb-label">Italic</span></button>
@@ -179,13 +188,19 @@
         </div>
         <div class="debate-session-actions">
             <button type="button" id="debate-auto-pause-btn" class="ib hidden" title="Pause auto debate" aria-label="Pause auto debate">Ⅱ</button>
-            <button type="button" id="debate-session-copy-btn" class="ib" title="Copy feed" aria-label="Copy feed">⧉</button>
-            <button type="button" id="debate-session-export-btn" class="ib" title="Export feed as HTML" aria-label="Export feed as HTML">⬆</button>
-            <button type="button" id="debate-session-clear-btn" class="ib" title="Clear feed" aria-label="Clear feed">🗑️</button>
+            <button type="button" id="debate-session-copy-btn" class="ib" title="Copy feed" aria-label="Copy feed"><i class="ti ti-copy" aria-hidden="true"></i></button>
+            <button type="button" id="debate-session-export-btn" class="ib" title="Export feed as HTML" aria-label="Export feed as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+            <button type="button" id="debate-session-clear-btn" class="ib" title="Clear feed" aria-label="Clear feed"><i class="ti ti-trash" aria-hidden="true"></i></button>
         </div>
     </div>
     <div class="debate-model-cards" id="debate-model-cards" aria-live="polite"></div>
     <div class="moderator-input" id="moderator-input">
+        <div class="mod-middle">
+            <div id="mod-message-body" class="mod-message-body"></div>
+            <div class="mod-compose-row">
+                <textarea id="modTa" placeholder="Ваш комментарий или управляющий запрос…" oninput="growTA(this)"></textarea>
+            </div>
+        </div>
         <div class="msg-header">
             <div class="msg-head-left">
                 <select id="mod-sender-select" class="mod-select" aria-label="Sender model">
@@ -204,42 +219,43 @@
                 </select>
             </div>
             <div class="msg-head-right">
-                <div class="mod-controls">
-                    <select id="debate-length-select" class="mod-select mod-select-compact" aria-label="Debate length">
-                        <option value="300">300</option>
-                        <option value="500" selected="">500</option>
-                        <option value="700">700</option>
-                        <option value="1000">1000</option>
-                        <option value="inf">∞</option>
-                    </select>
-                    <select id="debate-action-select" class="mod-select mod-select-wide" aria-label="Moderator action">
-                        <option value="">Action</option>
-                        <option value="harden">Harden Critique</option>
-                        <option value="compare">Compare by Criteria</option>
-                        <option value="example">Add Concrete Example</option>
-                        <option value="assumptions">Find Assumptions</option>
-                        <option value="counter">Request Counterexample</option>
-                        <option value="mvp">Translate to MVP</option>
-                        <option value="grounding">Grounding Plan</option>
-                        <option value="final">Final Synthesis</option>
-                    </select>
+                <div class="msg-head-right-top">
+                    <div class="mod-controls">
+                        <select id="debate-length-select" class="mod-select mod-select-compact" aria-label="Debate length">
+                            <option value="300">300</option>
+                            <option value="500" selected="">500</option>
+                            <option value="700">700</option>
+                            <option value="1000">1000</option>
+                            <option value="inf">∞</option>
+                        </select>
+                        <select id="debate-action-select" class="mod-select mod-select-wide" aria-label="Moderator action">
+                            <option value="">Action</option>
+                            <option value="harden">Harden Critique</option>
+                            <option value="compare">Compare by Criteria</option>
+                            <option value="example">Add Concrete Example</option>
+                            <option value="assumptions">Find Assumptions</option>
+                            <option value="counter">Request Counterexample</option>
+                            <option value="mvp">Translate to MVP</option>
+                            <option value="grounding">Grounding Plan</option>
+                            <option value="final">Final Synthesis</option>
+                        </select>
+                    </div>
+                    <label class="top-new-pages-toggle" data-tooltip="Auto debate mode: ON = without moderator confirmation, OFF = with manual moderator confirmation.">
+                        <span class="top-new-pages-text">Auto</span>
+                        <input type="checkbox" id="auto-checkbox" class="top-new-pages-checkbox">
+                        <span class="top-toggle-track"><span class="top-toggle-thumb"></span></span>
+                    </label>
+                    <button type="button" id="mod-send-btn" class="mod-send-btn" title="Send"><i class="ti ti-send"></i></button>
                 </div>
                 <div class="mod-mini-prompts" id="mod-mini-prompts"></div>
             </div>
         </div>
-        <div class="mod-middle">
-            <div id="mod-message-body" class="mod-message-body"></div>
-            <div class="mod-compose-row">
-                <textarea id="modTa" placeholder="Ваш комментарий или управляющий запрос…" oninput="growTA(this)"></textarea>
-                <button type="button" id="mod-send-btn" class="mod-send-btn" title="Send"><i class="ti ti-send"></i></button>
-            </div>
-        </div>
     </div>
     <div id="suffix-container" class="modifier-chips-container"></div>
-    <button type="button" id="prompt-copy-btn" class="prompt-copy-btn hidden" title="Copy prompt" aria-label="Copy prompt">⧉</button>
-    <button type="button" id="prompt-export-html-btn" class="prompt-export-btn hidden" title="Export feed as HTML" aria-label="Export feed as HTML">⬆</button>
-    <button type="button" id="clear-prompt-btn" class="prompt-clear-btn hidden" title="Clear prompt">🗑️</button>
-    <button id="start-button" class="send-button send-button-floating hidden" title="Send prompt">▶</button>
+    <button type="button" id="prompt-copy-btn" class="prompt-copy-btn hidden" title="Copy prompt" aria-label="Copy prompt"><i class="ti ti-copy" aria-hidden="true"></i></button>
+    <button type="button" id="prompt-export-html-btn" class="prompt-export-btn hidden" title="Export feed as HTML" aria-label="Export feed as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+    <button type="button" id="clear-prompt-btn" class="prompt-clear-btn hidden" title="Clear prompt"><i class="ti ti-trash" aria-hidden="true"></i></button>
+    <button id="start-button" class="send-button send-button-floating hidden" title="Send prompt"><i class="ti ti-send" aria-hidden="true"></i></button>
 </div>
 <div class="attachment-bar" id="prompt-attachment-bar" aria-live="polite"></div>
             </div>
@@ -249,16 +265,15 @@
 <div class="llm-controls">
     <div class="control-buttons">
         <button type="button" class="pipeline-panel-toggle-title panel-title" id="pipeline-panel-toggle-title" aria-expanded="true">
-            <svg class="shuffle-icon" viewBox="0 0 68 50" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <defs>
-                    <path id="upperLinePipelineIcon" d="M5 14H19 C25 14 28 19 32 25 C36 31 39 36 45 36 H53"></path>
-                </defs>
-                <path class="shuffle-path" d="M5 36H19 C25 36 28 31 32 25 C36 19 39 14 45 14 H53" stroke="currentColor" stroke-width="7.5" stroke-linecap="butt" stroke-linejoin="miter"></path>
-                <use href="#upperLinePipelineIcon" stroke="white" stroke-width="18.314" stroke-linecap="butt" stroke-linejoin="miter"></use>
-                <use href="#upperLinePipelineIcon" stroke="currentColor" stroke-width="7.5" stroke-linecap="butt" stroke-linejoin="miter"></use>
-                <polygon points="52,7 65,14 52,21" fill="currentColor"></polygon>
-                <polygon points="52,29 65,36 52,43" fill="currentColor"></polygon>
-            </svg>
+            <span class="pipeline-panel-toggle-icons" aria-hidden="true">
+                <svg class="pipeline-panel-toggle-compare-icon" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="160" cy="40" r="22" stroke="currentColor" stroke-width="14" stroke-linecap="round"></circle>
+                    <circle cx="40" cy="100" r="22" stroke="currentColor" stroke-width="14" stroke-linecap="round"></circle>
+                    <circle cx="160" cy="160" r="22" stroke="currentColor" stroke-width="14" stroke-linecap="round"></circle>
+                    <line x1="62" y1="89" x2="138" y2="52" stroke="currentColor" stroke-width="9" stroke-linecap="round"></line>
+                    <line x1="62" y1="111" x2="138" y2="148" stroke="currentColor" stroke-width="9" stroke-linecap="round"></line>
+                </svg>
+            </span>
             <span>Pipeline</span>
         </button>
         <div class="pipeline-panel pipeline-panel-inline" id="pipeline-panel">
@@ -477,7 +492,7 @@
                                     <div class="telemetry-actions">
                                         <button type="button" class="diag-icon-btn diag-export-all-logs-btn" id="export-all-logs-md-telemetry" aria-label="Export diagnostics and telemetry as Markdown" title="Export All Logs">Export</button>
                                         <button type="button" class="devtools-pill-btn" id="telemetry-refresh-btn" title="Refresh" aria-label="Refresh">↻</button>
-                                        <button type="button" class="devtools-pill-btn" id="telemetry-copy-btn" title="Copy" aria-label="Copy">⧉</button>
+                                        <button type="button" class="devtools-pill-btn" id="telemetry-copy-btn" title="Copy" aria-label="Copy"><i class="ti ti-copy" aria-hidden="true"></i></button>
                                         <button type="button" class="devtools-pill-btn" id="telemetry-export-json-btn" title="Export telemetry as JSON" aria-label="Export telemetry as JSON">{ }</button>
                                         <button type="button" class="devtools-pill-btn" id="telemetry-reset-btn" title="Reset" aria-label="Reset">🗑</button>
                                     </div>
@@ -502,9 +517,9 @@
                                         <div class="diagnostics-panel">
                                             <div class="diagnostics-header">
                                                 <div class="diagnostics-actions">
-                                                    <button type="button" class="diag-icon-btn diag-export-all-btn" id="export-diagnostics-html" aria-label="Export all diagnostics logs as HTML" title="Export all logs as HTML">⬆</button>
-                                                    <button type="button" class="diag-icon-btn diag-copy-all-btn" id="copy-diagnostics-logs" aria-label="Copy all diagnostics logs" title="Copy all logs">⧉</button>
-                                                    <button type="button" class="diag-icon-btn diag-clear-btn" id="clear-diagnostics-logs" aria-label="Clear diagnostics logs" title="Clear logs">🗑️</button>
+                                                    <button type="button" class="diag-icon-btn diag-export-all-btn" id="export-diagnostics-html" aria-label="Export all diagnostics logs as HTML" title="Export all logs as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+                                                    <button type="button" class="diag-icon-btn diag-copy-all-btn" id="copy-diagnostics-logs" aria-label="Copy all diagnostics logs" title="Copy all logs"><i class="ti ti-copy" aria-hidden="true"></i></button>
+                                                    <button type="button" class="diag-icon-btn diag-clear-btn" id="clear-diagnostics-logs" aria-label="Clear diagnostics logs" title="Clear logs"><i class="ti ti-trash" aria-hidden="true"></i></button>
                                                 </div>
                                             </div>
                                             <div class="diagnostics-log-wrapper" id="diagnostics-log-wrapper" data-log-pane="diagnostics">
@@ -574,7 +589,7 @@
                                                 <span id="selector-health-status" class="selector-health-status">no data</span>
                                             </div>
                                             <div class="selector-health-actions">
-                                                <button type="button" class="ghost-icon-btn" id="copy-selector-health-btn" title="Copy selector health" aria-label="Copy selector health">⧉</button>
+                                                <button type="button" class="ghost-icon-btn" id="copy-selector-health-btn" title="Copy selector health" aria-label="Copy selector health"><i class="ti ti-copy" aria-hidden="true"></i></button>
                                                 <button type="button" class="ghost-icon-btn" id="export-selector-health-btn" title="Export selector health JSON" aria-label="Export selector health JSON">{ }</button>
                                                 <button type="button" class="ghost-icon-btn" id="refresh-selector-health-btn" title="Refresh selector health" aria-label="Refresh selector health">↻</button>
                                             </div>
@@ -600,7 +615,7 @@
                                                 </label>
                                                 <div class="selectors-header-actions">
                                                     <button class="selectors-btn selectors-btn-export" type="button" data-selectors-action="export" aria-label="Export selectors">
-                                                        ⬆
+                                                        <i class="ti ti-download" aria-hidden="true"></i>
                                                     </button>
                                                     <button class="selectors-btn selectors-btn-import" type="button" data-selectors-action="import" aria-label="Import selectors">
                                                         ↓

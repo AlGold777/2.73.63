@@ -99,11 +99,169 @@ document.addEventListener('DOMContentLoaded', async () => {
             resolve(false);
         }
     });
+    const favoritePanelId = 'favorite-panel';
+    const favoriteOutputId = 'favorite-output';
+    const favoriteSectionId = 'favorites-section';
+    const favoriteStorageKey = 'llmComparatorFavoriteEntries';
+    const responseSelectionToolbarId = 'responseSelTb';
+    const favoriteState = {
+        entries: [],
+        nextId: 1,
+        cardKeyToId: new Map()
+    };
+    const responseSelectionState = {
+        range: null,
+        target: null
+    };
+    let favoriteSectionEl = null;
+    let favoritePanelEl = null;
+    let favoriteOutputEl = null;
+    let responseSelectionToolbarEl = null;
+    let responseSelectionToolbarBound = false;
+    const llmResultsContainer = document.querySelector('.llm-results');
+    const sanitizeInlineHtml = (html) => {
+        if (!html) return '';
+        if (typeof sanitizeHTML === 'function') {
+            return sanitizeHTML(String(html || ''));
+        }
+        return String(html || '');
+    };
+    const favoriteEntrySnapshot = (entry = {}) => ({
+        id: String(entry.id || '').trim(),
+        kind: String(entry.kind || 'fragment').trim() === 'card' ? 'card' : 'fragment',
+        sourceName: String(entry.sourceName || 'Model').trim() || 'Model',
+        modelKey: String(entry.modelKey || '').trim(),
+        sourceOutputId: String(entry.sourceOutputId || '').trim(),
+        text: String(entry.text || '').trim(),
+        html: sanitizeInlineHtml(String(entry.html || '').trim()),
+        timeLabel: String(entry.timeLabel || '').trim()
+    });
+    const favoriteEntriesSignature = (entries = []) => JSON.stringify(
+        Array.isArray(entries) ? entries.map((entry) => favoriteEntrySnapshot(entry)) : []
+    );
+    const favoriteStorageEntries = () => favoriteState.entries.map((entry) => favoriteEntrySnapshot(entry));
+    const favoriteNextIdFromEntries = (entries = []) => {
+        let nextId = 1;
+        entries.forEach((entry) => {
+            const match = String(entry?.id || '').match(/^fav-(\d+)$/);
+            if (!match) return;
+            nextId = Math.max(nextId, Number(match[1]) + 1);
+        });
+        return nextId;
+    };
+    const syncFavoriteStateFromEntries = (entries = [], { render = true } = {}) => {
+        const normalized = Array.isArray(entries) ? entries.map((entry) => favoriteEntrySnapshot(entry)).filter((entry) => entry.id || entry.text || entry.html) : [];
+        favoriteState.entries = normalized;
+        favoriteState.cardKeyToId.clear();
+        favoriteState.entries.forEach((entry) => {
+            if (entry.kind === 'card' && entry.sourceOutputId) {
+                favoriteState.cardKeyToId.set(favoriteEntryKeyForCard(entry.sourceOutputId), entry.id);
+            }
+        });
+        favoriteState.nextId = favoriteNextIdFromEntries(favoriteState.entries);
+        if (render) {
+            ensureFavoritePanelUI();
+            renderFavoritePanel();
+        }
+        return favoriteState.entries;
+    };
+    const persistFavoriteEntries = () => {
+        try {
+            chrome?.storage?.local?.set?.({ [favoriteStorageKey]: favoriteStorageEntries() });
+        } catch (err) {
+            console.warn('[RESULTS] Failed to persist favorites', err);
+        }
+    };
+    const loadFavoriteEntriesFromStorage = () => {
+        try {
+            chrome?.storage?.local?.get?.([favoriteStorageKey], (data) => {
+                const stored = Array.isArray(data?.[favoriteStorageKey]) ? data[favoriteStorageKey] : [];
+                const nextEntries = stored.map((entry) => favoriteEntrySnapshot(entry));
+                if (favoriteEntriesSignature(nextEntries) === favoriteEntriesSignature(favoriteState.entries)) return;
+                if (nextEntries.length) ensureFavoritePanelUI();
+                syncFavoriteStateFromEntries(nextEntries, { render: true });
+            });
+        } catch (err) {
+            console.warn('[RESULTS] Failed to load favorites', err);
+        }
+    };
+    const clearFavoriteEntriesOnLoad = () => {
+        try {
+            favoriteState.entries = [];
+            favoriteState.cardKeyToId.clear();
+            favoriteState.nextId = 1;
+            renderFavoritePanel();
+            chrome?.storage?.local?.remove?.([favoriteStorageKey]);
+        } catch (err) {
+            console.warn('[RESULTS] Failed to clear favorites on load', err);
+        }
+    };
+    window.clearFavoriteEntriesOnLoad = clearFavoriteEntriesOnLoad;
+    window.clearModifierSelectionsOnLoad = window.clearModifierSelectionsOnLoad || (() => {
+        try {
+            chrome?.storage?.local?.remove?.([
+                'llmComparatorSelected',
+                'llmComparatorSelectedByPreset',
+                'llmComparatorSelectedByPresetPipeline'
+            ]);
+        } catch (err) {
+            console.warn('[RESULTS] Failed to clear modifiers on load', err);
+        }
+    });
+    window.clearModifierSelectionsOnLoad?.();
+    const responseLinkContainerSelector = [
+        '.llm-panel .output',
+        '.response-content',
+        '#favorite-output',
+        '.response-body',
+        '.diag-detail',
+        '.diag-meta',
+        '.telemetry-log-list'
+    ].join(',');
+    const normalizeExternalLinkUrl = (href) => {
+        const raw = String(href || '').trim();
+        if (!raw || raw.startsWith('#')) return '';
+        try {
+            const url = new URL(raw, window.location.href);
+            if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) return '';
+            return url.href;
+        } catch (_) {
+            return '';
+        }
+    };
+    const decorateLinksForNewTab = (root) => {
+        if (!root?.querySelectorAll) return;
+        root.querySelectorAll('a[href]').forEach((anchor) => {
+            const url = normalizeExternalLinkUrl(anchor.getAttribute('href') || anchor.href);
+            if (!url) return;
+            anchor.href = url;
+            anchor.target = '_blank';
+            anchor.rel = 'noopener noreferrer';
+            anchor.setAttribute('contenteditable', 'false');
+            anchor.classList.add('response-external-link');
+        });
+    };
+    const openResponseLinkInNewTab = (url) => {
+        if (!url) return;
+        try {
+            if (typeof chrome !== 'undefined' && chrome?.tabs?.create) {
+                chrome.tabs.create({ url });
+                return;
+            }
+        } catch (_) {}
+        try {
+            window.open(url, '_blank', 'noopener,noreferrer');
+        } catch (_) {}
+    };
     const geometryBootKey = 'codexGeometryBoot';
     const hasGeometryBoot = Boolean(document.documentElement?.dataset?.[geometryBootKey]);
     if (document.documentElement) {
         document.documentElement.dataset[geometryBootKey] = String(Date.now());
     }
+    ensureFavoritePanelUI();
+    ensureMainCardFavoriteButtons();
+    ensureResponseSelectionToolbar();
+    bindMainPageFavoritesInteractions();
     await clearTelemetryOnReload();
     try {
         const currentPage = (window.location.pathname.split('/').pop() || '').toLowerCase();
@@ -136,6 +294,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
     //-- 2.1. Логика для переключения и сохранения состояния Pro-режима --//
     const proLink = document.getElementById('pro-header');
+    const proToggleWrapper = document.querySelector('.pro-toggle-wrapper');
+    const promptProToggleBtn = document.getElementById('pro-stream-toggle-btn');
     const justiceToggleBtn = document.getElementById('justice-toggle-btn');
     const proHeaderActionBlock = document.querySelector('.pro-toggle-bar .llm-action-block');
     const proModeStorageKey = 'llmComparatorProModeActive';
@@ -159,6 +319,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Добавляем явный флаг активности Pro — удобнее для CSS и будущих селекторов
     document.body.classList.toggle('pro-active', isActive);
+    if (proToggleWrapper) {
+        proToggleWrapper.hidden = !isActive;
+    }
+    if (promptProToggleBtn) {
+        promptProToggleBtn.setAttribute('aria-pressed', String(isActive));
+    }
+    const mainPromptContainer = document.querySelector('.prompt-container.prompt-sandwich.debate-composer')
+        || document.querySelector('.prompt-container.prompt-sandwich');
+    if (mainPromptContainer) {
+        mainPromptContainer.classList.toggle('has-debate-feed', isActive);
+    }
 
     // Обновляем атрибут состояния кнопки (доступность)
         if (proLink) {
@@ -166,11 +337,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     };
 
-    const storedData = await new Promise(resolve => {
-        chrome.storage.local.get(proModeStorageKey, data => resolve(data));
-    });
-
-    let isProModeActive = storedData[proModeStorageKey] || false;
+    let isProModeActive = false;
     updateProModeUI(isProModeActive);
 
     try {
@@ -207,6 +374,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             updateProModeUI(isProModeActive);
         });
     }
+
+    if (promptProToggleBtn) {
+        promptProToggleBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            isProModeActive = !isProModeActive;
+            chrome.storage.local.set({ [proModeStorageKey]: isProModeActive });
+            updateProModeUI(isProModeActive);
+        });
+    }
 //-- Конец блока 2.1 --//
     const deriveOutputLabel = (element) => {
         const panelTitle = element.closest('.llm-panel')?.querySelector('.llm-title');
@@ -224,7 +400,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const EXPANDED_PANEL_OUTPUT_MAX_HEIGHT = '400px';
 
     // Применение стилей к панелям вывода после инициализации
-    const outputElements = document.querySelectorAll('.llm-panel .output, .response-content');
+    const outputElements = document.querySelectorAll('.llm-panel .output:not(#favorite-output), .response-content');
     outputElements.forEach(el => {
         el.style.maxHeight = DEFAULT_PANEL_OUTPUT_MAX_HEIGHT;
         el.style.overflowY = 'auto';
@@ -242,54 +418,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
-    const responseLinkContainerSelector = [
-        '.llm-panel .output',
-        '.response-content',
-        '.response-body',
-        '.diag-detail',
-        '.diag-meta',
-        '.telemetry-log-list'
-    ].join(',');
-
-    const normalizeExternalLinkUrl = (href) => {
-        const raw = String(href || '').trim();
-        if (!raw || raw.startsWith('#')) return '';
-        try {
-            const url = new URL(raw, window.location.href);
-            if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) return '';
-            return url.href;
-        } catch (_) {
-            return '';
-        }
-    };
-
-    const decorateLinksForNewTab = (root) => {
-        if (!root?.querySelectorAll) return;
-        root.querySelectorAll('a[href]').forEach((anchor) => {
-            const url = normalizeExternalLinkUrl(anchor.getAttribute('href') || anchor.href);
-            if (!url) return;
-            anchor.href = url;
-            anchor.target = '_blank';
-            anchor.rel = 'noopener noreferrer';
-            anchor.setAttribute('contenteditable', 'false');
-            anchor.classList.add('response-external-link');
-        });
-    };
-
     outputElements.forEach(decorateLinksForNewTab);
-
-    const openResponseLinkInNewTab = (url) => {
-        if (!url) return;
-        try {
-            if (typeof chrome !== 'undefined' && chrome?.tabs?.create) {
-                chrome.tabs.create({ url });
-                return;
-            }
-        } catch (_) {}
-        try {
-            window.open(url, '_blank', 'noopener,noreferrer');
-        } catch (_) {}
-    };
 
     document.addEventListener('click', (event) => {
         const anchor = event.target?.closest?.('a[href]');
@@ -582,14 +711,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         text = text.replace(/\n[ \t]+/g, '\n');
         text = text.replace(/\n{3,}/g, '\n\n');
         return text.trim();
-    };
-
-    const sanitizeInlineHtml = (html) => {
-        if (!html) return '';
-        if (typeof sanitizeHTML === 'function') {
-            return sanitizeHTML(String(html || ''));
-        }
-        return String(html || '');
     };
 
     const buildHtmlFromText = (text) => escapeHtml(String(text || '')).replace(/\n/g, '<br>');
@@ -1132,8 +1253,14 @@ document.addEventListener('click', (event) => {
         let modifierSelectionsMap = {};
         let currentModifierPresetId = 'base';
         let modifierPresetSelectBound = false;
-        const MODIFIER_PRESET_STORAGE_KEY = 'llmComparatorModifierPreset';
-        const MODIFIER_SELECTIONS_STORAGE_KEY = 'llmComparatorSelectedByPreset';
+        const isPipelinePage = document.body.classList.contains('pipeline-page');
+        const MODIFIER_PRESET_STORAGE_KEY = isPipelinePage
+            ? 'llmComparatorModifierPresetPipeline'
+            : 'llmComparatorModifierPreset';
+        const MODIFIER_SELECTIONS_STORAGE_KEY = isPipelinePage
+            ? 'llmComparatorSelectedByPresetPipeline'
+            : 'llmComparatorSelectedByPreset';
+        const MODIFIER_SELECTED_FALLBACK_KEY = isPipelinePage ? null : 'llmComparatorSelected';
 
         const clearModifierOverrides = () => {
             Object.keys(modifierCustomText).forEach((key) => delete modifierCustomText[key]);
@@ -1178,11 +1305,11 @@ document.addEventListener('click', (event) => {
             modifierSelectionsMap[currentModifierPresetId] = [...selectedModifierIds];
             chrome.storage.local.set({
                 [MODIFIER_SELECTIONS_STORAGE_KEY]: modifierSelectionsMap,
-                llmComparatorSelected: selectedModifierIds
+                ...(MODIFIER_SELECTED_FALLBACK_KEY ? { [MODIFIER_SELECTED_FALLBACK_KEY]: selectedModifierIds } : {})
             });
         };
 
-        async function loadModifiers(presetId = currentModifierPresetId) {
+        async function loadModifiers(presetId = currentModifierPresetId, { restoreSelections = true } = {}) {
             try {
                 const presetMeta = getModifierPresetMeta(presetId);
                 currentModifierPresetId = presetMeta.id;
@@ -1201,7 +1328,11 @@ document.addEventListener('click', (event) => {
 
                 // Подгружаем пользовательские (если уже есть)
                 const stored = await new Promise(resolve =>
-                    chrome.storage.local.get(['llmComparatorModifiers', 'llmComparatorSelected', MODIFIER_SELECTIONS_STORAGE_KEY], resolve)
+                    chrome.storage.local.get([
+                        'llmComparatorModifiers',
+                        MODIFIER_SELECTED_FALLBACK_KEY,
+                        MODIFIER_SELECTIONS_STORAGE_KEY
+                    ].filter(Boolean), resolve)
                 );
 
                 userModifiers = Array.isArray(stored.llmComparatorModifiers) ? stored.llmComparatorModifiers : [];
@@ -1216,14 +1347,16 @@ document.addEventListener('click', (event) => {
 
                 //-- 3.2. Обновляем логику загрузки для работы с Array --//
                 const presetSelections = modifierSelectionsMap[currentModifierPresetId];
-                if (Array.isArray(presetSelections) && presetSelections.length) {
+                if (restoreSelections && Array.isArray(presetSelections) && presetSelections.length) {
                     selectedModifierIds = presetSelections;
-                } else if (currentModifierPresetId === 'base' && Array.isArray(stored.llmComparatorSelected) && stored.llmComparatorSelected.length) {
+                } else if (restoreSelections && !isPipelinePage && currentModifierPresetId === 'base' && Array.isArray(stored.llmComparatorSelected) && stored.llmComparatorSelected.length) {
                     selectedModifierIds = stored.llmComparatorSelected;
                 } else {
-                    selectedModifierIds = merged.filter(m => m.defaultSelected).map(m => m.id);
+                    selectedModifierIds = [];
                 }
-                persistModifierSelections();
+                if (restoreSelections) {
+                    persistModifierSelections();
+                }
 
                 // Индекс
                 modifiersById = {};
@@ -1286,7 +1419,8 @@ document.addEventListener('click', (event) => {
                     modifierPresetSelectBound = true;
                 }
             }
-            await loadModifiers(currentModifierPresetId);
+            window.clearModifierSelectionsOnLoad?.();
+            await loadModifiers(currentModifierPresetId, { restoreSelections: false });
         }
 
 
@@ -1299,6 +1433,7 @@ document.addEventListener('click', (event) => {
     const promptContainer = document.querySelector('.prompt-container.prompt-sandwich.debate-composer')
         || document.querySelector('.prompt-container.prompt-sandwich')
         || document.querySelector('.prompt-container');
+    const isModeratorTextarea = promptInput?.id === 'modTa';
     let useInputRichMode = false;
     let editorState = null;
     let applyRichInputContent = null;
@@ -1323,7 +1458,6 @@ document.addEventListener('click', (event) => {
     const llmButtons = document.querySelectorAll('.llm-button');
     const llmNames = Array.from(llmButtons).map(btn => btn.textContent.trim()).filter(Boolean);
     const llmPanels = document.querySelectorAll('.llm-panel');
-    const llmResultsContainer = document.querySelector('.llm-results');
     const comparisonPanel = document.getElementById('comparison-panel');
     const comparisonOutput = document.getElementById('comparison-output');
     const comparisonSpinner = document.getElementById('comparison-spinner');
@@ -7804,10 +7938,16 @@ document.addEventListener('click', (event) => {
 
     window.addEventListener('scroll', () => {
         if (activeTooltipTarget) positionFloatingTooltip(activeTooltipTarget);
+        if (responseSelectionToolbarEl?.classList.contains('vis') && responseSelectionState.target) {
+            showResponseSelectionToolbar(responseSelectionState.target);
+        }
     }, { passive: true });
 
     window.addEventListener('resize', () => {
         if (activeTooltipTarget) positionFloatingTooltip(activeTooltipTarget);
+        if (responseSelectionToolbarEl?.classList.contains('vis') && responseSelectionState.target) {
+            showResponseSelectionToolbar(responseSelectionState.target);
+        }
         requestAnimationFrame(layoutModifierMasonry);
     });
 
@@ -7845,6 +7985,9 @@ document.addEventListener('click', (event) => {
         });
     };
     attachPanelExpansionHandlers();
+    ensureFavoritePanelUI();
+    ensureMainCardFavoriteButtons();
+    ensureResponseSelectionToolbar();
 
     if (viewGridBtn) {
         viewGridBtn.addEventListener('click', () => setResultsViewMode('grid'));
@@ -8710,7 +8853,11 @@ document.addEventListener('click', (event) => {
             btn.type = 'button';
             btn.dataset.action = action;
             if (ariaLabel) btn.setAttribute('aria-label', ariaLabel);
-            btn.textContent = text;
+            if (text === '🗑️') {
+                btn.innerHTML = '<i class="ti ti-trash" aria-hidden="true"></i>';
+            } else {
+                btn.textContent = text;
+            }
             return btn;
         };
         actions.appendChild(makeButton('selectors-btn selectors-btn-pick', 'pick', '🎯', 'Pick'));
@@ -9137,6 +9284,8 @@ document.addEventListener('click', (event) => {
 
         const applyModifiersState = () => {
             modifiersSection.classList.toggle('is-open', modifiersOpen);
+            modifiersSection.hidden = !modifiersOpen;
+            toggleModifiersBtn.setAttribute('aria-pressed', String(modifiersOpen));
             toggleModifiersBtn.setAttribute('aria-expanded', String(modifiersOpen));
             const controlLabel = modifiersOpen ? 'Hide modifiers' : 'Show modifiers';
             toggleModifiersBtn.setAttribute('aria-label', controlLabel);
@@ -10259,8 +10408,8 @@ document.addEventListener('click', (event) => {
                             <span class="diag-modal-count">${logs.length}</span>
                             <div class="diag-modal-actions">
                                 <button type="button" class="diag-action-btn diag-export-action" data-action="export-html" aria-label="Export log for ${escapeHtml(llmName)} as HTML">&lt;/&gt;</button>
-                                <button type="button" class="diag-action-btn diag-copy-action" data-action="copy-log" aria-label="Copy log for ${escapeHtml(llmName)}">⧉</button>
-                                <button type="button" class="diag-action-btn diag-clear-action" data-action="clear-log" aria-label="Clear log for ${escapeHtml(llmName)}">🗑️</button>
+                                <button type="button" class="diag-action-btn diag-copy-action" data-action="copy-log" aria-label="Copy log for ${escapeHtml(llmName)}"><i class="ti ti-copy" aria-hidden="true"></i></button>
+                                <button type="button" class="diag-action-btn diag-clear-action" data-action="clear-log" aria-label="Clear log for ${escapeHtml(llmName)}"><i class="ti ti-trash" aria-hidden="true"></i></button>
                             </div>
                         </summary>
                         <div class="diag-modal-body">
@@ -11855,6 +12004,9 @@ function collectLLMResponses() {
     const entries = [];
     const htmlSections = [];
     panels.forEach(panel => {
+        if (panel.id === favoritePanelId || panel.classList.contains('favorite-panel')) {
+            return;
+        }
         const titleEl = panel.querySelector('.llm-title') || panel.querySelector('h3');
         const outputEl = panel.querySelector('.output');
         const name = titleEl ? titleEl.textContent.trim() : panel.id.replace('panel-', '').toUpperCase();
@@ -11890,6 +12042,566 @@ function collectLLMResponses() {
     const combinedHTML = wrapResponsesHtmlBundle(htmlSections.join('\n'));
     return { entries, combinedText, combinedHTML };
 }
+
+function buildFavoriteExportHtml() {
+    const groups = buildFavoriteGroups();
+    if (!groups.length) return '';
+
+    const sections = groups.map((group) => {
+        const groupName = String(group.sourceName || 'Model').trim() || 'Model';
+        const groupItems = group.items.map((entry) => {
+            const itemHtml = entry.html ? sanitizeInlineHtml(entry.html) : '';
+            const fallbackText = String(entry.text || '').trim();
+            const bodyHtml = itemHtml || (fallbackText ? `<p>${escapeHtml(fallbackText).replace(/\n/g, '<br>')}</p>` : '');
+            if (!bodyHtml) return '';
+            const timeMeta = entry.timeLabel ? `<p class="response-meta">${escapeHtml(entry.timeLabel)}</p>` : '';
+            return `
+                <section class="favorite-export-item">
+                    ${timeMeta}
+                    <div class="response-body">${bodyHtml}</div>
+                </section>
+            `;
+        }).filter(Boolean).join('\n');
+
+        if (!groupItems) return '';
+        const groupBody = `<div class="favorite-export-items">${groupItems}</div>`;
+        return buildResponseCopyHtmlBlock(groupName, null, groupBody, '');
+    }).filter(Boolean).join('\n');
+
+    if (!sections) return '';
+
+    return wrapResponsesHtmlBundle(sections);
+}
+
+function ensureFavoritePanelUI() {
+    if (favoritePanelEl && favoriteOutputEl && favoriteSectionEl) return favoritePanelEl;
+    if (!llmResultsContainer) return null;
+    const parent = llmResultsContainer.parentElement || llmResultsContainer;
+    if (!parent) return null;
+
+    let section = document.getElementById(favoriteSectionId);
+    if (!section) {
+        section = document.createElement('div');
+        section.id = favoriteSectionId;
+        section.className = 'favorites-section hidden';
+        section.innerHTML = `
+            <div class="llm-panel favorite-panel" id="${favoritePanelId}">
+                <div class="llm-header favorite-panel-header">
+                    <span class="llm-title favorite-panel-title">Favourite</span>
+                    <div class="header-right favorite-panel-actions">
+                        <button class="copy-btn favorite-copy-btn" data-target="${favoriteOutputId}" title="Copy favorites" aria-label="Copy favorites"><i class="ti ti-copy" aria-hidden="true"></i></button>
+                        <button class="panel-action-btn panel-export-html-btn favorite-export-btn" data-target="${favoriteOutputId}" data-name="Favourite" data-label="⬆" title="Export favorites as HTML" aria-label="Export favorites as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+                        <button class="panel-action-btn panel-clear-response-btn favorite-clear-btn" data-target="${favoriteOutputId}" title="Clear favorites" aria-label="Clear favorites"><i class="ti ti-trash" aria-hidden="true"></i></button>
+                    </div>
+                </div>
+                <div class="output favorite-output" id="${favoriteOutputId}" aria-label="Favourite feed"></div>
+            </div>
+        `;
+        parent.insertBefore(section, llmResultsContainer);
+    }
+
+    favoriteSectionEl = section;
+    favoritePanelEl = section.querySelector(`#${favoritePanelId}`);
+    favoriteOutputEl = section.querySelector(`#${favoriteOutputId}`);
+    const titleEl = section.querySelector('.favorite-panel-title');
+    titleEl?.addEventListener('dblclick', () => {
+        if (!favoritePanelEl) return;
+        favoritePanelEl.classList.toggle('llm-panel-expanded');
+        scrollFavoritePanelToBottom({ smooth: true });
+    });
+    const hasFavoriteEntries = Boolean(favoriteState.entries.length);
+    section.classList.toggle('hidden', !hasFavoriteEntries);
+    section.hidden = !hasFavoriteEntries;
+    section.style.display = hasFavoriteEntries ? 'block' : 'none';
+    if (hasFavoriteEntries) {
+        scrollFavoritePanelToBottom({ smooth: false });
+    }
+    return favoritePanelEl;
+}
+
+function scrollFavoritePanelToBottom({ smooth = false } = {}) {
+    if (!favoriteOutputEl) return;
+    const scroller = favoriteOutputEl;
+    const run = () => {
+        try {
+            if (typeof scroller.scrollTo === 'function') {
+                scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+            } else {
+                scroller.scrollTop = scroller.scrollHeight;
+            }
+        } catch (_) {
+            scroller.scrollTop = scroller.scrollHeight;
+        }
+    };
+    requestAnimationFrame(() => requestAnimationFrame(run));
+}
+
+function favoriteEntryKeyForCard(outputId) {
+    return `card:${String(outputId || '').trim()}`;
+}
+
+function favoriteModelKeyForName(sourceName = 'Model') {
+    return String(sourceName || 'Model').trim().toLowerCase().replace(/\s+/g, ' ') || 'model';
+}
+
+function favoriteGroupKeyForEntry(entry) {
+    if (!entry) return '';
+    const modelKey = String(entry.modelKey || '').trim() || favoriteModelKeyForName(entry.sourceName || 'Model');
+    if (modelKey) return `model:${modelKey}`;
+    return '';
+}
+
+function buildFavoriteGroups() {
+    const groups = [];
+    const groupByKey = new Map();
+    favoriteState.entries.forEach((entry) => {
+        const groupKey = favoriteGroupKeyForEntry(entry);
+        if (!groupKey) return;
+        let group = groupByKey.get(groupKey);
+        if (!group) {
+            group = {
+                key: groupKey,
+                modelKey: String(entry.modelKey || '').trim() || favoriteModelKeyForName(entry.sourceName || 'Model'),
+                sourceName: entry.sourceName || 'Model',
+                items: []
+            };
+            groupByKey.set(groupKey, group);
+            groups.push(group);
+        }
+        group.items.push(entry);
+    });
+    return groups;
+}
+
+function syncFavoriteButtonState(outputId, isActive) {
+    if (!outputId) return;
+    const safeId = String(outputId).replace(/"/g, '\\"');
+    const btn = document.querySelector(`.panel-fav-btn[data-target="${safeId}"]`);
+    if (!btn) return;
+    btn.classList.toggle('active', !!isActive);
+    btn.setAttribute('aria-pressed', String(!!isActive));
+    btn.title = isActive ? 'Remove from favorites' : 'Add to favorites';
+}
+
+function syncAllFavoriteButtonStates() {
+    document.querySelectorAll('.panel-fav-btn').forEach((btn) => {
+        const outputId = String(btn.dataset.target || '').trim();
+        if (!outputId) return;
+        const key = favoriteEntryKeyForCard(outputId);
+        const entryId = favoriteState.cardKeyToId.get(key);
+        const isActive = Boolean(entryId);
+        btn.classList.toggle('active', isActive);
+        btn.setAttribute('aria-pressed', String(isActive));
+        btn.title = isActive ? 'Remove from favorites' : 'Add to favorites';
+    });
+}
+
+function removeFavoriteEntryById(entryId) {
+    const index = favoriteState.entries.findIndex((entry) => entry.id === entryId);
+    if (index === -1) return false;
+    const [entry] = favoriteState.entries.splice(index, 1);
+    if (entry?.kind === 'card' && entry.sourceOutputId) {
+        favoriteState.cardKeyToId.delete(favoriteEntryKeyForCard(entry.sourceOutputId));
+        syncFavoriteButtonState(entry.sourceOutputId, false);
+    }
+    renderFavoritePanel();
+    return true;
+}
+
+function clearFavorites() {
+    favoriteState.entries = [];
+    favoriteState.cardKeyToId.clear();
+    renderFavoritePanel();
+    syncAllFavoriteButtonStates();
+    persistFavoriteEntries();
+}
+
+function renderFavoritePanel() {
+    if (!favoriteOutputEl || !favoriteSectionEl || !favoritePanelEl) return;
+    if (!favoriteState.entries.length) {
+        clearNode(favoriteOutputEl);
+        favoriteSectionEl.classList.add('hidden');
+        favoriteSectionEl.hidden = true;
+        favoriteSectionEl.style.display = 'none';
+        favoritePanelEl.classList.remove('llm-panel-expanded');
+        return;
+    }
+    const html = buildFavoriteGroups().map((group) => {
+        const sourceName = escapeHtml(group.sourceName || 'Model');
+        const itemsHtml = group.items.map((entry) => {
+            const contentHtml = entry.html ? sanitizeInlineHtml(entry.html) : escapeHtml(entry.text || '');
+            return `
+                <div class="favorite-item" data-favorite-id="${escapeHtml(entry.id)}" data-favorite-kind="${escapeHtml(entry.kind)}">
+                    <div class="favorite-item-body" data-favorite-id="${escapeHtml(entry.id)}" contenteditable="true" spellcheck="true">${contentHtml}</div>
+                    <button type="button" class="favorite-item-remove" data-remove-favorite-id="${escapeHtml(entry.id)}" aria-label="Remove favorite" title="Remove favorite">×</button>
+                </div>
+            `;
+        }).join('');
+        return `
+            <article class="favorite-entry" data-favorite-group="${escapeHtml(group.key)}">
+                <div class="favorite-entry-head">
+                    <span class="favorite-entry-source">${sourceName}</span>
+                </div>
+                <div class="favorite-entry-body">
+                    <div class="favorite-item-list">
+                        ${itemsHtml}
+                    </div>
+                </div>
+            </article>
+        `;
+    }).join('');
+    favoriteOutputEl.innerHTML = html;
+    decorateLinksForNewTab(favoriteOutputEl);
+    favoriteSectionEl.classList.remove('hidden');
+    favoriteSectionEl.hidden = false;
+    favoriteSectionEl.style.display = 'block';
+    favoriteOutputEl.querySelectorAll('.favorite-item-body[contenteditable="true"]').forEach((bodyEl) => {
+        bodyEl.setAttribute('contenteditable', 'true');
+        bodyEl.setAttribute('spellcheck', 'true');
+    });
+    syncAllFavoriteButtonStates();
+}
+
+function syncFavoriteEntryFromBody(bodyEl) {
+    if (!bodyEl) return;
+    const entryId = String(bodyEl.dataset?.favoriteId || '').trim();
+    if (!entryId) return;
+    const entry = favoriteState.entries.find((item) => item.id === entryId);
+    if (!entry) return;
+    const html = sanitizeInlineHtml(String(bodyEl.innerHTML || '').trim());
+    entry.html = html;
+    entry.text = plainTextFromHtml(html);
+}
+
+function addFavoriteEntry({ sourceName = 'Model', modelKey = '', sourceOutputId = '', text = '', html = '', kind = 'card', timeLabel = '' } = {}) {
+    const normalizedText = String(text || '').trim();
+    const normalizedHtml = sanitizeInlineHtml(String(html || '').trim());
+    if (!normalizedText && !normalizedHtml) return null;
+    ensureFavoritePanelUI();
+    const isCard = kind === 'card';
+    const resolvedSourceName = String(sourceName || 'Model').trim() || 'Model';
+    const resolvedModelKey = String(modelKey || '').trim() || favoriteModelKeyForName(resolvedSourceName);
+    const entry = {
+        id: `fav-${favoriteState.nextId++}`,
+        kind: isCard ? 'card' : 'fragment',
+        sourceName: resolvedSourceName,
+        modelKey: resolvedModelKey,
+        sourceOutputId: String(sourceOutputId || '').trim(),
+        text: normalizedText,
+        html: normalizedHtml,
+        timeLabel: timeLabel || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    favoriteState.entries.push(entry);
+    if (isCard && entry.sourceOutputId) {
+        favoriteState.cardKeyToId.set(favoriteEntryKeyForCard(entry.sourceOutputId), entry.id);
+    }
+    renderFavoritePanel();
+    if (favoriteSectionEl) {
+        favoriteSectionEl.classList.remove('hidden');
+        favoriteSectionEl.hidden = false;
+        favoriteSectionEl.style.display = 'block';
+    }
+    scrollFavoritePanelToBottom({ smooth: false });
+    return entry;
+}
+
+function toggleFavoriteForOutput(outputEl) {
+    if (!outputEl) return false;
+    const outputId = String(outputEl.id || '').trim();
+    if (!outputId) return false;
+    ensureFavoritePanelUI();
+    const panel = outputEl.closest('.llm-panel');
+    const sourceTitle = panel?.querySelector('.llm-title');
+    const sourceName = sourceTitle ? sourceTitle.textContent.trim() : (panel?.id || 'Model').replace(/^panel-/, '');
+    const modelKey = favoriteModelKeyForName(sourceName);
+    const key = favoriteEntryKeyForCard(outputId);
+    const existingId = favoriteState.cardKeyToId.get(key);
+    if (existingId) {
+        removeFavoriteEntryById(existingId);
+        syncFavoriteButtonState(outputId, false);
+        return false;
+    }
+    const text = String(outputEl.innerText || outputEl.textContent || '').trim();
+    const html = String(outputEl.innerHTML || '').trim();
+    const entry = addFavoriteEntry({
+        sourceName,
+        modelKey,
+        sourceOutputId: outputId,
+        text,
+        html,
+        kind: 'card'
+    });
+    if (entry) {
+        syncFavoriteButtonState(outputId, true);
+    }
+    return !!entry;
+}
+
+function addFavoriteFragmentFromSelection({ sourceCard, text, html }) {
+    const normalizedText = String(text || '').trim();
+    const normalizedHtml = sanitizeInlineHtml(String(html || '').trim());
+    if (!normalizedText && !normalizedHtml) return false;
+    const sourceOutputEl = sourceCard?.querySelector?.('.output') || null;
+    const sourceName = sourceCard?.querySelector?.('.llm-title')?.textContent?.trim()
+        || sourceCard?.dataset?.llmName
+        || 'Fragment';
+    const modelKey = favoriteModelKeyForName(sourceName);
+    const timeLabel = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    addFavoriteEntry({
+        sourceName,
+        modelKey,
+        sourceOutputId: sourceOutputEl?.id || '',
+        text: normalizedText,
+        html: normalizedHtml,
+        kind: 'fragment',
+        timeLabel
+    });
+    return true;
+}
+
+try {
+    chrome?.storage?.onChanged?.addListener((changes, areaName) => {
+        if (areaName !== 'local') return;
+        const change = changes?.[favoriteStorageKey];
+        if (!change) return;
+        const nextEntries = Array.isArray(change.newValue) ? change.newValue.map((entry) => favoriteEntrySnapshot(entry)) : [];
+        if (favoriteEntriesSignature(nextEntries) === favoriteEntriesSignature(favoriteState.entries)) return;
+        syncFavoriteStateFromEntries(nextEntries, { render: true });
+    });
+} catch (_) {}
+
+function ensureMainCardFavoriteButtons() {
+    document.querySelectorAll('.llm-results .llm-panel').forEach((panel) => {
+        if (!panel || panel.id === favoritePanelId || panel.id === 'comparison-panel') return;
+        const outputEl = panel.querySelector('.output');
+        const headerRight = panel.querySelector('.header-right');
+        if (!outputEl || !headerRight) return;
+        if (headerRight.querySelector('.panel-fav-btn')) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'panel-action-btn panel-fav-btn';
+        btn.dataset.target = outputEl.id || '';
+        const title = panel.querySelector('.llm-title')?.textContent?.trim() || 'Favorite';
+        btn.dataset.sourceName = title;
+        btn.title = 'Add to favorites';
+        btn.setAttribute('aria-label', 'Add to favorites');
+        btn.setAttribute('aria-pressed', 'false');
+        btn.innerHTML = '<i class="ti ti-star" aria-hidden="true"></i>';
+        headerRight.appendChild(btn);
+    });
+    syncAllFavoriteButtonStates();
+}
+
+function ensureResponseSelectionToolbar() {
+    if (responseSelectionToolbarEl) return responseSelectionToolbarEl;
+    const toolbar = document.createElement('div');
+    toolbar.id = responseSelectionToolbarId;
+    toolbar.className = 'debate-sel-toolbar response-sel-toolbar';
+    toolbar.innerHTML = `
+        <button class="stb col" style="background:#FFEB3B;border-color:#fbc02d" data-color="#FFEB3B" title="Yellow highlight" aria-label="Yellow highlight"><span class="stb-label">Yellow</span></button>
+        <button class="stb col" style="background:#05e56d;border-color:#00c853" data-color="#05e56d" title="Green highlight" aria-label="Green highlight"><span class="stb-label">Green</span></button>
+        <button class="stb col" style="background:#f44336;border-color:#d32f2f" data-color="#f44336" title="Red highlight" aria-label="Red highlight"><span class="stb-label">Red</span></button>
+        <div style="width:1px;background:rgba(255,255,255,.2);margin:2px 3px;height:14px;flex-shrink:0"></div>
+        <button class="stb" data-cmd="bold" title="Bold" aria-label="Bold"><span class="stb-label">Bold</span></button>
+        <button class="stb" data-cmd="italic" title="Italic" aria-label="Italic"><span class="stb-label">Italic</span></button>
+        <div style="width:1px;background:rgba(255,255,255,.2);margin:2px 3px;height:14px;flex-shrink:0"></div>
+        <button class="stb" data-fav="1" title="Add selected fragment to favorites" aria-label="Add selected fragment to favorites"><span class="stb-label">Favourite</span></button>
+    `;
+    document.body.appendChild(toolbar);
+    responseSelectionToolbarEl = toolbar;
+    return toolbar;
+}
+
+function hideResponseSelectionToolbar() {
+    responseSelectionState.range = null;
+    responseSelectionState.target = null;
+    responseSelectionToolbarEl?.classList.remove('vis');
+}
+
+function getResponseSelectionText() {
+    const rangeText = String(responseSelectionState.range?.toString?.() || '').trim();
+    if (rangeText) return rangeText;
+    return String(window.getSelection?.()?.toString?.() || '').trim();
+}
+
+function getResponseSelectionHtml() {
+    const range = responseSelectionState.range;
+    if (!range || range.collapsed) return '';
+    try {
+        const fragment = range.cloneContents();
+        const container = document.createElement('div');
+        container.appendChild(fragment);
+        return String(container.innerHTML || '').trim();
+    } catch (err) {
+        console.warn('[RESULTS] response selection html snapshot failed', err);
+        return '';
+    }
+}
+
+function syncResponseSelectionSourceOutput() {
+    const sourceOutput = responseSelectionState.target?.closest?.('.output') || null;
+    if (!sourceOutput) return;
+    sourceOutput.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function stripBackgroundColorStyles(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+    const el = node;
+    if (el.style && typeof el.style.backgroundColor === 'string') {
+        el.style.backgroundColor = '';
+        if (typeof el.style.removeProperty === 'function') {
+            el.style.removeProperty('background-color');
+        }
+        if (el.getAttribute?.('style') === '') {
+            el.removeAttribute('style');
+        }
+    }
+    Array.from(el.children || []).forEach(stripBackgroundColorStyles);
+}
+
+function wrapResponseSelectionRange(tagName, stylePatch = {}) {
+    const range = responseSelectionState.range;
+    if (!range || range.collapsed) return false;
+    const target = responseSelectionState.target;
+    if (target && !target.contains(range.commonAncestorContainer)) return false;
+    const wrapper = document.createElement(tagName);
+    Object.entries(stylePatch).forEach(([key, value]) => {
+        wrapper.style[key] = value;
+    });
+    try {
+        const fragment = range.extractContents();
+        if (stylePatch && Object.prototype.hasOwnProperty.call(stylePatch, 'backgroundColor')) {
+            Array.from(fragment.childNodes || []).forEach(stripBackgroundColorStyles);
+        }
+        wrapper.appendChild(fragment);
+        range.insertNode(wrapper);
+        range.selectNodeContents(wrapper);
+        syncResponseSelectionSourceOutput();
+        return true;
+    } catch (err) {
+        console.warn('[RESULTS] response selection format failed', err);
+        return false;
+    }
+}
+
+function applyResponseSelectionStyle(command, value = null) {
+    let applied = false;
+    if (command === 'hiliteColor') {
+        applied = wrapResponseSelectionRange('span', { backgroundColor: value || '#FFEB3B' });
+    } else if (command === 'bold') {
+        applied = wrapResponseSelectionRange('strong');
+    } else if (command === 'italic') {
+        applied = wrapResponseSelectionRange('em');
+    }
+    if (!applied && command && document.queryCommandSupported?.(command)) {
+        const sel = window.getSelection?.();
+        try {
+            sel?.removeAllRanges?.();
+            if (responseSelectionState.range) sel?.addRange?.(responseSelectionState.range);
+            document.execCommand(command, false, value);
+            syncResponseSelectionSourceOutput();
+        } catch (_) {}
+    }
+    window.getSelection?.()?.removeAllRanges?.();
+    hideResponseSelectionToolbar();
+}
+
+function showResponseSelectionToolbar(target) {
+    const toolbar = ensureResponseSelectionToolbar();
+    if (!toolbar || !target) return;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
+    const range = sel.getRangeAt(0).cloneRange();
+    const rect = range.getBoundingClientRect();
+    if (!rect) return;
+    responseSelectionState.range = range;
+    responseSelectionState.target = target;
+    toolbar.classList.add('vis');
+    const toolbarWidth = toolbar.offsetWidth || 190;
+    const toolbarHeight = toolbar.offsetHeight || 36;
+    const gap = 7;
+    const top = Math.max(8, rect.top - toolbarHeight - gap);
+    let left = rect.left + rect.width / 2 - toolbarWidth / 2 + 14;
+    left = Math.max(8, Math.min(left, window.innerWidth - toolbarWidth - 8));
+    toolbar.style.top = `${top}px`;
+    toolbar.style.left = `${left}px`;
+}
+
+function bindMainPageFavoritesInteractions() {
+    if (responseSelectionToolbarBound) return;
+    responseSelectionToolbarBound = true;
+
+    document.addEventListener('mouseup', (event) => {
+        if (event.target?.closest?.(`#${responseSelectionToolbarId}`)) return;
+        const target = event.target?.closest?.('.output');
+        if (!target || target.id === favoriteOutputId) {
+            hideResponseSelectionToolbar();
+            return;
+        }
+        requestAnimationFrame(() => showResponseSelectionToolbar(target));
+    });
+    document.addEventListener('mousedown', (event) => {
+        if (event.target?.closest?.(`#${responseSelectionToolbarId}`)) return;
+        if (!event.target?.closest?.('.output')) {
+            hideResponseSelectionToolbar();
+        }
+    });
+    document.addEventListener('click', (event) => {
+        const toolbar = event.target?.closest?.(`#${responseSelectionToolbarId}`);
+        if (!toolbar) return;
+        const btn = event.target.closest('button');
+        if (!btn) return;
+        event.preventDefault();
+        const color = btn.dataset.color || '';
+        const cmd = btn.dataset.cmd || '';
+        if (color) {
+            applyResponseSelectionStyle('hiliteColor', color);
+            return;
+        }
+        if (cmd) {
+            applyResponseSelectionStyle(cmd);
+            return;
+        }
+        if (btn.dataset.fav) {
+            const text = getResponseSelectionText();
+            const html = getResponseSelectionHtml();
+            const sourceCard = responseSelectionState.target?.closest?.('.llm-panel') || null;
+            if (addFavoriteFragmentFromSelection({ sourceCard, text, html })) {
+                hideResponseSelectionToolbar();
+                window.getSelection?.()?.removeAllRanges?.();
+            }
+        }
+    });
+    document.addEventListener('click', (event) => {
+        const btn = event.target.closest('.panel-fav-btn');
+        if (!btn) return;
+        const outputId = String(btn.dataset.target || '').trim();
+        const outputEl = outputId ? document.getElementById(outputId) : null;
+        if (!outputEl) return;
+        const key = favoriteEntryKeyForCard(outputId);
+        const hadEntry = favoriteState.cardKeyToId.has(key);
+        const active = toggleFavoriteForOutput(outputEl);
+        const hasContent = String(outputEl.innerText || outputEl.textContent || '').trim().length > 0
+            || String(outputEl.innerHTML || '').trim().length > 0;
+        flashButtonFeedback(btn, active || hadEntry || hasContent ? 'success' : 'warn');
+    });
+    document.addEventListener('click', (event) => {
+        const removeBtn = event.target.closest('.favorite-item-remove');
+        if (!removeBtn) return;
+        const entryId = String(removeBtn.dataset.removeFavoriteId || '').trim();
+        if (!entryId) return;
+        removeFavoriteEntryById(entryId);
+    });
+    document.addEventListener('input', (event) => {
+        const bodyEl = event.target?.closest?.('.favorite-item-body[contenteditable="true"]');
+        if (!bodyEl || !favoriteOutputEl?.contains(bodyEl)) return;
+        syncFavoriteEntryFromBody(bodyEl);
+    });
+}
+
+setTimeout(bindMainPageFavoritesInteractions, 0);
+setTimeout(() => window.clearFavoriteEntriesOnLoad?.(), 0);
+setTimeout(() => window.clearModifierSelectionsOnLoad?.(), 0);
 function setPromptContent(text) {
     if (!promptInput) return;
     const nextValue = (text || '').trim();
@@ -12055,11 +12767,21 @@ document.addEventListener('click', (event) => {
   let clearedAny = false;
 
   outputs.forEach(outputEl => {
+    if (outputEl?.id === favoriteOutputId) {
+      return;
+    }
     // Полная очистка содержимого
     clearNode(outputEl);
     outputEl.textContent = '';
     // Триггерим input чтобы другие слушатели обновились
     outputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    if (outputEl?.id) {
+      const key = favoriteEntryKeyForCard(outputEl.id);
+      const entryId = favoriteState.cardKeyToId.get(key);
+      if (entryId) {
+        removeFavoriteEntryById(entryId);
+      }
+    }
     clearedAny = true;
   });
 
@@ -12142,6 +12864,12 @@ document.addEventListener('click', (event) => {
         return;
     }
 
+    if (outputEl.id === favoriteOutputId) {
+        clearFavorites();
+        flashButtonFeedback(btn, 'success');
+        return;
+    }
+
     // 5) Очищаем
     clearNode(outputEl);
     outputEl.textContent = '';
@@ -12154,6 +12882,7 @@ document.addEventListener('click', (event) => {
     // 7) Визуальный фидбек на кнопке
     flashButtonFeedback(btn, 'success');
 });
+
 //-- конец блока --//
 
 document.addEventListener('click', (event) => {
@@ -12263,80 +12992,6 @@ document.addEventListener('click', async (event) => {
 
     flashButtonFeedback(btn, 'success');
 });
-
-document.addEventListener('click', async (event) => {
-    const btn = event.target.closest('#prompt-export-html-btn');
-    if (!btn) return;
-
-    const promptEl = document.getElementById('prompt-input');
-    if (!promptEl) return;
-
-    // Priority: export the full feed. Fallback: export current prompt content.
-    let bodyHtml = '';
-    const feedEl = document.querySelector('.llm-results');
-    const hasFeedContent = !!(feedEl && feedEl.querySelector('.llm-panel, .llm-panel-content, .panel-content'));
-    if (hasFeedContent) {
-        const feedClone = feedEl.cloneNode(true);
-        feedClone.querySelectorAll('button, .panel-save-note-btn, .llm-panel-actions').forEach((el) => el.remove());
-        bodyHtml = `<section class="export-feed">${feedClone.innerHTML}</section>`;
-    } else {
-        const baseText = (promptEl.value || '').trim();
-        const richActive = promptContainer?.classList.contains('is-note-viewing');
-        const richHtml = promptNoteView ? sanitizeInlineHtml(promptNoteView.innerHTML || '').trim() : '';
-        const richText = promptNoteView
-            ? String(promptNoteView.innerText || promptNoteView.textContent || '').trim()
-            : '';
-        const hasRichContent = !!(richActive && (richHtml || richText));
-        if (hasRichContent) {
-            bodyHtml = richHtml || buildHtmlFromText(richText);
-        } else {
-            const fullPromptText = applySelectedModifiersToPrompt(baseText, { includeResponses: true });
-            if (!fullPromptText) {
-                flashButtonFeedback(btn, 'warn');
-                return;
-            }
-            bodyHtml = `<pre>${escapeHtml(fullPromptText)}</pre>`;
-        }
-    }
-
-    const htmlContent = `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Feed Export</title>
-    <style>
-        body { font-family: sans-serif; line-height: 1.6; padding: 2em; }
-        pre { white-space: pre-wrap; word-wrap: break-word; background: #f4f4f4; padding: 1em; border-radius: 5px; }
-        .export-feed { max-width: 980px; margin: 0 auto; }
-        .export-feed .llm-panel { margin-bottom: 14px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; }
-        .export-feed .llm-panel-title { font-weight: 700; margin-bottom: 8px; }
-    </style>
-</head>
-<body>
-    ${bodyHtml}
-</body>
-</html>`;
-
-    // 3. Скачиваем файл
-    const blob = new Blob([htmlContent], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-
-    const now = new Date();
-    const pad = n => String(n).padStart(2, '0');
-    const dateStr = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}`;
-    
-    a.download = `Feed ${dateStr}.html`;
-
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-
-    flashButtonFeedback(btn, 'success');
-});
-
 
 //-- 1.1. Исправляем экспорт всех ответов в HTML и формат имени файла --//
 document.addEventListener('click', (event) => {
@@ -12452,6 +13107,59 @@ document.addEventListener('click', (event) => {
 
     const targetId = btn.dataset.target;
     const outputEl = targetId ? document.getElementById(targetId) : null;
+    if (targetId === favoriteOutputId) {
+        const favoriteHtml = buildFavoriteExportHtml();
+        if (!favoriteHtml) {
+            flashButtonFeedback(btn, 'warn');
+            return;
+        }
+
+        const htmlContent = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Favourite</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #ffffff; color: #111; padding: 24px; line-height: 1.5; }
+        h1 { margin: 0 0 16px; font-size: 22px; }
+        h2 { margin: 18px 0 10px; font-size: 18px; }
+        pre { background: #f6f8fa; padding: 12px; border-radius: 8px; white-space: pre-wrap; word-wrap: break-word; }
+        .copied-response { margin-bottom: 20px; }
+        .copied-meta { margin: 0 0 10px; color: #555; font-size: 13px; }
+        .copied-body { background: #f8fafc; padding: 12px; border-radius: 8px; }
+        .copied-body pre { background: #eef2f7; }
+        .favorite-export-items { display: flex; flex-direction: column; gap: 12px; }
+        .favorite-export-item + .favorite-export-item { margin-top: 0; }
+        .favorite-export-item .response-meta { margin: 0 0 10px; color: #555; font-size: 13px; }
+        .favorite-export-item .response-body { background: #f8fafc; padding: 12px; border-radius: 8px; }
+        .favorite-export-item .response-body pre { background: #eef2f7; }
+    </style>
+</head>
+<body>
+    <h1>Favourite</h1>
+    ${favoriteHtml}
+</body>
+</html>`;
+
+        const blob = new Blob([htmlContent], { type: 'text/html' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+
+        const now = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        const dateStr = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}`;
+        anchor.download = `Favourite ${dateStr}.html`;
+
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+
+        flashButtonFeedback(btn, 'success');
+        return;
+    }
+
     const rawHtml = outputEl ? outputEl.innerHTML || '' : '';
     const sanitizedHtml = rawHtml ? sanitizeInlineHtml(rawHtml).trim() : '';
     const text = sanitizedHtml
@@ -13134,10 +13842,10 @@ function checkCompareButtonState() {
                     <span class="debate-model-card-meta">
                         <span class="debate-model-card-time"></span>
                         <button type="button" class="ib debate-card-branch" title="Branch" aria-label="Branch"><i class="ti ti-git-branch"></i></button>
-                        <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy">⧉</button>
-                        <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML">⬆</button>
-                        <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete">🗑️</button>
-                        <button type="button" class="ib debate-fav" title="Favorite" aria-label="Favorite">★</button>
+                        <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy"><i class="ti ti-copy" aria-hidden="true"></i></button>
+                        <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+                        <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete"><i class="ti ti-trash" aria-hidden="true"></i></button>
+                        <button type="button" class="ib debate-fav" title="Favorite" aria-label="Favorite"><i class="ti ti-star" aria-hidden="true"></i></button>
                     </span>
                 </div>
                 <div class="debate-model-card-output debate-model-card-empty"></div>
@@ -13181,10 +13889,10 @@ function checkCompareButtonState() {
                 </span>
                 <span class="debate-model-card-meta">
                     <span class="debate-model-card-time">${hh}:${mm}</span>
-                    <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy">⧉</button>
-                    <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML">⬆</button>
-                    <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete">🗑️</button>
-                    <button type="button" class="ib debate-fav" title="Favorite" aria-label="Favorite">★</button>
+                    <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy"><i class="ti ti-copy" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete"><i class="ti ti-trash" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-fav" title="Favorite" aria-label="Favorite"><i class="ti ti-star" aria-hidden="true"></i></button>
                 </span>
             </div>
             <div class="debate-model-card-output"></div>
@@ -13296,10 +14004,10 @@ function checkCompareButtonState() {
                 <span class="debate-model-card-meta">
                     <span class="debate-model-card-time">${hh}:${mm}</span>
                     <button type="button" class="ib debate-card-branch" title="Branch" aria-label="Branch"><i class="ti ti-git-branch"></i></button>
-                    <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy">⧉</button>
-                    <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML">⬆</button>
-                    <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete">🗑️</button>
-                    <button type="button" class="ib debate-fav" title="Favorite" aria-label="Favorite">★</button>
+                    <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy"><i class="ti ti-copy" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete"><i class="ti ti-trash" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-fav" title="Favorite" aria-label="Favorite"><i class="ti ti-star" aria-hidden="true"></i></button>
                 </span>
             </div>
             <div class="debate-model-card-output"></div>
@@ -13401,7 +14109,7 @@ function checkCompareButtonState() {
         return moderatorInputText || moderatorBodyText;
     }
     function clearModeratorComposer() {
-        if (promptInput) {
+        if (promptInput && isModeratorTextarea) {
             promptInput.value = '';
             promptInput.dispatchEvent(new Event('input', { bubbles: true }));
             autoGrowDebateTextarea(promptInput);
@@ -13487,9 +14195,10 @@ function checkCompareButtonState() {
         return true;
     }
     function getApprovedSenderModels() {
-        if (!debateModelCards) return [];
+        const cardsRoot = document.getElementById('debate-model-cards');
+        if (!cardsRoot) return [];
         const activeSessionId = debateTabsState.activeSessionId;
-        return Array.from(debateModelCards.querySelectorAll('.debate-model-card[data-approved="true"]'))
+        return Array.from(cardsRoot.querySelectorAll('.debate-model-card[data-approved="true"]'))
             .filter((card) => card.dataset.sessionId === activeSessionId)
             .map((card) => card.dataset.llmName || '')
             .filter(Boolean)
@@ -13578,6 +14287,19 @@ function checkCompareButtonState() {
         if (rangeText) return rangeText;
         return String(window.getSelection?.()?.toString?.() || '').trim();
     }
+    function getDebateSelectionHtml() {
+        const range = debateSelectionState.range;
+        if (!range || range.collapsed) return '';
+        try {
+            const fragment = range.cloneContents();
+            const container = document.createElement('div');
+            container.appendChild(fragment);
+            return String(container.innerHTML || '').trim();
+        } catch (err) {
+            console.warn('[RESULTS] debate selection html snapshot failed', err);
+            return '';
+        }
+    }
     function syncDebateSelectionSourceMessage() {
         const sourceCard = debateSelectionState.target?.closest?.('.debate-model-card') || null;
         if (!sourceCard) return;
@@ -13587,6 +14309,20 @@ function checkCompareButtonState() {
             html: String(outputEl?.innerHTML || '').trim()
         });
         syncDebateCardOutputLayout(sourceCard);
+    }
+    function stripBackgroundColorStyles(node) {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+        const el = node;
+        if (el.style && typeof el.style.backgroundColor === 'string') {
+            el.style.backgroundColor = '';
+            if (typeof el.style.removeProperty === 'function') {
+                el.style.removeProperty('background-color');
+            }
+            if (el.getAttribute?.('style') === '') {
+                el.removeAttribute('style');
+            }
+        }
+        Array.from(el.children || []).forEach(stripBackgroundColorStyles);
     }
     function wrapDebateSelectionRange(tagName, stylePatch = {}) {
         const range = debateSelectionState.range;
@@ -13599,6 +14335,9 @@ function checkCompareButtonState() {
         });
         try {
             const fragment = range.extractContents();
+            if (stylePatch && Object.prototype.hasOwnProperty.call(stylePatch, 'backgroundColor')) {
+                Array.from(fragment.childNodes || []).forEach(stripBackgroundColorStyles);
+            }
             wrapper.appendChild(fragment);
             range.insertNode(wrapper);
             range.selectNodeContents(wrapper);
@@ -13612,7 +14351,7 @@ function checkCompareButtonState() {
     function applyDebateSelectionStyle(command, value = null) {
         let applied = false;
         if (command === 'hiliteColor') {
-            applied = wrapDebateSelectionRange('span', { backgroundColor: value || '#fde68a' });
+            applied = wrapDebateSelectionRange('span', { backgroundColor: value || '#FFEB3B' });
         } else if (command === 'bold') {
             applied = wrapDebateSelectionRange('strong');
         } else if (command === 'italic') {
@@ -13632,6 +14371,7 @@ function checkCompareButtonState() {
     }
     function promoteDebateSelectionToFavorite() {
         const text = getDebateSelectionText();
+        const html = getDebateSelectionHtml();
         if (!text || !debateModelCards) return;
         const session = ensureDebateSession(debateTabsState.activeSessionId);
         const sourceCard = debateSelectionState.target?.closest?.('.debate-model-card') || null;
@@ -13664,13 +14404,13 @@ function checkCompareButtonState() {
                 <span class="debate-model-card-meta">
                     <span class="debate-model-card-time">${hh}:${mm}</span>
                     <button type="button" class="ib debate-card-branch" title="Branch" aria-label="Branch"><i class="ti ti-git-branch"></i></button>
-                    <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy">⧉</button>
-                    <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML">⬆</button>
-                    <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete">🗑️</button>
-                    <button type="button" class="ib debate-fav active" title="Favorite" aria-label="Favorite">★</button>
+                    <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy"><i class="ti ti-copy" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete"><i class="ti ti-trash" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-fav active" title="Favorite" aria-label="Favorite"><i class="ti ti-star" aria-hidden="true"></i></button>
                 </span>
             </div>
-            <div class="debate-model-card-output">${escapeHtml(text)}</div>
+            <div class="debate-model-card-output">${html || escapeHtml(text)}</div>
         `;
         ensureDebateCardMessage(card, {
             kind: 'fragment',
@@ -13682,7 +14422,7 @@ function checkCompareButtonState() {
             model: sourceModel,
             role: sourceModel,
             text,
-            html: escapeHtml(text),
+            html: html || escapeHtml(text),
             timeLabel: `${hh}:${mm}`
         });
         syncDebateCardOutputLayout(card);
@@ -13850,6 +14590,11 @@ function checkCompareButtonState() {
                 return;
             }
 
+            const bodyClassNames = String(document.body.className || '').split(/\s+/).filter(Boolean);
+            if (!bodyClassNames.includes('pipeline-page') && !bodyClassNames.includes('prompt-submitted')) {
+                document.body.className = bodyClassNames.concat('prompt-submitted').join(' ');
+            }
+
             finalPrompt = applySelectedModifiersToPrompt(finalPrompt);
             const selectedLLMs = getSelectedLLMs();
             if (selectedLLMs.length === 0) {
@@ -13865,6 +14610,12 @@ function checkCompareButtonState() {
                 if (unsupported.length) {
                     showNotification(`These LLMs may not support attachments: ${unsupported.join(', ')}`, 'warn');
                 }
+            }
+
+            if (!isProModeActive) {
+                isProModeActive = true;
+                chrome.storage.local.set({ [proModeStorageKey]: true });
+                updateProModeUI(true);
             }
 
             let response = null;
@@ -14962,7 +15713,7 @@ function exportSingleTemplate(templateName, sourceData = null) {
                 const hasModel = Array.from(debateSenderSelect.options).some((opt) => opt.value === modelName);
                 if (hasModel) debateSenderSelect.value = modelName;
             }
-            if (promptInput) {
+            if (promptInput && isModeratorTextarea) {
                 promptInput.value = text;
                 autoGrowDebateTextarea(promptInput);
                 promptInput.focus();
@@ -15047,6 +15798,47 @@ function exportSingleTemplate(templateName, sourceData = null) {
         }
     });
     document.addEventListener('mouseup', (event) => {
+        if (event.target?.closest?.(`#${responseSelectionToolbarId}`)) return;
+        const target = event.target?.closest?.('.llm-panel .output');
+        if (!target || target.id === favoriteOutputId) {
+            hideResponseSelectionToolbar();
+            return;
+        }
+        requestAnimationFrame(() => showResponseSelectionToolbar(target));
+    });
+    document.addEventListener('mousedown', (event) => {
+        if (event.target?.closest?.(`#${responseSelectionToolbarId}`)) return;
+        if (!event.target?.closest?.('.llm-panel .output')) {
+            hideResponseSelectionToolbar();
+        }
+    });
+    document.addEventListener('click', (event) => {
+        const toolbar = event.target?.closest?.(`#${responseSelectionToolbarId}`);
+        if (!toolbar) return;
+        const btn = event.target.closest('button');
+        if (!btn) return;
+        event.preventDefault();
+        const color = btn.dataset.color || '';
+        const cmd = btn.dataset.cmd || '';
+        if (color) {
+            applyResponseSelectionStyle('hiliteColor', color);
+            return;
+        }
+        if (cmd) {
+            applyResponseSelectionStyle(cmd);
+            return;
+        }
+        if (btn.dataset.fav) {
+            const text = getResponseSelectionText();
+            const html = getResponseSelectionHtml();
+            const sourceCard = responseSelectionState.target?.closest?.('.llm-panel') || null;
+            if (addFavoriteFragmentFromSelection({ sourceCard, text, html })) {
+                hideResponseSelectionToolbar();
+                window.getSelection?.()?.removeAllRanges?.();
+            }
+        }
+    });
+    document.addEventListener('mouseup', (event) => {
         if (event.target?.closest?.('#debateSelTb')) return;
         const target = event.target?.closest?.('.debate-model-card-output, #mod-message-body');
         if (!target) {
@@ -15061,7 +15853,7 @@ function exportSingleTemplate(templateName, sourceData = null) {
             hideDebateSelectionToolbar();
         }
     });
-    if (promptInput) {
+    if (promptInput && isModeratorTextarea) {
         autoGrowDebateTextarea(promptInput);
         promptInput.addEventListener('input', () => autoGrowDebateTextarea(promptInput));
     }

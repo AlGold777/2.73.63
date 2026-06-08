@@ -104,6 +104,46 @@ describe('finalization evidence contract', () => {
     expect(evidence.contradictions).toContain('extract_failed_after_lifecycle_ready');
   });
 
+  test('classifies transport failures separately from extraction failures', () => {
+    const context = createSandbox();
+    const transportFailure = context.classifyFailure({
+      type: 'transport_error_after_submit',
+      message: 'A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received'
+    }, {
+      responseMeta: { source: 'passive_ping_error' }
+    });
+    expect(transportFailure).toEqual(expect.objectContaining({
+      class: 'transport',
+      recoveryFirst: true,
+      terminalRequiresEvidenceMiss: true
+    }));
+    expect(context.deriveFailureFinalStatus({ type: 'transport_error_after_submit' }, null, transportFailure)).toBe('ERROR');
+
+    const extractionFailure = context.classifyFailure({ type: 'extract_failed', message: 'no_answer_extracted' });
+    expect(extractionFailure.class).toBe('extraction');
+    expect(context.deriveFailureFinalStatus({ type: 'extract_failed' }, null, extractionFailure)).toBe('EXTRACT_FAILED');
+  });
+
+  test('records failure class in finalization evidence', () => {
+    const context = createSandbox();
+    const entry = context.jobState.llms.Perplexity;
+    const failureClassification = context.classifyFailure({
+      type: 'transport_error_after_submit',
+      message: 'message port closed'
+    });
+    const evidence = context.buildFinalizationEvidence('Perplexity', entry, {
+      finalStatus: 'ERROR',
+      finalReason: 'transport_error_after_submit',
+      error: { type: 'transport_error_after_submit', message: 'message port closed' },
+      trimmedAnswer: 'Error: transport_error_after_submit',
+      responseMeta: {},
+      failureClassification
+    });
+    expect(evidence.failureClass).toBe('transport');
+    expect(evidence.failureRecoveryFirst).toBe(true);
+    expect(evidence.terminalRequiresEvidenceMiss).toBe(true);
+  });
+
   test('records model run state and accepts failure after pre-final recovery', () => {
     const context = createSandbox();
     const entry = context.jobState.llms.Perplexity;

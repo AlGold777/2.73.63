@@ -3,7 +3,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Comparison</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/dist/tabler-icons.min.css">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -32,12 +31,12 @@
                             <input type="checkbox" id="notes-select-all" aria-label="Select all notes">
                             <span></span>
                         </label>
-                        <button type="button" class="notes-action-btn notes-export-btn" id="notes-export-btn" aria-label="Export selected" title="Export selected">⬆</button>
-                        <button type="button" class="notes-action-btn notes-delete-btn" id="notes-delete-btn" aria-label="Delete selected" title="Delete selected">🗑️</button>
+                        <button type="button" class="notes-action-btn notes-export-btn" id="notes-export-btn" aria-label="Export selected" title="Export selected"><i class="ti ti-download" aria-hidden="true"></i></button>
+                        <button type="button" class="notes-action-btn notes-delete-btn" id="notes-delete-btn" aria-label="Delete selected" title="Delete selected"><i class="ti ti-trash" aria-hidden="true"></i></button>
                     </div>
                     <div class="sessions-toolbar" id="sessions-toolbar" aria-label="Sessions toolbar">
                         <button type="button" class="sessions-action-btn sessions-save-btn" id="sessions-save-btn" aria-label="Save session">Save</button>
-                        <button type="button" class="sessions-action-btn sessions-delete-btn" id="sessions-delete-btn" aria-label="Delete session">🗑️</button>
+                        <button type="button" class="sessions-action-btn sessions-delete-btn" id="sessions-delete-btn" aria-label="Delete session"><i class="ti ti-trash" aria-hidden="true"></i></button>
                     </div>
                 </div>
                 <div class="notes-tabs-bar">
@@ -58,7 +57,7 @@
                 <div class="sidebar-hint">
                     <span id="notes-status">Stored locally on this device.</span>
                     <div class="sidebar-hint-actions">
-                        <button type="button" class="sidebar-hint-action" id="notes-hint-backup-export" title="Export backup" aria-label="Export notes and sessions">↑</button>
+                        <button type="button" class="sidebar-hint-action" id="notes-hint-backup-export" title="Export backup" aria-label="Export notes and sessions"><i class="ti ti-download" aria-hidden="true"></i></button>
                         <button type="button" class="sidebar-hint-action" id="notes-hint-backup-import" title="Import backup" aria-label="Import notes and sessions">↓</button>
                     </div>
                 </div>
@@ -70,7 +69,13 @@
                 <div class="top-control-bar">
                     <div class="top-bar-left">
                         <button type="button" class="sidebar-toggle-btn" id="left-sidebar-toggle" aria-pressed="false" data-tooltip="Notes panel" aria-label="Notes">
-                            <span class="sidebar-toggle-icon" aria-hidden="true">⍈</span>
+                            <svg class="sidebar-toggle-icon sidebar-toggle-icon-note" viewBox="0 0 80 90" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                <path d="M6,0 L56,0 L80,26 L80,84 Q80,90 74,90 L6,90 Q0,90 0,84 L0,6 Q0,0 6,0 Z" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"></path>
+                                <path d="M56,0 L56,26 L80,26" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                                <line x1="14" y1="44" x2="66" y2="44" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></line>
+                                <line x1="14" y1="58" x2="66" y2="58" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></line>
+                                <line x1="14" y1="72" x2="66" y2="72" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"></line>
+                            </svg>
                             <span class="sr-only">Notes</span>
                         </button>
                         <div class="logo-badge">
@@ -139,7 +144,15 @@
                             <span class="top-toggle-track"><span class="top-toggle-thumb"></span></span>
                         </label>
                         <button type="button" class="sidebar-toggle-btn right-sidebar-toggle-btn" id="right-sidebar-toggle" aria-pressed="false" aria-controls="pipeline-sidebar" data-tooltip="Pipeline panel" aria-label="Pipeline">
-                            <span class="sidebar-toggle-icon" aria-hidden="true">⍈</span>
+                            <svg class="sidebar-toggle-icon sidebar-toggle-icon-branch-v3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <circle cx="6" cy="3" r="2"></circle>
+                                <line x1="6" y1="5" x2="6" y2="10"></line>
+                                <circle cx="6" cy="12" r="2"></circle>
+                                <line x1="6" y1="14" x2="6" y2="17"></line>
+                                <circle cx="6" cy="19" r="2"></circle>
+                                <circle cx="18" cy="3" r="2"></circle>
+                                <path d="M8 12 C18 12 18 8 18 5"></path>
+                            </svg>
                             <span class="sr-only">Pipeline</span>
                         </button>
 
@@ -161,17 +174,34 @@
     <div id="prompt-note-view" class="prompt-note-view" role="textbox" aria-multiline="true" aria-label="Note view" data-placeholder="Note..."></div>
     
     <div id="suffix-container" class="modifier-chips-container"></div>
-    
-    <!-- Кнопки копирования и очистки теперь внутри обертки, но позиционируются абсолютно -->
+    <!-- Нижний ряд действий: кнопки слева, send справа -->
     <input type="file" id="prompt-attach-input" class="visually-hidden" multiple="">
-    <div class="prompt-action-rail" aria-label="Prompt actions">
-        <button type="button" id="prompt-attach-btn" class="prompt-export-btn" title="Attach file" aria-label="Attach file">+</button>
-        <button type="button" id="prompt-copy-btn" class="prompt-copy-btn" title="Copy prompt" aria-label="Copy prompt"><i class="ti ti-copy"></i></button>
-        <button type="button" id="prompt-export-html-btn" class="prompt-export-btn" title="Export as HTML" aria-label="Export as HTML"><i class="ti ti-download"></i></button>
-        <!-- JSON export button removed per latest UI request -->
-        <button type="button" id="clear-prompt-btn" class="prompt-clear-btn" title="Clear prompt" aria-label="Clear prompt"><i class="ti ti-trash"></i></button>
+    <div class="prompt-footer-actions" aria-label="Prompt actions">
+        <div class="prompt-action-rail prompt-action-rail-left">
+            <button type="button" id="toggle-modifiers-btn" class="prompt-mode-btn prompt-console-toggle-btn" title="Tuning Console" aria-label="Tuning Console" aria-pressed="false">
+                <span class="toggle-icon toggle-icon-console toggle-icon-slider" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" role="presentation">
+                        <line x1="5" y1="7" x2="19" y2="7"></line>
+                        <circle cx="10" cy="7" r="2"></circle>
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                        <circle cx="15" cy="12" r="2"></circle>
+                        <line x1="5" y1="17" x2="19" y2="17"></line>
+                        <circle cx="7" cy="17" r="2"></circle>
+                    </svg>
+                </span>
+            </button>
+            <button type="button" id="pro-stream-toggle-btn" class="prompt-mode-btn prompt-pro-toggle-btn" title="LLM Stream" aria-label="LLM Stream" aria-pressed="false">
+                <span class="toggle-icon toggle-icon-pro" data-icon="⌘" aria-hidden="true"></span>
+            </button>
+        </div>
+        <div class="prompt-footer-right">
+            <button type="button" id="prompt-attach-btn" class="prompt-export-btn" title="Attach file" aria-label="Attach file">+</button>
+            <button type="button" id="prompt-copy-btn" class="prompt-copy-btn" title="Copy prompt" aria-label="Copy prompt"><i class="ti ti-copy"></i></button>
+            <!-- JSON export button removed per latest UI request -->
+            <button type="button" id="clear-prompt-btn" class="prompt-clear-btn" title="Clear prompt" aria-label="Clear prompt"><i class="ti ti-trash"></i></button>
+            <button id="start-button" class="send-button send-button-floating" title="Send prompt"><i class="ti ti-send" aria-hidden="true"></i></button>
+        </div>
     </div>
-    <button id="start-button" class="send-button send-button-floating" title="Send prompt">▶</button>
 </div>
 <div class="attachment-bar" id="prompt-attachment-bar" aria-live="polite"></div>
             </div>
@@ -181,7 +211,7 @@
 <div class="llm-controls">
     <div class="control-buttons">
 <!-- 1.1. Правильная структура с оберткой для карточек -->
-<div class="modifiers-section" id="modifiers-section">
+<div class="modifiers-section" id="modifiers-section" hidden>
     <div class="modifiers-toggle-bar" id="modifiers-header">
             <span class="modifiers-toggle-label" data-mod-type="prefix">
                 <span class="toggle-icon toggle-icon-console toggle-icon-slider" aria-hidden="true">
@@ -201,8 +231,6 @@
                 <option value="default" selected="">Loading presets…</option>
             </select>
         </div>
-        <button type="button" id="toggle-modifiers-btn" class="toggle-modifiers-btn" aria-expanded="false" aria-controls="modifiers-container" aria-label="Show modifiers" title="Show modifiers">
-        </button>
         <span class="modifiers-toggle-label" data-mod-type="suffix" aria-hidden="true"></span>
     </div>
     <div id="modifiers-container" class="modifiers-container" aria-hidden="true">
@@ -222,14 +250,39 @@
         </div>
     </div>
 </div>
-<!-- Pro toggle -->
-<div class="pro-toggle-wrapper">
-        <div class="modifiers-section" id="pro-section">
+<div class="pro-toggle-wrapper" hidden>
+    <div class="modifiers-section" id="pro-section">
         <div class="modifiers-toggle-bar pro-toggle-bar" id="pro-header">
-            <span class="modifiers-toggle-label">
-            <span class="toggle-icon toggle-icon-pro" data-icon="⌘" aria-hidden="true"></span>
-            <span class="modifiers-toggle-label-pro">LLM Stream</span>
-            </span>
+            <div class="pro-toggle-top-row">
+                <span class="modifiers-toggle-label">
+                    <span class="toggle-icon toggle-icon-pro" data-icon="⌘" aria-hidden="true"></span>
+                    <span class="modifiers-toggle-label-pro">LLM Stream</span>
+                    <span class="view-toggle-group">
+                        <button type="button" id="view-grid-btn" class="view-mode-btn is-active" title="Grid view" aria-label="Grid view"></button>
+                        <button type="button" id="view-stack-btn" class="view-mode-btn" title="Stack view" aria-label="Stack view"></button>
+                    </span>
+                </span>
+                <div class="llm-header-bar controls-row pro-toggle-controls-row">
+                    <div class="get-it-center">
+                        <button id="get-it-button" class="control-button">Get It!</button>
+                    </div>
+                    <div class="llm-header-right">
+                        <div class="toolbar-cluster">
+                            <button id="export-html-btn" class="control-icon-btn" data-format="html" data-label="⬆ HTML" title="Export all responses as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+                            <button type="button" id="justice-toggle-btn" class="justice-toggle-btn" aria-label="Toggle LLM Stream controls" aria-pressed="false" title="Toggle LLM Stream controls">
+                                <svg class="justice-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                    <path d="M12 3v15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                                    <path d="M6 7h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                                    <path d="M4 7l-2.5 4h5L4 7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path>
+                                    <path d="M20 7l-2.5 4h5L20 7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path>
+                                    <path d="M8.5 19h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                                </svg>
+                            </button>
+                            <button id="clear-all-btn" class="panel-action-btn panel-clear-response-btn clear-all-btn" title="Clear all responses" aria-label="Clear all responses"><i class="ti ti-trash" aria-hidden="true"></i></button>
+                        </div>
+                    </div>
+                </div>
+            </div>
             <div class="llm-action-block" role="group" aria-label="Send and evaluator controls">
                 <button id="compare-button" class="action-button" disabled="" aria-label="Send" title="Send">►</button>
                 <select id="judge-system-prompt-select" class="dropdown dropdown-judge dropdown-judge-prompt action-select" aria-label="System prompt"></select>
@@ -245,24 +298,20 @@
         </div>
     </div>
 </div>
-    </div>
-</div>
-
-
 
 <!-- Evaluator section removed; controls relocated to header -->
-        
-         <!--omparison-section -->
+
+<!--omparison-section -->
   <div class="comparison-section hidden" id="comparison-section">
     <div class="comparison-panel" id="comparison-panel">
         <!-- 1.1. Добавляем заголовок с иконками управления, аналогичный панелям моделей -->
         <div class="llm-header">
             <span class="llm-title">Comparative Analysis</span>
             <div class="header-right">
-                <button class="panel-action-btn panel-clear-response-btn" data-target="comparison-output" title="Clear response" aria-label="Clear response">🗑️</button>
-                <button class="copy-btn" data-target="comparison-output" title="Copy response">⧉</button>
-                <button class="panel-action-btn panel-export-html-btn" data-target="comparison-output" data-name="Comparative Analysis" data-label="⬆" title="Export this response as HTML">⬆</button>
-                <button id="close-comparison-btn" class="panel-action-btn" title="Close panel" aria-label="Close panel">🗑️️</button>
+                <button class="panel-action-btn panel-clear-response-btn" data-target="comparison-output" title="Clear response" aria-label="Clear response"><i class="ti ti-trash" aria-hidden="true"></i></button>
+                <button class="copy-btn" data-target="comparison-output" title="Copy response"><i class="ti ti-copy" aria-hidden="true"></i></button>
+                <button class="panel-action-btn panel-export-html-btn" data-target="comparison-output" data-name="Comparative Analysis" data-label="⬆" title="Export this response as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+                <button id="close-comparison-btn" class="panel-action-btn" title="Close panel" aria-label="Close panel"><i class="ti ti-x" aria-hidden="true"></i></button>
             </div>
         </div>
         <div class="spinner" id="comparison-spinner"></div>
@@ -270,35 +319,6 @@
     </div>
    </div>      
         <!--end  of omparison-section -->
-
-
-        <!-- 1. Оборачиваем заголовок и кнопку Copy All в один контейнер -->
-        <div class="llm-header-bar controls-row">
-            <div class="llm-header-left">
-                <div class="view-toggle-group">
-                    <button type="button" id="view-grid-btn" class="view-mode-btn is-active" title="Grid view">|||</button>
-                    <button type="button" id="view-stack-btn" class="view-mode-btn" title="Stack view">≡</button>
-                </div>
-            </div>
-            <div class="get-it-center">
-                <button id="get-it-button" class="control-button">Get answers!</button>
-                <button type="button" id="justice-toggle-btn" class="justice-toggle-btn" aria-label="Toggle LLM Stream controls" aria-pressed="false" title="Toggle LLM Stream controls">
-                    <svg class="justice-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                        <path d="M12 3v15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-                        <path d="M6 7h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-                        <path d="M4 7l-2.5 4h5L4 7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path>
-                        <path d="M20 7l-2.5 4h5L20 7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path>
-                        <path d="M8.5 19h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
-                    </svg>
-                </button>
-            </div>
-            <div class="llm-header-right">
-              <button id="copy-all-btn" class="control-icon-btn" title="Copy all responses" aria-label="Copy all responses">⧉</button>
-                <button id="export-html-btn" class="control-icon-btn" data-format="html" data-label="⬆ HTML" title="Export all responses as HTML">⬆</button>
-                <button id="clear-all-btn" class="panel-action-btn panel-clear-response-btn clear-all-btn" title="Clear all responses" aria-label="Clear all responses">🗑️</button>
-            </div>
-        </div>
-
 
 
 <div class="llm-results">
@@ -310,9 +330,9 @@
             <span class="status-indicator" data-llm-name="GPT"></span>
         </div>
   <div class="header-right">
-     <button class="copy-btn" data-target="output-gpt" title="Copy response">⧉</button>
-    <button class="panel-action-btn panel-export-html-btn" data-target="output-gpt" data-name="GPT" data-label="⬆" title="Export this response as HTML">⬆</button>
-     <button class="panel-action-btn panel-clear-response-btn" data-target="output-gpt" title="Clear response" aria-label="Clear response">🗑️</button>
+     <button class="copy-btn" data-target="output-gpt" title="Copy response"><i class="ti ti-copy" aria-hidden="true"></i></button>
+    <button class="panel-action-btn panel-export-html-btn" data-target="output-gpt" data-name="GPT" data-label="⬆" title="Export this response as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+     <button class="panel-action-btn panel-clear-response-btn" data-target="output-gpt" title="Clear response" aria-label="Clear response"><i class="ti ti-trash" aria-hidden="true"></i></button>
 
 </div>
 </div>
@@ -327,9 +347,9 @@
             <span class="status-indicator" data-llm-name="Gemini"></span>
         </div>
   <div class="header-right">
-     <button class="copy-btn" data-target="output-gemini" title="Copy response">⧉</button>
-    <button class="panel-action-btn panel-export-html-btn" data-target="output-gemini" data-name="Gemini" data-label="⬆" title="Export this response as HTML">⬆</button>
-     <button class="panel-action-btn panel-clear-response-btn" data-target="output-gemini" title="Clear response" aria-label="Clear response">🗑️</button>
+     <button class="copy-btn" data-target="output-gemini" title="Copy response"><i class="ti ti-copy" aria-hidden="true"></i></button>
+    <button class="panel-action-btn panel-export-html-btn" data-target="output-gemini" data-name="Gemini" data-label="⬆" title="Export this response as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+     <button class="panel-action-btn panel-clear-response-btn" data-target="output-gemini" title="Clear response" aria-label="Clear response"><i class="ti ti-trash" aria-hidden="true"></i></button>
  
 </div>
 </div>
@@ -346,9 +366,9 @@
         <span class="status-indicator" data-llm-name="Claude"></span>
     </div>
   <div class="header-right">
-    <button class="copy-btn" data-target="output-claude" title="Copy response">⧉</button>
-    <button class="panel-action-btn panel-export-html-btn" data-target="output-claude" data-name="Claude" data-label="⬆" title="Export this response as HTML">⬆</button>
-     <button class="panel-action-btn panel-clear-response-btn" data-target="output-claude" title="Clear response" aria-label="Clear response">🗑️</button>
+    <button class="copy-btn" data-target="output-claude" title="Copy response"><i class="ti ti-copy" aria-hidden="true"></i></button>
+    <button class="panel-action-btn panel-export-html-btn" data-target="output-claude" data-name="Claude" data-label="⬆" title="Export this response as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+     <button class="panel-action-btn panel-clear-response-btn" data-target="output-claude" title="Clear response" aria-label="Clear response"><i class="ti ti-trash" aria-hidden="true"></i></button>
 
 </div>
 </div>
@@ -365,9 +385,9 @@
         <span class="status-indicator" data-llm-name="Grok"></span>
     </div>
   <div class="header-right">
-    <button class="copy-btn" data-target="output-grok" title="Copy response">⧉</button>
-    <button class="panel-action-btn panel-export-html-btn" data-target="output-grok" data-name="Grok" data-label="⬆" title="Export this response as HTML">⬆</button>
-     <button class="panel-action-btn panel-clear-response-btn" data-target="output-grok" title="Clear response" aria-label="Clear response">🗑️</button>
+    <button class="copy-btn" data-target="output-grok" title="Copy response"><i class="ti ti-copy" aria-hidden="true"></i></button>
+    <button class="panel-action-btn panel-export-html-btn" data-target="output-grok" data-name="Grok" data-label="⬆" title="Export this response as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+     <button class="panel-action-btn panel-clear-response-btn" data-target="output-grok" title="Clear response" aria-label="Clear response"><i class="ti ti-trash" aria-hidden="true"></i></button>
  
 </div>
 </div>
@@ -384,9 +404,9 @@
             <span class="status-indicator" data-llm-name="Le Chat"></span>
         </div>
   <div class="header-right">
-    <button class="copy-btn" data-target="output-lechat" title="Copy response">⧉</button>
-    <button class="panel-action-btn panel-export-html-btn" data-target="output-lechat" data-name="Le Chat" data-label="⬆" title="Export this response as HTML">⬆</button>
-     <button class="panel-action-btn panel-clear-response-btn" data-target="output-lechat" title="Clear response" aria-label="Clear response">🗑️</button>
+    <button class="copy-btn" data-target="output-lechat" title="Copy response"><i class="ti ti-copy" aria-hidden="true"></i></button>
+    <button class="panel-action-btn panel-export-html-btn" data-target="output-lechat" data-name="Le Chat" data-label="⬆" title="Export this response as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+     <button class="panel-action-btn panel-clear-response-btn" data-target="output-lechat" title="Clear response" aria-label="Clear response"><i class="ti ti-trash" aria-hidden="true"></i></button>
  
 </div>
 </div>
@@ -404,9 +424,9 @@
             <span class="status-indicator" data-llm-name="Qwen"></span>
         </div>
   <div class="header-right">
-     <button class="copy-btn" data-target="output-qwen" title="Copy response">⧉</button>
-    <button class="panel-action-btn panel-export-html-btn" data-target="output-qwen" data-name="Qwen" data-label="⬆" title="Export this response as HTML">⬆</button>
-     <button class="panel-action-btn panel-clear-response-btn" data-target="output-qwen" title="Clear response" aria-label="Clear response">🗑️</button>
+     <button class="copy-btn" data-target="output-qwen" title="Copy response"><i class="ti ti-copy" aria-hidden="true"></i></button>
+    <button class="panel-action-btn panel-export-html-btn" data-target="output-qwen" data-name="Qwen" data-label="⬆" title="Export this response as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+     <button class="panel-action-btn panel-clear-response-btn" data-target="output-qwen" title="Clear response" aria-label="Clear response"><i class="ti ti-trash" aria-hidden="true"></i></button>
   
 </div>
 </div>
@@ -423,9 +443,9 @@
             <span class="status-indicator" data-llm-name="DeepSeek"></span>
         </div>
   <div class="header-right">
-     <button class="copy-btn" data-target="output-deepseek" title="Copy response">⧉</button>
-    <button class="panel-action-btn panel-export-html-btn" data-target="output-deepseek" data-name="DeepSeek" data-label="⬆" title="Export this response as HTML">⬆</button>
-     <button class="panel-action-btn panel-clear-response-btn" data-target="output-deepseek" title="Clear response" aria-label="Clear response">🗑️</button>
+     <button class="copy-btn" data-target="output-deepseek" title="Copy response"><i class="ti ti-copy" aria-hidden="true"></i></button>
+    <button class="panel-action-btn panel-export-html-btn" data-target="output-deepseek" data-name="DeepSeek" data-label="⬆" title="Export this response as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+     <button class="panel-action-btn panel-clear-response-btn" data-target="output-deepseek" title="Clear response" aria-label="Clear response"><i class="ti ti-trash" aria-hidden="true"></i></button>
  
 </div>
 </div>
@@ -442,9 +462,9 @@
             <span class="status-indicator" data-llm-name="Perplexity"></span>
         </div>
   <div class="header-right">
-     <button class="copy-btn" data-target="output-perplexity" title="Copy response">⧉</button>
-    <button class="panel-action-btn panel-export-html-btn" data-target="output-perplexity" data-name="Perplexity" data-label="⬆" title="Export this response as HTML">⬆</button>
-     <button class="panel-action-btn panel-clear-response-btn" data-target="output-perplexity" title="Clear response" aria-label="Clear response">🗑️</button>
+     <button class="copy-btn" data-target="output-perplexity" title="Copy response"><i class="ti ti-copy" aria-hidden="true"></i></button>
+    <button class="panel-action-btn panel-export-html-btn" data-target="output-perplexity" data-name="Perplexity" data-label="⬆" title="Export this response as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+     <button class="panel-action-btn panel-clear-response-btn" data-target="output-perplexity" title="Clear response" aria-label="Clear response"><i class="ti ti-trash" aria-hidden="true"></i></button>
  
 </div>
 </div>
@@ -592,7 +612,7 @@
                                     <div class="telemetry-actions">
                                         <button type="button" class="diag-icon-btn diag-export-all-logs-btn" id="export-all-logs-md-telemetry" aria-label="Export diagnostics and telemetry as Markdown" title="Export All Logs">Export</button>
                                         <button type="button" class="devtools-pill-btn" id="telemetry-refresh-btn" title="Refresh" aria-label="Refresh">↻</button>
-                                        <button type="button" class="devtools-pill-btn" id="telemetry-copy-btn" title="Copy" aria-label="Copy">⧉</button>
+                                        <button type="button" class="devtools-pill-btn" id="telemetry-copy-btn" title="Copy" aria-label="Copy"><i class="ti ti-copy" aria-hidden="true"></i></button>
                                         <button type="button" class="devtools-pill-btn" id="telemetry-export-json-btn" title="Export telemetry as JSON" aria-label="Export telemetry as JSON">{ }</button>
                                         <button type="button" class="devtools-pill-btn" id="telemetry-reset-btn" title="Reset" aria-label="Reset">🗑</button>
                                     </div>
@@ -617,9 +637,9 @@
                                         <div class="diagnostics-panel">
                                             <div class="diagnostics-header">
                                                 <div class="diagnostics-actions">
-                                                    <button type="button" class="diag-icon-btn diag-export-all-btn" id="export-diagnostics-html" aria-label="Export all diagnostics logs as HTML" title="Export all logs as HTML">⬆</button>
-                                                    <button type="button" class="diag-icon-btn diag-copy-all-btn" id="copy-diagnostics-logs" aria-label="Copy all diagnostics logs" title="Copy all logs">⧉</button>
-                                                    <button type="button" class="diag-icon-btn diag-clear-btn" id="clear-diagnostics-logs" aria-label="Clear diagnostics logs" title="Clear logs">🗑️</button>
+                                                    <button type="button" class="diag-icon-btn diag-export-all-btn" id="export-diagnostics-html" aria-label="Export all diagnostics logs as HTML" title="Export all logs as HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+                                                    <button type="button" class="diag-icon-btn diag-copy-all-btn" id="copy-diagnostics-logs" aria-label="Copy all diagnostics logs" title="Copy all logs"><i class="ti ti-copy" aria-hidden="true"></i></button>
+                                                    <button type="button" class="diag-icon-btn diag-clear-btn" id="clear-diagnostics-logs" aria-label="Clear diagnostics logs" title="Clear logs"><i class="ti ti-trash" aria-hidden="true"></i></button>
                                                 </div>
                                             </div>
                                             <div class="diagnostics-log-wrapper" id="diagnostics-log-wrapper" data-log-pane="diagnostics">
@@ -689,7 +709,7 @@
                                                 <span id="selector-health-status" class="selector-health-status">no data</span>
                                             </div>
                                             <div class="selector-health-actions">
-                                                <button type="button" class="ghost-icon-btn" id="copy-selector-health-btn" title="Copy selector health" aria-label="Copy selector health">⧉</button>
+                                                <button type="button" class="ghost-icon-btn" id="copy-selector-health-btn" title="Copy selector health" aria-label="Copy selector health"><i class="ti ti-copy" aria-hidden="true"></i></button>
                                                 <button type="button" class="ghost-icon-btn" id="export-selector-health-btn" title="Export selector health JSON" aria-label="Export selector health JSON">{ }</button>
                                                 <button type="button" class="ghost-icon-btn" id="refresh-selector-health-btn" title="Refresh selector health" aria-label="Refresh selector health">↻</button>
                                             </div>
@@ -715,7 +735,7 @@
                                                 </label>
                                                 <div class="selectors-header-actions">
                                                     <button class="selectors-btn selectors-btn-export" type="button" data-selectors-action="export" aria-label="Export selectors">
-                                                        ⬆
+                                                        <i class="ti ti-download" aria-hidden="true"></i>
                                                     </button>
                                                     <button class="selectors-btn selectors-btn-import" type="button" data-selectors-action="import" aria-label="Import selectors">
                                                         ↓
