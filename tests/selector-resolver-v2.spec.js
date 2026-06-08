@@ -112,6 +112,50 @@ describe('SelectorResolverV2 and ResponseLifecycleDetector', () => {
     expect(result.element).toBe(composer);
   });
 
+  test('broken selector health profile skips exact/cache and uses fallback strategy', async () => {
+    await chrome.storage.local.set({
+      selector_health_profile_v1: {
+        updatedAt: Date.now(),
+        profiles: {
+          'GPT::composer': {
+            profileStatus: 'broken',
+            hits: 0,
+            failures: 4,
+            total: 4,
+            updatedAt: Date.now()
+          }
+        }
+      }
+    });
+
+    const exactCandidate = document.createElement('div');
+    exactCandidate.id = 'bad-composer';
+    exactCandidate.setAttribute('contenteditable', 'true');
+    exactCandidate.setAttribute('role', 'textbox');
+    exactCandidate.setAttribute('aria-label', 'Message');
+    setRect(exactCandidate, { top: 30, left: 20, width: 500, height: 60 });
+    document.body.appendChild(exactCandidate);
+
+    const composer = document.createElement('textarea');
+    composer.placeholder = 'Write your message';
+    setRect(composer, { top: 700, left: 120, width: 600, height: 80 });
+    document.body.appendChild(composer);
+
+    const result = await window.SelectorResolverV2.resolveComposer({
+      modelName: 'GPT',
+      selectors: ['#bad-composer']
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.method).not.toBe('exact');
+    expect(result.diagnostics).toEqual(expect.objectContaining({
+      selectorProfileStatus: 'broken',
+      selectorProfileBroken: true,
+      exactSkipped: true,
+      cacheSkipped: true
+    }));
+  });
+
   test('rejects hidden composer and header search box', async () => {
     const header = document.createElement('header');
     const search = document.createElement('input');

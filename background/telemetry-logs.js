@@ -14,6 +14,7 @@ const DIAG_KEY = '__diagnostics_events__';
 // v2.54.24 (2025-12-22 23:14 UTC): Telemetry sampling (Purpose: cap diagnostics volume to 5% of sessions).
 const TELEMETRY_SAMPLE_RATE = 0.05;
 const TELEMETRY_SCHEMA_VERSION = 2;
+const TELEMETRY_TAXONOMY_SCHEMA_VERSION = 1;
 const telemetrySampleCache = new TTLMap({ ttlMs: 10 * 60 * 1000, maxSize: 50 });
 const pipelineCompleteCache = new TTLMap({ ttlMs: 10 * 60 * 1000, maxSize: 200 });
 const POST_TERMINAL_NOISE_LABELS = new Set([
@@ -80,6 +81,73 @@ function getAppVersion() {
   }
 }
 
+function normalizeTelemetryTaxonomy(entry = {}) {
+  const label = String(entry?.label || entry?.event || entry?.meta?.event || '').trim();
+  const eventKey = label
+    ? label.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+    : 'UNKNOWN';
+  const haystack = [
+    eventKey,
+    entry?.details || '',
+    entry?.meta?.reason || '',
+    entry?.meta?.failureClass || ''
+  ].join(' ').toLowerCase();
+
+  const stage = (() => {
+    if (/round|run_summary|run_start|collection_start/.test(haystack)) return 'rounds';
+    if (/dispatch|prompt|send|ack|handshake|page_ready|port_closed/.test(haystack)) return 'dispatch';
+    if (/materialize|extract|answer|selector|late_collect|response/.test(haystack)) return 'extraction';
+    if (/recovery|retry|budget/.test(haystack)) return 'recovery';
+    if (/lease|focus|visit|tab_/.test(haystack)) return 'lease';
+    if (/final|terminal|model_final|model_missing/.test(haystack)) return 'finalization';
+    return 'runtime';
+  })();
+
+  const domain = (() => {
+    if (stage === 'lease') return 'tab_lifecycle';
+    if (stage === 'extraction') return 'answer_extraction';
+    if (stage === 'dispatch') return 'prompt_dispatch';
+    if (stage === 'finalization') return 'finalization';
+    if (stage === 'recovery') return 'recovery';
+    if (stage === 'rounds') return 'round_orchestration';
+    return 'runtime';
+  })();
+
+  const outcome = (() => {
+    if (/duplicate|deduplicated|ignored/.test(haystack)) return 'ignored';
+    if (/success|accepted|granted|consumed|complete| ok\b|_ok\b/.test(haystack)) return 'success';
+    if (/fail|error|timeout|denied|blocked|exhausted|missing|rejected/.test(haystack)) return 'failure';
+    if (/start|begin/.test(haystack)) return 'start';
+    if (/end|finish|done/.test(haystack)) return 'complete';
+    return 'info';
+  })();
+
+  const eventClass = (() => {
+    if (
+      eventKey.includes('MODEL_FINAL_IGNORED_DEDUPLICATED')
+      || (eventKey === 'MODEL_FINAL' && /duplicate|deduplicated|duplicate_final/.test(haystack))
+      || /duplicate_final/.test(haystack)
+    ) {
+      return 'finalization_duplicate_ignored';
+    }
+    if (stage === 'dispatch' && outcome === 'failure') return 'dispatch_failure';
+    if (stage === 'extraction' && outcome === 'failure') return 'extraction_failure';
+    if (stage === 'recovery' && outcome === 'failure') return 'recovery_failure';
+    if (stage === 'lease' && outcome === 'failure') return 'lease_lifecycle_failure';
+    if (stage === 'finalization' && outcome === 'success') return 'finalization_success';
+    return `${stage}_${outcome}`;
+  })();
+
+  return {
+    schemaVersion: TELEMETRY_TAXONOMY_SCHEMA_VERSION,
+    eventKey,
+    domain,
+    stage,
+    outcome,
+    eventClass
+  };
+}
+
 function appendLogEntry(llmName, entry = {}) {
   const buffer = ensureLogBuffer(llmName);
   if (!buffer) return null;
@@ -94,13 +162,22 @@ function appendLogEntry(llmName, entry = {}) {
     llmName,
     tabId: jobState?.llms?.[llmName]?.tabId || null
   };
+  const mergedMeta = { ...sharedMeta, ...(entry.meta || {}) };
+  if (!mergedMeta.telemetryTaxonomy) {
+    mergedMeta.telemetryTaxonomy = normalizeTelemetryTaxonomy({
+      label: entry.label || '',
+      details: entry.details || '',
+      level: entry.level || 'info',
+      meta: mergedMeta
+    });
+  }
   const logEntry = {
     ts: entry.ts || Date.now(),
     type: entry.type || 'INFO',
     label: entry.label || '',
     details: entry.details || '',
     level: entry.level || 'info',
-    meta: { ...sharedMeta, ...(entry.meta || {}) }
+    meta: mergedMeta
   };
   buffer.push(logEntry);
   if (buffer.length > MAX_LOG_ENTRIES) {
@@ -349,6 +426,9 @@ const dropOldestUnpinned = (entries = []) => {
 
 function normalizeTelemetryEntry(entry = {}, llmName) {
   const meta = ensureTelemetryMeta({ ...(entry.meta || {}) }, llmName);
+  if (!meta.telemetryTaxonomy) {
+    meta.telemetryTaxonomy = normalizeTelemetryTaxonomy({ ...entry, meta });
+  }
   return {
     ts: entry.ts || Date.now(),
     type: entry.type || 'TELEMETRY',
@@ -483,6 +563,7 @@ self.PLATFORM_DEGRADED_HOURLY_COOLDOWN_MS = PLATFORM_DEGRADED_HOURLY_COOLDOWN_MS
 self.PLATFORM_HISTORY_MAX = PLATFORM_HISTORY_MAX;
 self.MAX_LOG_ENTRIES = MAX_LOG_ENTRIES;
 self.TELEMETRY_SAMPLE_RATE = TELEMETRY_SAMPLE_RATE;
+self.TELEMETRY_TAXONOMY_SCHEMA_VERSION = TELEMETRY_TAXONOMY_SCHEMA_VERSION;
 self.telemetrySampleCache = telemetrySampleCache;
 self.appendLogEntry = appendLogEntry;
 self.getLogSnapshot = getLogSnapshot;
@@ -494,6 +575,7 @@ self.resolveLlmName = resolveLlmName;
 self.hashTelemetryKey = hashTelemetryKey;
 self.resolveTelemetrySampling = resolveTelemetrySampling;
 self.isTelemetryEntry = isTelemetryEntry;
+self.normalizeTelemetryTaxonomy = normalizeTelemetryTaxonomy;
 self.normalizeTelemetryEntry = normalizeTelemetryEntry;
 self.shouldIgnorePostTerminalDiagnostic = shouldIgnorePostTerminalDiagnostic;
 self.persistDiagnosticEvent = persistDiagnosticEvent;

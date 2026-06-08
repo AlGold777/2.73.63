@@ -208,7 +208,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.warn('[RESULTS] Failed to clear modifiers on load', err);
         }
     });
-    window.clearModifierSelectionsOnLoad?.();
     const responseLinkContainerSelector = [
         '.llm-panel .output',
         '.response-content',
@@ -1307,6 +1306,9 @@ document.addEventListener('click', (event) => {
                 [MODIFIER_SELECTIONS_STORAGE_KEY]: modifierSelectionsMap,
                 ...(MODIFIER_SELECTED_FALLBACK_KEY ? { [MODIFIER_SELECTED_FALLBACK_KEY]: selectedModifierIds } : {})
             });
+            if (typeof persistCrossViewUiState === 'function') {
+                persistCrossViewUiState();
+            }
         };
 
         async function loadModifiers(presetId = currentModifierPresetId, { restoreSelections = true } = {}) {
@@ -1354,7 +1356,7 @@ document.addEventListener('click', (event) => {
                 } else {
                     selectedModifierIds = [];
                 }
-                if (restoreSelections) {
+                if (restoreSelections && !suppressCrossViewPersistenceOnLoad) {
                     persistModifierSelections();
                 }
 
@@ -1419,8 +1421,10 @@ document.addEventListener('click', (event) => {
                     modifierPresetSelectBound = true;
                 }
             }
-            window.clearModifierSelectionsOnLoad?.();
-            await loadModifiers(currentModifierPresetId, { restoreSelections: false });
+            if (!preserveCrossViewStateOnLoad) {
+                window.clearModifierSelectionsOnLoad?.();
+            }
+            await loadModifiers(currentModifierPresetId, { restoreSelections: preserveCrossViewStateOnLoad });
         }
 
 
@@ -1468,6 +1472,249 @@ document.addEventListener('click', (event) => {
     const evaluatorSelect = document.getElementById('evaluator-select');
     const viewGridBtn = document.getElementById('view-grid-btn');
     const viewStackBtn = document.getElementById('view-stack-btn');
+    const crossViewUiStateKey = 'llmComparatorCrossViewUiState';
+    const crossViewNavigationIntentKey = 'llmComparatorCrossViewNavigationIntent';
+    const crossViewNavigationIntentTtlMs = 15000;
+    let preserveCrossViewStateOnLoad = false;
+    let suppressCrossViewPersistenceOnLoad = false;
+    const getCurrentViewKey = () => document.body.classList.contains('pipeline-page') ? 'pipeline' : 'main';
+    const safeStorageLocalGet = (keys) => new Promise((resolve) => {
+        try {
+            if (!chrome?.storage?.local) {
+                resolve({});
+                return;
+            }
+            const result = chrome.storage.local.get(keys, (data) => resolve(data || {}));
+            if (result && typeof result.then === 'function') {
+                result.then((data) => resolve(data || {})).catch(() => resolve({}));
+            }
+        } catch (_) {
+            resolve({});
+        }
+    });
+    const safeStorageLocalSet = (payload) => new Promise((resolve) => {
+        try {
+            if (!chrome?.storage?.local) {
+                resolve(false);
+                return;
+            }
+            chrome.storage.local.set(payload, () => resolve(!chrome.runtime?.lastError));
+        } catch (_) {
+            resolve(false);
+        }
+    });
+    const safeStorageLocalRemove = (keys) => new Promise((resolve) => {
+        try {
+            if (!chrome?.storage?.local) {
+                resolve(false);
+                return;
+            }
+            const result = chrome.storage.local.remove(keys, () => resolve(!chrome.runtime?.lastError));
+            if (result && typeof result.then === 'function') {
+                result.then(() => resolve(true)).catch(() => resolve(false));
+            }
+        } catch (_) {
+            resolve(false);
+        }
+    });
+    const consumeCrossViewNavigationIntentOnLoad = async () => {
+        const stored = await safeStorageLocalGet(crossViewNavigationIntentKey);
+        const intent = stored[crossViewNavigationIntentKey];
+        await safeStorageLocalRemove(crossViewNavigationIntentKey);
+        if (!intent || typeof intent !== 'object') return false;
+        const targetView = String(intent.targetView || '');
+        if (targetView !== getCurrentViewKey()) return false;
+        const savedAt = Number(intent.savedAt || 0);
+        return savedAt > 0 && Date.now() - savedAt <= crossViewNavigationIntentTtlMs;
+    };
+    const getPromptDraftText = () => {
+        if (promptInput) return String(promptInput.value || '');
+        return String(document.getElementById('prompt-input')?.value || document.getElementById('modTa')?.value || '');
+    };
+    const clearCrossViewPromptState = async () => {
+        const stored = await safeStorageLocalGet(crossViewUiStateKey);
+        const existing = stored[crossViewUiStateKey];
+        if (!existing || typeof existing !== 'object') return;
+        const nextState = normalizeCrossViewUiState(existing);
+        ['main', 'pipeline'].forEach((viewKey) => {
+            const viewState = nextState.views?.[viewKey];
+            if (!viewState || typeof viewState !== 'object') return;
+            delete viewState.promptText;
+            delete viewState.modelButtonIds;
+            if (viewState.bodyFlags && typeof viewState.bodyFlags === 'object') {
+                delete viewState.bodyFlags.promptSubmitted;
+                if (!Object.keys(viewState.bodyFlags).length) {
+                    delete viewState.bodyFlags;
+                }
+            }
+            if (viewState.formControls && typeof viewState.formControls === 'object') {
+                delete viewState.formControls['prompt-input'];
+                delete viewState.formControls.modTa;
+            }
+        });
+        await safeStorageLocalSet({ [crossViewUiStateKey]: nextState });
+    };
+    const normalizeCrossViewUiState = (rawState = null) => {
+        const normalized = {
+            version: 2,
+            savedAt: rawState?.savedAt || 0,
+            views: {
+                main: {},
+                pipeline: {}
+            },
+            shared: {}
+        };
+        if (!rawState || typeof rawState !== 'object') return normalized;
+        if (rawState.views && typeof rawState.views === 'object') {
+            normalized.savedAt = rawState.savedAt || normalized.savedAt;
+            normalized.views.main = rawState.views.main && typeof rawState.views.main === 'object' ? rawState.views.main : {};
+            normalized.views.pipeline = rawState.views.pipeline && typeof rawState.views.pipeline === 'object' ? rawState.views.pipeline : {};
+            normalized.shared = rawState.shared && typeof rawState.shared === 'object' ? rawState.shared : {};
+            return normalized;
+        }
+        const legacyView = rawState.sourcePage === 'pipeline_panel.html'
+            ? 'pipeline'
+            : (rawState.sourcePage ? 'main' : getCurrentViewKey());
+        const {
+            outputs,
+            sourcePage,
+            version,
+            ...legacyViewState
+        } = rawState;
+        normalized.views[legacyView] = legacyViewState;
+        if (outputs && typeof outputs === 'object') {
+            normalized.shared.outputs = outputs;
+        }
+        return normalized;
+    };
+    const collectCurrentViewUiState = () => {
+        const formControls = {};
+        document.querySelectorAll('.app-main input[id], .app-main textarea[id], .app-main select[id]').forEach((el) => {
+            if (!el.id || el.type === 'file' || el.type === 'password') return;
+            formControls[el.id] = el.type === 'checkbox' || el.type === 'radio'
+                ? { type: el.type, checked: !!el.checked, value: el.value || '' }
+                : { type: el.type || el.tagName.toLowerCase(), value: el.value || '' };
+        });
+        return {
+            savedAt: Date.now(),
+            bodyFlags: {
+                promptSubmitted: document.body.classList.contains('prompt-submitted')
+            },
+            promptText: getPromptDraftText(),
+            modelButtonIds: Array.from(llmButtons)
+                .filter((button) => button.classList.contains('active'))
+                .map((button) => button.id)
+                .filter(Boolean),
+            modifiers: {
+                presetId: currentModifierPresetId,
+                selectedIds: Array.isArray(selectedModifierIds) ? [...selectedModifierIds] : [],
+                customText: { ...modifierCustomText }
+            },
+            formControls
+        };
+    };
+    const collectSharedUiState = () => {
+        const outputs = {};
+        document.querySelectorAll('.llm-panel .output[id], #comparison-output').forEach((el) => {
+            outputs[el.id] = el.innerHTML || '';
+        });
+        return { outputs };
+    };
+    const persistCrossViewUiState = async () => {
+        const stored = await safeStorageLocalGet(crossViewUiStateKey);
+        const nextState = normalizeCrossViewUiState(stored[crossViewUiStateKey]);
+        const viewKey = getCurrentViewKey();
+        nextState.savedAt = Date.now();
+        nextState.views[viewKey] = collectCurrentViewUiState();
+        const shared = collectSharedUiState();
+        nextState.shared = nextState.shared && typeof nextState.shared === 'object' ? nextState.shared : {};
+        if (Object.keys(shared.outputs || {}).length) {
+            nextState.shared.outputs = shared.outputs;
+        }
+        const hasModifierControls = Boolean(document.querySelector('input[data-mod-id]'));
+        if (!hasModifierControls && stored[crossViewUiStateKey]?.views?.[viewKey]?.modifiers) {
+            nextState.views[viewKey].modifiers = stored[crossViewUiStateKey].views[viewKey].modifiers;
+        }
+        await safeStorageLocalSet({ [crossViewUiStateKey]: nextState });
+    };
+    const applyCrossViewUiState = (rawState = {}) => {
+        if (!rawState || typeof rawState !== 'object') return;
+        const normalized = normalizeCrossViewUiState(rawState);
+        const state = normalized.views[getCurrentViewKey()] || {};
+        const activeIds = Array.isArray(state.modelButtonIds) ? state.modelButtonIds : [];
+        if (Object.prototype.hasOwnProperty.call(state, 'modelButtonIds') && Array.isArray(state.modelButtonIds)) {
+            llmButtons.forEach((button) => {
+                const isActive = activeIds.includes(button.id);
+                button.classList.toggle('active', isActive);
+                const llmId = button.id.replace('llm-', '');
+                const panel = document.getElementById(`panel-${llmId}`);
+                if (panel) panel.style.display = isActive ? 'block' : 'none';
+            });
+        }
+        Object.entries(state.formControls || {}).forEach(([id, snapshot]) => {
+            const el = document.getElementById(id);
+            if (!el || !snapshot) return;
+            if ((el.type === 'checkbox' || el.type === 'radio') && typeof snapshot.checked === 'boolean') {
+                el.checked = snapshot.checked;
+                return;
+            }
+            if ('value' in snapshot && el.type !== 'file' && el.type !== 'password') {
+                el.value = String(snapshot.value || '');
+            }
+        });
+        if (promptInput && Object.prototype.hasOwnProperty.call(state, 'promptText')) {
+            promptInput.value = String(state.promptText || '');
+        }
+        Object.entries(normalized.shared?.outputs || {}).forEach(([id, html]) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            replaceChildrenFromSanitizedHtml(el, sanitizeInlineHtml(String(html || '')));
+        });
+        if (state.modifiers && typeof state.modifiers === 'object') {
+            if (state.modifiers.presetId) {
+                currentModifierPresetId = String(state.modifiers.presetId);
+            }
+            selectedModifierIds = Array.isArray(state.modifiers.selectedIds)
+                ? state.modifiers.selectedIds.filter(Boolean)
+                : [];
+            clearModifierOverrides();
+            Object.assign(modifierCustomText, state.modifiers.customText || {});
+            document.querySelectorAll('input[data-mod-id]').forEach((checkbox) => {
+                checkbox.checked = selectedModifierIds.includes(checkbox.dataset.modId);
+            });
+            renderActiveModifiers();
+            updateModifierGroupHighlights();
+            updatePromptPlaceholder();
+        }
+        if (state.bodyFlags?.promptSubmitted && !document.body.classList.contains('pipeline-page')) {
+            const classes = String(document.body.className || '').split(/\s+/).filter(Boolean);
+            if (!classes.includes('prompt-submitted')) {
+                document.body.className = classes.concat('prompt-submitted').join(' ');
+            }
+        }
+        checkCompareButtonState();
+        renderDiagnosticsModal();
+        notifySelectionChanged();
+        syncModeratorSelectors();
+        syncModeratorMiniPrompts();
+    };
+    const restoreCrossViewUiState = async () => {
+        const data = await safeStorageLocalGet(crossViewUiStateKey);
+        applyCrossViewUiState(data[crossViewUiStateKey]);
+    };
+    document.addEventListener('input', (event) => {
+        if (!event.target?.closest?.('.app-main')) return;
+        if (!event.target.matches?.('input[id], textarea[id], select[id]')) return;
+        persistCrossViewUiState();
+    });
+    document.addEventListener('change', (event) => {
+        if (!event.target?.closest?.('.app-main')) return;
+        if (!event.target.matches?.('input[id], textarea[id], select[id]')) return;
+        persistCrossViewUiState();
+    });
+    window.addEventListener('beforeunload', () => {
+        persistCrossViewUiState();
+    });
     const autoCheckbox = document.getElementById('auto-checkbox');
     const debateAutoPauseBtn = document.getElementById('debate-auto-pause-btn');
     const prefixToggleLabel = document.querySelector('.modifiers-toggle-label[data-mod-type="prefix"]');
@@ -1622,6 +1869,24 @@ document.addEventListener('click', (event) => {
             resolve(response);
         });
     });
+    const getActiveRunState = async () => {
+        try {
+            const response = await sendToBackground({ type: 'GET_ACTIVE_RUN_STATE' });
+            return response?.status === 'ok' ? response : null;
+        } catch (err) {
+            console.warn('[RESULTS] Failed to read active run state', err);
+            return null;
+        }
+    };
+    const ensureNoOtherViewRun = async () => {
+        const runState = await getActiveRunState();
+        if (!runState?.active) return true;
+        const currentView = getCurrentViewKey();
+        if (runState.sourceView && runState.sourceView === currentView) return true;
+        const sourceLabel = runState.sourceView === 'pipeline' ? 'Pipeline' : 'главной странице';
+        showNotification(`Дождитесь завершения запроса на ${sourceLabel}.`, 'warn');
+        return false;
+    };
 
     const renderPromptAttachments = () => {
         if (!promptAttachmentBar) return;
@@ -2210,14 +2475,22 @@ document.addEventListener('click', (event) => {
     };
 
     if (rightSidebarToggleBtn) {
-        rightSidebarToggleBtn.addEventListener('click', (event) => {
+        rightSidebarToggleBtn.addEventListener('click', async (event) => {
             event.preventDefault();
             const currentPage = (window.location.pathname.split('/').pop() || '').toLowerCase();
             const targetPage = currentPage === 'pipeline_panel.html' ? 'result_new.html' : 'pipeline_panel.html';
             try {
                 if (chrome?.storage?.local) {
                     const targetView = targetPage === 'pipeline_panel.html' ? 'pipeline' : 'main';
-                    chrome.storage.local.set({ llmComparatorLastPipelineView: targetView });
+                    await persistCrossViewUiState();
+                    await safeStorageLocalSet({
+                        llmComparatorLastPipelineView: targetView,
+                        [crossViewNavigationIntentKey]: {
+                            sourceView: getCurrentViewKey(),
+                            targetView,
+                            savedAt: Date.now()
+                        }
+                    });
                 }
             } catch (err) {
                 console.warn('[RESULTS] Failed to persist pipeline view state', err);
@@ -3273,13 +3546,22 @@ document.addEventListener('click', (event) => {
             signal = null
         }) => {
             if (!models.length) return { responses: {}, missing: [], timedOut: false };
+            if (!(await ensureNoOtherViewRun())) {
+                throw new Error('Another page has an active request.');
+            }
+            const sourceView = getCurrentViewKey();
+            const pipelineContext = {
+                ...(context && typeof context === 'object' ? context : {}),
+                sourceView
+            };
             const payloadBase = {
                 type: 'START_FULLPAGE_PROCESS',
                 prompt,
                 selectedLLMs: models,
                 forceNewTabs,
                 useApiFallback,
-                pipelineContext: context
+                sourceView,
+                pipelineContext
             };
 
             if (attachments.length) {
@@ -11242,6 +11524,8 @@ document.addEventListener('click', (event) => {
         document.querySelectorAll(`.status-indicator[data-llm-name="${normalizedName}"]`).forEach((indicator) => {
             delete indicator.dataset.currentStatus;
             delete indicator.dataset.statusRank;
+            delete indicator.dataset.resultPhase;
+            delete indicator.dataset.resultLabel;
         });
     }
 
@@ -11324,6 +11608,16 @@ document.addEventListener('click', (event) => {
             status: normalizedStatus,
             rank: incomingRank,
             modelRunState: data?.modelRunState || null,
+            resultMeta: window.LLMStatusContract?.deriveResultMeta
+                ? window.LLMStatusContract.deriveResultMeta({
+                    ...(data || {}),
+                    status: normalizedStatus,
+                    finalStatus: data?.finalStatus || null,
+                    finalStatusRecorded: data?.finalStatusRecorded,
+                    modelRunState: data?.modelRunState || null,
+                    answer: data?.answer || data?.text || ''
+                })
+                : null,
             updatedAt: Date.now()
         };
 
@@ -11346,10 +11640,21 @@ document.addEventListener('click', (event) => {
             indicator.tabIndex = 0;
             indicator.dataset.currentStatus = normalizedStatus;
             indicator.dataset.statusRank = String(incomingRank);
+            const resultMeta = statusStateByModel[normalizedName]?.resultMeta || null;
+            if (resultMeta?.phase) {
+                indicator.dataset.resultPhase = resultMeta.phase;
+                indicator.classList.add(`result-phase-${resultMeta.phase}`);
+            } else {
+                delete indicator.dataset.resultPhase;
+            }
             const statusTitle = resolveIndicatorTooltip(normalizedStatus, data);
+            const resultLabel = resultMeta?.label ? `Result: ${resultMeta.label}` : null;
+            const titleParts = [statusTitle, resultLabel].filter(Boolean);
+            const fullTitle = `${titleParts.join(' • ')} • Double-click to fetch this model answer`;
             indicator.dataset.statusTitle = statusTitle;
-            indicator.title = `${statusTitle} • Double-click to fetch this model answer`;
-            indicator.setAttribute('aria-label', `${normalizedName} status: ${statusTitle}. Double-click to fetch this model answer.`);
+            if (resultMeta?.phase) indicator.dataset.resultLabel = resultMeta.label || resultMeta.phase;
+            indicator.title = fullTitle;
+            indicator.setAttribute('aria-label', `${normalizedName} status: ${titleParts.join(', ')}. Double-click to fetch this model answer.`);
         });
 
         if (Object.prototype.hasOwnProperty.call(data, 'apiStatus')) {
@@ -11479,6 +11784,7 @@ document.addEventListener('click', (event) => {
         if (templateSelect.value !== 'manual') {
             promptManuallyEdited = true;
         }
+        persistCrossViewUiState();
     });
 
     // --- MAIN PAGE LOGIC ---
@@ -12044,6 +12350,12 @@ function collectLLMResponses() {
 }
 
 function buildFavoriteExportHtml() {
+    const sections = buildFavoriteExportSectionsHtml();
+    if (!sections) return '';
+    return wrapResponsesHtmlBundle(sections);
+}
+
+function buildFavoriteExportSectionsHtml() {
     const groups = buildFavoriteGroups();
     if (!groups.length) return '';
 
@@ -12065,12 +12377,17 @@ function buildFavoriteExportHtml() {
 
         if (!groupItems) return '';
         const groupBody = `<div class="favorite-export-items">${groupItems}</div>`;
-        return buildResponseCopyHtmlBlock(groupName, null, groupBody, '');
+        const groupHtml = buildResponseCopyHtmlBlock(groupName, null, groupBody, '');
+        if (groupHtml) return groupHtml;
+        return `
+            <section>
+                <h2>${escapeHtml(groupName)}</h2>
+                ${groupBody}
+            </section>
+        `;
     }).filter(Boolean).join('\n');
 
-    if (!sections) return '';
-
-    return wrapResponsesHtmlBundle(sections);
+    return sections;
 }
 
 function ensureFavoritePanelUI() {
@@ -12601,7 +12918,6 @@ function bindMainPageFavoritesInteractions() {
 
 setTimeout(bindMainPageFavoritesInteractions, 0);
 setTimeout(() => window.clearFavoriteEntriesOnLoad?.(), 0);
-setTimeout(() => window.clearModifierSelectionsOnLoad?.(), 0);
 function setPromptContent(text) {
     if (!promptInput) return;
     const nextValue = (text || '').trim();
@@ -12993,11 +13309,7 @@ document.addEventListener('click', async (event) => {
     flashButtonFeedback(btn, 'success');
 });
 
-//-- 1.1. Исправляем экспорт всех ответов в HTML и формат имени файла --//
-document.addEventListener('click', (event) => {
-    const btn = event.target.closest('#export-html-btn');
-    if (!btn) return;
-
+function buildAllResponsesExportHtml() {
     const promptEl = document.getElementById('prompt-input');
     const basePromptText = (promptEl?.value || '').trim();
     let promptBlock = '';
@@ -13008,8 +13320,7 @@ document.addEventListener('click', (event) => {
 
     const { entries } = collectLLMResponses();
     if (!entries.length) {
-        flashButtonFeedback(btn, 'warn');
-        return;
+        return '';
     }
 
     const htmlSections = entries.map(({ name, text, html, metadataLine }) => `
@@ -13019,8 +13330,9 @@ document.addEventListener('click', (event) => {
             <div class="response-body">${(html && html.trim()) ? html : `<pre>${escapeHtml(text)}</pre>`}</div>
         </section>
     `).join('\n');
+    const favoriteSections = buildFavoriteExportSectionsHtml();
 
-    const htmlContent = `<!DOCTYPE html>
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -13046,8 +13358,36 @@ ${promptBlock ? `
 ` : ''}
     <h2>LLM Responses</h2>
 ${htmlSections}
+${favoriteSections ? `
+    <hr>
+    <h2>Favourite</h2>
+${favoriteSections}` : ''}
 </body>
 </html>`;
+}
+
+if (
+    (typeof process !== 'undefined' && process?.env?.NODE_ENV === 'test')
+    || (typeof window !== 'undefined' && window.__RESULTS_TEST_DEBUG__ === true)
+) {
+    window.__resultsExportDebug = {
+        buildAllResponsesExportHtml,
+        buildFavoriteExportHtml,
+        buildFavoriteExportSectionsHtml,
+        favoriteState
+    };
+}
+
+//-- 1.1. Исправляем экспорт всех ответов в HTML и формат имени файла --//
+document.addEventListener('click', (event) => {
+    const btn = event.target.closest('#export-html-btn');
+    if (!btn) return;
+
+    const htmlContent = buildAllResponsesExportHtml();
+    if (!htmlContent) {
+        flashButtonFeedback(btn, 'warn');
+        return;
+    }
 
     const blob = new Blob([htmlContent], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
@@ -14589,6 +14929,9 @@ function checkCompareButtonState() {
                 alert('Please enter a prompt.');
                 return;
             }
+            if (!(await ensureNoOtherViewRun())) {
+                return;
+            }
 
             const bodyClassNames = String(document.body.className || '').split(/\s+/).filter(Boolean);
             if (!bodyClassNames.includes('pipeline-page') && !bodyClassNames.includes('prompt-submitted')) {
@@ -14626,6 +14969,7 @@ function checkCompareButtonState() {
                     selectedLLMs: selectedLLMs,
                     forceNewTabs,
                     useApiFallback,
+                    sourceView: getCurrentViewKey(),
                     attachments: attachmentsPayload
                 });
             } catch (err) {
@@ -14635,7 +14979,8 @@ function checkCompareButtonState() {
                     prompt: finalPrompt,
                     selectedLLMs: selectedLLMs,
                     forceNewTabs,
-                    useApiFallback
+                    useApiFallback,
+                    sourceView: getCurrentViewKey()
                 });
             }
 
@@ -14916,12 +15261,14 @@ if (smartCompareButton) {
             notifySelectionChanged();
             syncModeratorSelectors();
             syncModeratorMiniPrompts();
+            persistCrossViewUiState();
         });
         button.addEventListener('dblclick', (event) => {
             event.preventDefault();
             toggleAllLLMs();
             syncModeratorSelectors();
             syncModeratorMiniPrompts();
+            persistCrossViewUiState();
         });
     });
     checkCompareButtonState();
@@ -15491,9 +15838,21 @@ function exportSingleTemplate(templateName, sourceData = null) {
     });
 
     // --- INITIALIZATION ---
+    preserveCrossViewStateOnLoad = await consumeCrossViewNavigationIntentOnLoad();
+    suppressCrossViewPersistenceOnLoad = preserveCrossViewStateOnLoad;
+    if (!preserveCrossViewStateOnLoad) {
+        await clearCrossViewPromptState();
+    }
     await loadModifierPresets(); // <-- грузим пресеты модификаторов и рендерим список
+    suppressCrossViewPersistenceOnLoad = false;
     loadTemplatesFromStorage();
     loadSystemTemplates();
+    setTimeout(() => {
+        restoreCrossViewUiState().catch((err) => console.warn('[RESULTS] Failed to restore cross-view UI state', err));
+    }, 0);
+    setTimeout(() => {
+        restoreCrossViewUiState().catch((err) => console.warn('[RESULTS] Failed to restore delayed cross-view UI state', err));
+    }, 250);
 
 
     if (fileInput) {
@@ -16148,7 +16507,5 @@ document.addEventListener('click', (event) => {
         sectionToClose.setAttribute('aria-hidden', 'true');
     }
 });
-
-// --- DevTools extracted to results-devtools.js ---
 
 } // end guard __RESULTS_PAGE_LOADED

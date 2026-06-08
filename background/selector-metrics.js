@@ -17,6 +17,7 @@ const SELECTOR_OVERRIDE_AUDIT_LIMIT = 80;
 const SELECTOR_HEALTH_FAILURES_KEY = 'selector_health_failures';
 const SELECTOR_HEALTH_META_KEY = 'selector_health_meta';
 const SELECTOR_HEALTH_CHECKS_KEY = 'selector_health_checks';
+const SELECTOR_HEALTH_PROFILE_KEY = 'selector_health_profile_v1';
 const SELECTOR_METRICS_FLUSH_MS = 5000;
 
 const loadResolutionMetrics = async () => {
@@ -54,7 +55,8 @@ const persistResolutionMetrics = async () => {
       selectorResolutionMetrics: Object.fromEntries(selectorResolutionMetrics.entries()),
       [SELECTOR_HEALTH_FAILURES_KEY]: selectorFailureMetrics,
       [SELECTOR_HEALTH_META_KEY]: selectorHealthMeta,
-      [SELECTOR_HEALTH_CHECKS_KEY]: selectorHealthChecks
+      [SELECTOR_HEALTH_CHECKS_KEY]: selectorHealthChecks,
+      [SELECTOR_HEALTH_PROFILE_KEY]: buildSelectorHealthProfiles()
     });
   } catch (e) {
     console.warn('[BACKGROUND] Failed to persist resolution metrics:', e);
@@ -176,6 +178,74 @@ const ensureSelectorHealthEntry = (map, modelName, elementType) => {
   };
   map.set(key, entry);
   return entry;
+};
+
+const classifySelectorHealthStatus = (entry = {}) => {
+  const counts = entry.counts || {};
+  const hits = Number(counts.L1 || 0) + Number(counts.L2 || 0) + Number(counts.L3 || 0) + Number(counts.L4 || 0);
+  const failures = Number(counts.fail || 0) + Number(counts.error || 0);
+  const total = hits + failures;
+  const fallbackHits = Number(counts.L3 || 0) + Number(counts.L4 || 0);
+  const failedHealthCheck = entry.lastHealthCheck && entry.lastHealthCheck.success === false;
+  if (!total && !entry.lastHealthCheck) return 'unknown';
+  if ((total >= 3 && hits === 0 && failures >= 3) || (failedHealthCheck && failures >= 3)) {
+    return 'broken';
+  }
+  if ((total >= 4 && failures / total >= 0.5) || (total >= 4 && fallbackHits / total >= 0.5) || failedHealthCheck) {
+    return 'degraded';
+  }
+  return 'healthy';
+};
+
+const buildSelectorHealthProfiles = () => {
+  const profileMap = new Map();
+  Array.from(selectorResolutionMetrics.entries()).forEach(([key, count]) => {
+    const parsed = parseSelectorMetricKey(key);
+    if (!parsed) return;
+    const entry = ensureSelectorHealthEntry(profileMap, parsed.modelName, parsed.elementType);
+    if (['L1', 'L2', 'L3', 'L4'].includes(parsed.suffix)) {
+      entry.counts[parsed.suffix] += Number(count || 0);
+    }
+  });
+  Object.entries(selectorFailureMetrics).forEach(([key, count]) => {
+    const parsed = parseSelectorMetricKey(key);
+    if (!parsed) return;
+    if (parsed.suffix !== 'fail' && parsed.suffix !== 'error') return;
+    const entry = ensureSelectorHealthEntry(profileMap, parsed.modelName, parsed.elementType);
+    entry.counts[parsed.suffix] += Number(count || 0);
+  });
+  Object.entries(selectorHealthChecks).forEach(([key, check]) => {
+    const parsed = parseSelectorHealthKey(key);
+    const entry = ensureSelectorHealthEntry(profileMap, parsed.modelName, parsed.elementType);
+    entry.lastHealthCheck = {
+      ts: check?.ts || null,
+      success: !!check?.success,
+      layer: check?.layer || null,
+      error: check?.error || null
+    };
+  });
+  const profiles = {};
+  profileMap.forEach((entry) => {
+    const key = buildSelectorHealthKey(entry.modelName, entry.elementType);
+    const counts = entry.counts || {};
+    const hits = Number(counts.L1 || 0) + Number(counts.L2 || 0) + Number(counts.L3 || 0) + Number(counts.L4 || 0);
+    const failures = Number(counts.fail || 0) + Number(counts.error || 0);
+    profiles[key] = {
+      modelName: entry.modelName,
+      elementType: entry.elementType,
+      profileStatus: classifySelectorHealthStatus(entry),
+      hits,
+      failures,
+      total: hits + failures,
+      counts: { ...counts },
+      lastHealthCheck: entry.lastHealthCheck || null,
+      updatedAt: selectorHealthMeta.perKey?.[key] || selectorHealthMeta.updatedAt || Date.now()
+    };
+  });
+  return {
+    updatedAt: selectorHealthMeta.updatedAt || Date.now(),
+    profiles
+  };
 };
 
 const detectActiveUiVersionOnTab = async (modelName, tabId) => {
@@ -448,6 +518,7 @@ self.SELECTOR_OVERRIDE_AUDIT_LIMIT = SELECTOR_OVERRIDE_AUDIT_LIMIT;
 self.SELECTOR_HEALTH_FAILURES_KEY = SELECTOR_HEALTH_FAILURES_KEY;
 self.SELECTOR_HEALTH_META_KEY = SELECTOR_HEALTH_META_KEY;
 self.SELECTOR_HEALTH_CHECKS_KEY = SELECTOR_HEALTH_CHECKS_KEY;
+self.SELECTOR_HEALTH_PROFILE_KEY = SELECTOR_HEALTH_PROFILE_KEY;
 self.SELECTOR_METRICS_FLUSH_MS = SELECTOR_METRICS_FLUSH_MS;
 self.loadResolutionMetrics = loadResolutionMetrics;
 self.persistResolutionMetrics = persistResolutionMetrics;
@@ -462,6 +533,8 @@ self.updateSelectorHealthChecks = updateSelectorHealthChecks;
 self.parseSelectorMetricKey = parseSelectorMetricKey;
 self.parseSelectorHealthKey = parseSelectorHealthKey;
 self.ensureSelectorHealthEntry = ensureSelectorHealthEntry;
+self.classifySelectorHealthStatus = classifySelectorHealthStatus;
+self.buildSelectorHealthProfiles = buildSelectorHealthProfiles;
 self.detectActiveUiVersionOnTab = detectActiveUiVersionOnTab;
 self.fetchActiveUiVersions = fetchActiveUiVersions;
 self.buildSelectorHealthSummary = buildSelectorHealthSummary;

@@ -191,7 +191,7 @@
         'earlyTerminalGuard', 'earlyTerminalGuardNextPingAt', 'finalizationEvidence',
         'answerLength', 'answerHash', 'answerAcceptedAt', 'modelRunState', 'statusContract',
         'postTerminalNoiseCount', 'lastFinalEmitKey', 'lastFinalEmittedAt', 'statusData',
-        'budgetTimers', 'runId', 'responseMeta', 'responseSource', 'pipelineRunId', 'pipelineRoundId',
+        'budgetTimers', 'recoveryBudgets', 'runId', 'responseMeta', 'responseSource', 'pipelineRunId', 'pipelineRoundId',
         'pipelineBatchId', 'pipelineState', 'pipelineStage', 'pipelineTabSessionId'
       ].forEach((field) => {
         if (typeof entry[field] !== 'undefined') {

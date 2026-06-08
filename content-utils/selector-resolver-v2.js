@@ -3,6 +3,7 @@
 
   const VERSION = '2.0.0';
   const CACHE_KEY_PREFIX = 'selector_resolver_v2::';
+  const SELECTOR_HEALTH_PROFILE_KEY = 'selector_health_profile_v1';
   const MIN_EXTRACTED_ANSWER_LENGTH_FOR_NO_FALLBACK = 80;
   const MAX_COMPOSER_CANDIDATES = 120;
   const MAX_BUTTON_CANDIDATES = 180;
@@ -948,6 +949,21 @@
     return `${CACHE_KEY_PREFIX}${modelName}::${role}`;
   }
 
+  function selectorHealthElementType(role = '') {
+    const normalized = String(role || '').trim();
+    if (normalized === 'answer') return 'response';
+    return normalized || 'unknown';
+  }
+
+  async function getSelectorHealthProfile(modelName, role) {
+    if (!modelName || !role) return null;
+    const snapshot = await readStorage(SELECTOR_HEALTH_PROFILE_KEY);
+    const profiles = snapshot?.profiles && typeof snapshot.profiles === 'object' ? snapshot.profiles : {};
+    const directKey = `${modelName}::${role}`;
+    const normalizedKey = `${modelName}::${selectorHealthElementType(role)}`;
+    return profiles[directKey] || profiles[normalizedKey] || null;
+  }
+
   async function loadCachedResolution({ modelName, role }) {
     if (!modelName || !role) return null;
     return readStorage(roleStorageKey(modelName, role));
@@ -1102,13 +1118,24 @@
     if (!settings.enabled) {
       return timeoutResult('resolver_disabled', { options: sanitizeOptionsForDiagnostics(options) });
     }
+    const selectorHealthProfile = await getSelectorHealthProfile(modelName, role);
+    const selectorProfileStatus = String(selectorHealthProfile?.profileStatus || 'unknown').toLowerCase();
+    const selectorProfileBroken = selectorProfileStatus === 'broken';
     const hasBudget = () => (Date.now() - startedAt) < timeoutMs;
     const diagnostics = {
       role,
       traceId,
       reason,
       cacheUsed: false,
-      cacheValid: false
+      cacheValid: false,
+      selectorProfileStatus,
+      selectorProfileBroken,
+      selectorHealthProfile: selectorHealthProfile ? {
+        hits: selectorHealthProfile.hits || 0,
+        failures: selectorHealthProfile.failures || 0,
+        total: selectorHealthProfile.total || 0,
+        updatedAt: selectorHealthProfile.updatedAt || null
+      } : null
     };
     const resolvedSelectors = [...extractSelectorsFromConfig(config, role), ...selectors].filter(Boolean);
     const semanticSelectors = role === 'composer'
@@ -1128,7 +1155,11 @@
     );
     if (!hasBudget()) return timeoutResult('resolver_timeout_before_exact', diagnostics);
 
-    for (const selector of resolvedSelectors) {
+    if (selectorProfileBroken) {
+      diagnostics.exactSkipped = true;
+      diagnostics.exactSkipReason = 'selector_profile_broken';
+    }
+    for (const selector of selectorProfileBroken ? [] : resolvedSelectors) {
       if (!hasBudget()) return timeoutResult('resolver_timeout_before_exact', diagnostics);
       try {
         const matches = queryAllDeep(root, selector, 2, hasBudget);
@@ -1172,7 +1203,7 @@
     }
 
     if (!hasBudget()) return timeoutResult('resolver_timeout_before_cache', diagnostics);
-    if (preferCached && settings.useCache) {
+    if (preferCached && settings.useCache && !selectorProfileBroken) {
       diagnostics.cacheUsed = true;
       const cached = await validateCachedResolution({ modelName, role, root });
       if (cached?.ok && cached.element) {
@@ -1204,6 +1235,10 @@
         });
         return result;
       }
+    } else if (selectorProfileBroken) {
+      diagnostics.cacheUsed = false;
+      diagnostics.cacheSkipped = true;
+      diagnostics.cacheSkipReason = 'selector_profile_broken';
     }
 
     if (!hasBudget()) return timeoutResult('resolver_timeout_before_scan', diagnostics);
@@ -1449,6 +1484,8 @@
     validateCachedResolution,
     saveSuccessfulResolution,
     loadCachedResolution,
+    getSelectorHealthProfile,
+    selectorHealthElementType,
     emitResolutionMetric,
     queryAllDeep,
     sanitizeOptionsForDiagnostics,

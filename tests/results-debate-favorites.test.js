@@ -3,6 +3,13 @@ const path = require('path');
 
 const delay = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const blobToText = (blob) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(String(reader.result || ''));
+  reader.onerror = () => reject(reader.error);
+  reader.readAsText(blob);
+});
+
 function installChromeStorageMock() {
   const store = new Map();
   chrome.runtime.getURL = jest.fn((value) => value);
@@ -415,6 +422,54 @@ describe('Pipeline debate favorites view', () => {
     const bold = output.querySelector('strong');
     expect(bold).not.toBeNull();
     expect(bold.textContent).toBe('Format');
+  });
+
+  test('export all responses includes Favourite content in the same HTML bundle', async () => {
+    const responsePanel = document.createElement('div');
+    responsePanel.className = 'llm-panel';
+    responsePanel.id = 'panel-gpt';
+    responsePanel.innerHTML = `
+      <div class="llm-header">
+        <span class="llm-title">GPT</span>
+        <div class="header-right">
+          <button type="button" class="panel-action-btn panel-fav-btn" data-target="gpt-output" aria-label="Add to favorites">★</button>
+        </div>
+      </div>
+      <div class="output" id="gpt-output">Base model response.</div>
+    `;
+    document.body.appendChild(responsePanel);
+    const originalBuildResponseCopyHtmlBlock = window.ResultsShared.buildResponseCopyHtmlBlock;
+    window.ResultsShared.buildResponseCopyHtmlBlock = (name, metadataLine, bodyHtml) => `
+      <section>
+        <h2>${name}</h2>
+        ${metadataLine ? `<p class="response-meta">${metadataLine}</p>` : ''}
+        <div class="response-body">${bodyHtml}</div>
+      </section>
+    `;
+    const originalFavoriteEntries = [...window.__resultsExportDebug.favoriteState.entries];
+    const originalFavoriteCardMap = new Map(window.__resultsExportDebug.favoriteState.cardKeyToId);
+    const originalFavoriteNextId = window.__resultsExportDebug.favoriteState.nextId;
+    window.__resultsExportDebug.favoriteState.entries = [{
+      id: 'fav-test-1',
+      kind: 'card',
+      sourceName: 'GPT',
+      modelKey: 'gpt',
+      sourceOutputId: 'gpt-output',
+      text: 'Base model response.',
+      html: '',
+      timeLabel: '12:00'
+    }];
+    window.__resultsExportDebug.favoriteState.cardKeyToId = new Map([['card:gpt-output', 'fav-test-1']]);
+    window.__resultsExportDebug.favoriteState.nextId = 2;
+    const html = window.__resultsExportDebug.buildAllResponsesExportHtml();
+    expect(html).toContain('<h2>LLM Responses</h2>');
+    expect(html).toContain('<h2>Favourite</h2>');
+    expect(html).toContain('Base model response.');
+    window.__resultsExportDebug.favoriteState.entries = originalFavoriteEntries;
+    window.__resultsExportDebug.favoriteState.cardKeyToId = originalFavoriteCardMap;
+    window.__resultsExportDebug.favoriteState.nextId = originalFavoriteNextId;
+    window.ResultsShared.buildResponseCopyHtmlBlock = originalBuildResponseCopyHtmlBlock;
+    responsePanel.remove();
   });
 
   test('selection toolbar actions have visible labels in the panel markup', () => {

@@ -103,4 +103,37 @@ describe('post-terminal diagnostics filtering', () => {
     expect(context.jobState.llms.Gemini.logs).toHaveLength(1);
     expect(context.sendMessageToResultsTab).toHaveBeenCalledTimes(1);
   });
+
+  test('adds telemetry taxonomy to diagnostics and classifies duplicate final ignored', () => {
+    const context = createSandbox();
+
+    const taxonomy = context.normalizeTelemetryTaxonomy({
+      label: 'MODEL_FINAL ignored (deduplicated)',
+      details: 'reason=duplicate_final',
+      meta: { reason: 'duplicate_final' }
+    });
+
+    expect(taxonomy).toEqual(expect.objectContaining({
+      domain: 'finalization',
+      stage: 'finalization',
+      outcome: 'ignored',
+      eventClass: 'finalization_duplicate_ignored'
+    }));
+
+    const saved = context.broadcastDiagnostic('Gemini', {
+      ts: 101500,
+      type: 'PIPELINE',
+      label: 'PAGE_READY_BLOCKED',
+      details: 'wrong_page',
+      level: 'warning',
+      meta: { reason: 'wrong_page' }
+    });
+
+    expect(saved.meta.telemetryTaxonomy).toEqual(expect.objectContaining({
+      domain: 'prompt_dispatch',
+      stage: 'dispatch',
+      outcome: 'failure',
+      eventClass: 'dispatch_failure'
+    }));
+  });
 });

@@ -37,4 +37,23 @@ describe('shared status contract', () => {
     expect(state.uiStatus).toBe('SUCCESS');
     expect(state.rank).toBe(4);
   });
+
+  test('derives compact ResultMeta phases for UI facade', () => {
+    expect(StatusContract.deriveResultMeta({ status: 'GENERATING' })).toEqual(expect.objectContaining({
+      phase: 'pending',
+      label: 'Pending'
+    }));
+    expect(StatusContract.deriveResultMeta({ status: 'SUCCESS', answer: 'done' })).toEqual(expect.objectContaining({
+      phase: 'success',
+      label: 'Success'
+    }));
+    expect(StatusContract.deriveResultMeta({ status: 'PARTIAL', answer: 'chunk' })).toEqual(expect.objectContaining({
+      phase: 'partial',
+      label: 'Partial'
+    }));
+    expect(StatusContract.deriveResultMeta({ status: 'NO_SEND' })).toEqual(expect.objectContaining({
+      phase: 'error',
+      label: 'Error'
+    }));
+  });
 });

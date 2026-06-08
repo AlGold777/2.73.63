@@ -395,19 +395,88 @@ function sendMessageWithTimeout(tabId, llmName, message, timeoutMs = NO_FOCUS_TI
   });
 }
 
+function normalizePageReadyState(response = null) {
+  const raw = response && typeof response === 'object' ? response : {};
+  const status = String(raw.status || '').toLowerCase();
+  const blockers = Array.isArray(raw.blockers)
+    ? raw.blockers.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  const pageReady = typeof raw.pageReady === 'boolean'
+    ? raw.pageReady
+    : (typeof raw.ready === 'boolean' ? raw.ready : null);
+  const composerReady = typeof raw.composerReady === 'boolean' ? raw.composerReady : null;
+  const requiresFocus = raw.requiresFocus === true || raw.timeout === true || Boolean(raw.error);
+  const terminalStatuses = new Set([
+    'login_required',
+    'captcha_required',
+    'wrong_page',
+    'page_not_ready',
+    'not_ready',
+    'blocked',
+    'composer_missing',
+    'composer_not_ready'
+  ]);
+  const terminalBlockers = new Set([
+    'login_required',
+    'captcha_required',
+    'wrong_page',
+    'page_not_ready',
+    'composer_missing',
+    'composer_not_ready',
+    'unsupported_page'
+  ]);
+
+  let ok = true;
+  let reason = 'ready';
+  if (terminalStatuses.has(status)) {
+    ok = false;
+    reason = status;
+  } else {
+    const blocker = blockers.find((item) => terminalBlockers.has(item));
+    if (blocker) {
+      ok = false;
+      reason = blocker;
+    } else if (pageReady === false) {
+      ok = false;
+      reason = raw.reason || 'page_not_ready';
+    } else if (composerReady === false && !requiresFocus) {
+      ok = false;
+      reason = raw.reason || 'composer_not_ready';
+    }
+  }
+
+  return {
+    ok,
+    reason,
+    status: status || null,
+    requiresFocus,
+    pageReady,
+    composerReady,
+    blockers,
+    source: raw.source || null,
+    raw
+  };
+}
+
 function getSendPromptDelay(llmName) {
   return SEND_PROMPT_DELAY_OVERRIDES[llmName] || SEND_PROMPT_DELAY_MS;
 }
 
 function getRetryBackoffForModel(llmName) {
-  if (CONSERVATIVE_MODELS.includes(llmName)) {
+  const conservative = self.ModelPolicy?.modelUsesConservativeDispatch
+    ? self.ModelPolicy.modelUsesConservativeDispatch(llmName)
+    : CONSERVATIVE_MODELS.includes(llmName);
+  if (conservative) {
     return CONSERVATIVE_RETRY_BACKOFF_MS;
   }
   return DISPATCH_RETRY_BACKOFF_MS;
 }
 
 function getConnectionRetryDelaysForModel(llmName) {
-  if (CONSERVATIVE_MODELS.includes(llmName)) {
+  const conservative = self.ModelPolicy?.modelUsesConservativeDispatch
+    ? self.ModelPolicy.modelUsesConservativeDispatch(llmName)
+    : CONSERVATIVE_MODELS.includes(llmName);
+  if (conservative) {
     return CONSERVATIVE_CONNECTION_RETRY_DELAYS;
   }
   return CONNECTION_RETRY_DELAYS;
@@ -469,6 +538,9 @@ function waitForPromptSubmitted(llmName, timeoutMs = PROMPT_SUBMIT_TIMEOUT_MS) {
 
 function getPromptSubmitTimeoutMs(llmName) {
   if (!llmName) return PROMPT_SUBMIT_TIMEOUT_MS;
+  if (self.ModelPolicy?.getPromptSubmitTimeoutMs) {
+    return self.ModelPolicy.getPromptSubmitTimeoutMs(llmName, PROMPT_SUBMIT_TIMEOUT_MS);
+  }
   const override = PROMPT_SUBMIT_TIMEOUTS_MS[llmName];
   return Number.isFinite(override) ? override : PROMPT_SUBMIT_TIMEOUT_MS;
 }
@@ -624,7 +696,10 @@ function schedulePromptDispatchSupervisor() {
     if (!entry) return false;
     const flags = resolveDispatchFlags(llmName, entry);
     if (flags.isSent) return false;
-    return CONSERVATIVE_MODELS.includes(llmName) && (entry.dispatchAttempts || 0) > 0;
+    const conservative = self.ModelPolicy?.modelUsesConservativeDispatch
+      ? self.ModelPolicy.modelUsesConservativeDispatch(llmName)
+      : CONSERVATIVE_MODELS.includes(llmName);
+    return conservative && (entry.dispatchAttempts || 0) > 0;
   });
 
   const adaptiveTick = (hasConservativePending || pendingRetries === 0)
@@ -685,6 +760,41 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
   if (!llmName || !isValidTabId(tabId) || !prompt) return;
   const entry = jobState?.llms?.[llmName];
   if (!entry) return;
+  const recoveryIntent = options.recoveryIntent || (
+    reason === 'manual_resend' || reason === 'round2_repair'
+      ? 'resend_prompt'
+      : (reason === 'retry_supervisor' ? 'resend_prompt' : null)
+  );
+  if (recoveryIntent && self.RecoveryIntent?.authorize) {
+    const intentDecision = self.RecoveryIntent.authorize(entry, {
+      intent: recoveryIntent,
+      reason,
+      minChars: self.DOM_SNAPSHOT_RECOVERY_MIN_CHARS || 120,
+      explicitUserOverride: options.explicitUserOverride === true,
+      allowAfterEvidence: options.allowAfterEvidence === true
+    });
+    entry.lastRecoveryIntentDecision = {
+      ...intentDecision,
+      reasonLabel: reason,
+      decidedAt: Date.now()
+    };
+    if (!intentDecision.ok) {
+      emitTelemetry(llmName, 'RECOVERY_INTENT_DENIED', {
+        level: 'warning',
+        details: `${intentDecision.intent}:${intentDecision.reason}`,
+        meta: { tabId, dispatchReason: reason, intentDecision },
+        force: true
+      });
+      broadcastDiagnostic(llmName, {
+        type: 'RECOVERY',
+        label: 'Recovery intent denied',
+        details: `${intentDecision.intent}:${intentDecision.reason}`,
+        level: 'warning',
+        meta: { tabId, dispatchReason: reason, intentDecision }
+      });
+      return;
+    }
+  }
   //-- 1.1. Быстрая проверка связи перед захватом фокуса (без агрессивного reload в Round1) --//
   const isAlive = await new Promise(r => {
     chrome.tabs.sendMessage(tabId, { type: 'HEALTH_CHECK_PING' }, resp => {
@@ -770,6 +880,14 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
     const machine = resolveDispatchFlags(llmName, entry).machine;
   entry.lastDispatchAt = Date.now();
   entry.lastDispatchMeta = { dispatchReason: reason, sessionId, dispatchId };
+  if (self.RunIdentity?.build) {
+    entry.runIdentity = self.RunIdentity.build({
+      runSessionId: sessionId,
+      dispatchId,
+      tabId,
+      prompt
+    });
+  }
   entry.dispatchSource = 'web';
   entry.pipelineRunId = pipelineRunId || entry.pipelineRunId || null;
   entry.recentDispatchIds = Array.isArray(entry.recentDispatchIds) ? entry.recentDispatchIds : [];
@@ -851,7 +969,9 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
         meta: { snapshot: readiness.snapshot || null, dispatchId, dispatchReason: reason }
       });
       let waiter = null;
-      const shouldBypassAck = llmName === 'Perplexity';
+      const shouldBypassAck = self.ModelPolicy?.modelRequiresAckReady
+        ? !self.ModelPolicy.modelRequiresAckReady(llmName)
+        : llmName === 'Perplexity';
       let readyOk = true;
       if (shouldBypassAck) {
         emitTelemetry(llmName, 'PERPLEXITY_ACK_BYPASS', {
@@ -960,10 +1080,11 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
       } catch (_) {}
 
       let needsFocus = false;
+      let noFocusResponse = null;
       if (options.skipNoFocusProbe) {
         needsFocus = true;
       } else {
-      const noFocusResponse = await sendMessageWithTimeout(tabId, llmName, {
+        noFocusResponse = await sendMessageWithTimeout(tabId, llmName, {
           type: 'GET_ANSWER_NO_FOCUS',
           prompt,
           attachments,
@@ -980,6 +1101,66 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
       }
       if (options.forceFocus) {
         needsFocus = true;
+      }
+      const pageReadyState = normalizePageReadyState(noFocusResponse);
+      emitTelemetry(llmName, 'PAGE_READY_STATE', {
+        level: pageReadyState.ok ? 'info' : 'warning',
+        details: pageReadyState.reason || 'ready',
+        meta: {
+          dispatchId,
+          dispatchReason: reason,
+          tabId,
+          status: pageReadyState.status,
+          pageReady: pageReadyState.pageReady,
+          composerReady: pageReadyState.composerReady,
+          requiresFocus: pageReadyState.requiresFocus,
+          blockers: pageReadyState.blockers,
+          source: pageReadyState.source
+        }
+      });
+      if (!pageReadyState.ok) {
+        entry.lastPageReadyState = {
+          ok: false,
+          reason: pageReadyState.reason,
+          status: pageReadyState.status,
+          pageReady: pageReadyState.pageReady,
+          composerReady: pageReadyState.composerReady,
+          requiresFocus: pageReadyState.requiresFocus,
+          blockers: pageReadyState.blockers,
+          checkedAt: Date.now(),
+          dispatchId
+        };
+        broadcastDiagnostic(llmName, {
+          type: 'DISPATCH',
+          label: 'Page not ready for dispatch',
+          details: pageReadyState.reason || 'page_not_ready',
+          level: 'warning',
+          meta: {
+            dispatchId,
+            dispatchReason: reason,
+            tabId,
+            status: pageReadyState.status,
+            pageReady: pageReadyState.pageReady,
+            composerReady: pageReadyState.composerReady,
+            blockers: pageReadyState.blockers
+          }
+        });
+        emitTelemetry(llmName, 'PAGE_READY_BLOCKED', {
+          level: 'warning',
+          details: pageReadyState.reason || 'page_not_ready',
+          meta: {
+            dispatchId,
+            dispatchReason: reason,
+            tabId,
+            status: pageReadyState.status,
+            blockers: pageReadyState.blockers
+          }
+        });
+        scheduleDispatchRetry(entry, llmName, { type: 'page_not_ready', reason: pageReadyState.reason });
+        if (machine) {
+          machine.error({ error: pageReadyState.reason || 'page_not_ready', code: 'PAGE_NOT_READY' });
+        }
+        return;
       }
 
       if (machine) {
@@ -1600,6 +1781,7 @@ self.resolvePromptSubmitted = resolvePromptSubmitted;
 self.waitForPromptSubmitted = waitForPromptSubmitted;
 self.getPromptSubmitTimeoutMs = getPromptSubmitTimeoutMs;
 self.sendMessageWithTimeout = sendMessageWithTimeout;
+self.normalizePageReadyState = normalizePageReadyState;
 self.markModelRuntimeActivity = markModelRuntimeActivity;
 self.updateTypingStateFromDiagnostic = updateTypingStateFromDiagnostic;
 self.isTypingGuardActive = isTypingGuardActive;

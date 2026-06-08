@@ -309,10 +309,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         forceNewTabs,
                         useApiFallback,
                         attachments: Array.isArray(message.attachments) ? message.attachments : [],
-                        pipelineContext: message.pipelineContext || null
+                        pipelineContext: message.pipelineContext || null,
+                        sourceView: message.sourceView || message.pipelineContext?.sourceView || null
                     });
                     sendResponse({ status: 'process_started' });
                 })();
+                return true;
+            }
+
+            case 'GET_ACTIVE_RUN_STATE': {
+                const session = jobState?.session || null;
+                const llmEntries = Object.values(jobState?.llms || {});
+                const totalModels = Number(session?.totalModels || llmEntries.length || 0);
+                const terminalCount = llmEntries.filter((entry) => isTerminalRouterEntry(entry)).length;
+                const hasOpenModelRun = llmEntries.some((entry) => !isTerminalRouterEntry(entry));
+                const active = Boolean(
+                    session?.startTime
+                    && (
+                        session?.roundsInProgress
+                        || hasOpenModelRun
+                        || (totalModels > 0 && terminalCount < totalModels)
+                    )
+                );
+                sendResponse({
+                    status: 'ok',
+                    active,
+                    sourceView: session?.sourceView || session?.pipelineContext?.sourceView || null,
+                    sessionId: session?.startTime || null,
+                    totalModels,
+                    terminalCount,
+                    completed: Number(session?.completed || 0),
+                    failed: Number(session?.failed || 0),
+                    selectedModels: Array.isArray(session?.selectedModels) ? session.selectedModels : [],
+                    pipelineState: session?.pipelineState || null,
+                    pipelineContext: session?.pipelineContext || null
+                });
                 return true;
             }
                 

@@ -149,6 +149,34 @@
     };
   }
 
+  function deriveResultMeta(entry = {}) {
+    const state = deriveStatusContract(entry);
+    const uiStatus = normalizeStatus(state.uiStatus || entry?.status || 'UNKNOWN');
+    const phase = (() => {
+      if (isFailureStatus(uiStatus)) return 'error';
+      if (state.answerState === 'partial') return 'partial';
+      if (['PARTIAL', 'STREAM_TIMEOUT_HIDDEN', 'STREAM_TIMEOUT'].includes(uiStatus)) return 'partial';
+      if (state.answerState === 'complete' || isSuccessStatus(uiStatus)) return 'success';
+      return 'pending';
+    })();
+    const labels = {
+      pending: 'Pending',
+      success: 'Success',
+      partial: 'Partial',
+      error: 'Error'
+    };
+    return {
+      phase,
+      label: labels[phase] || labels.pending,
+      status: uiStatus,
+      executionState: state.executionState,
+      answerState: state.answerState,
+      finalStatus: state.finalStatus || null,
+      terminal: !!state.terminal,
+      rank: state.rank
+    };
+  }
+
   const contract = Object.freeze({
     SUCCESS_STATUSES,
     FAILURE_STATUSES,
@@ -162,7 +190,8 @@
     isFailureStatus,
     resolveDisplayStatus,
     shouldApplyStatusUpdate,
-    deriveStatusContract
+    deriveStatusContract,
+    deriveResultMeta
   });
 
   root.LLMStatusContract = contract;

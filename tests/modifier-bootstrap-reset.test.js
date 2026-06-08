@@ -3,9 +3,12 @@ const path = require('path');
 
 const delay = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function renderBootstrapDom() {
+function renderBootstrapDom({ pipelinePage = false } = {}) {
+  window.history.replaceState(null, '', pipelinePage ? '/pipeline_panel.html' : '/result_new.html');
+  document.body.className = pipelinePage ? 'pipeline-page' : '';
+  const promptId = pipelinePage ? 'modTa' : 'prompt-input';
   document.body.innerHTML = `
-    <div class="prompt-sandwich">
+    <div class="app-main prompt-sandwich">
       <div class="debate-sel-toolbar" id="debateSelTb"></div>
       <div id="debate-session-tabs">
         <button type="button" class="debate-session-tab active" data-session-id="1">1</button>
@@ -19,7 +22,7 @@ function renderBootstrapDom() {
       <button id="debate-session-export-btn" type="button">export</button>
       <button id="debate-session-clear-btn" type="button">clear</button>
       <div id="pipeline-panel"></div>
-      <textarea id="prompt-input"></textarea>
+      <textarea id="${promptId}"></textarea>
       <div id="modifiers-header"></div>
       <div id="modifiers-row"></div>
       <div id="modifiers-container"></div>
@@ -66,8 +69,41 @@ function renderBootstrapDom() {
 }
 
 function installMocks() {
+  delete window.__RESULTS_PAGE_LOADED;
   chrome.runtime.getURL = jest.fn((value) => value);
+  chrome.runtime.sendMessage = jest.fn((message, callback) => {
+    if (typeof callback === 'function') callback({ ok: true });
+    return Promise.resolve({ ok: true });
+  });
   chrome.storage.local._store.clear();
+  chrome.storage.local.get = jest.fn((key, callback) => {
+    let result = {};
+    if (key === null) {
+      chrome.storage.local._store.forEach((value, k) => { result[k] = value; });
+    } else if (typeof key === 'string') {
+      result = { [key]: chrome.storage.local._store.get(key) };
+    } else if (Array.isArray(key)) {
+      key.forEach((k) => { result[k] = chrome.storage.local._store.get(k); });
+    } else {
+      Object.keys(key || {}).forEach((k) => {
+        result[k] = chrome.storage.local._store.get(k) ?? key[k];
+      });
+    }
+    if (typeof callback === 'function') callback(result);
+    return Promise.resolve(result);
+  });
+  chrome.storage.local.set = jest.fn((obj, callback) => {
+    Object.entries(obj || {}).forEach(([k, v]) => {
+      chrome.storage.local._store.set(k, v);
+    });
+    if (typeof callback === 'function') callback();
+    return Promise.resolve();
+  });
+  chrome.storage.local.remove = jest.fn((keys, callback) => {
+    (Array.isArray(keys) ? keys : [keys]).forEach((k) => chrome.storage.local._store.delete(k));
+    if (typeof callback === 'function') callback();
+    return Promise.resolve();
+  });
 
   window.ResultsShared = {
     escapeHtml: (value = '') => String(value)
@@ -153,10 +189,22 @@ function installMocks() {
 async function loadResultsScript() {
   const pipelineRuntime = fs.readFileSync(path.join(__dirname, '..', 'pipeline', 'pipeline-runtime.js'), 'utf8');
   window.eval(pipelineRuntime);
+  const domContentLoadedListeners = [];
+  const originalAddEventListener = document.addEventListener.bind(document);
+  document.addEventListener = (type, listener, options) => {
+    if (type === 'DOMContentLoaded') {
+      domContentLoadedListeners.push({ listener, options });
+    }
+    return originalAddEventListener(type, listener, options);
+  };
   const script = fs.readFileSync(path.join(__dirname, '..', 'results.js'), 'utf8');
   window.eval(script);
+  document.addEventListener = originalAddEventListener;
   document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }));
-  await delay(80);
+  await delay(320);
+  domContentLoadedListeners.forEach(({ listener, options }) => {
+    document.removeEventListener('DOMContentLoaded', listener, options);
+  });
 }
 
 describe('modifier bootstrap reset', () => {
@@ -173,7 +221,7 @@ describe('modifier bootstrap reset', () => {
 
     await loadResultsScript();
 
-    const checked = Array.from(document.querySelectorAll('#modifiers-container input[type="checkbox"]'))
+    const checked = Array.from(document.querySelectorAll('input[data-mod-id]'))
       .filter((checkbox) => checkbox.checked)
       .map((checkbox) => checkbox.dataset.modId);
 
@@ -182,5 +230,49 @@ describe('modifier bootstrap reset', () => {
     expect(chrome.storage.local._store.has('llmComparatorSelected')).toBe(false);
     expect(chrome.storage.local._store.has('llmComparatorSelectedByPreset')).toBe(false);
     expect(chrome.storage.local._store.has('llmComparatorSelectedByPresetPipeline')).toBe(false);
+  });
+
+  test('cross-view navigation preserves prompt, model buttons, and modifier selections', async () => {
+    renderBootstrapDom({ pipelinePage: true });
+    installMocks();
+    const now = Date.now();
+    chrome.storage.local._store.set('llmComparatorSelectedByPresetPipeline', { base: ['mod-b'] });
+    chrome.storage.local._store.set('llmComparatorCrossViewNavigationIntent', {
+      sourceView: 'main',
+      targetView: 'pipeline',
+      savedAt: now
+    });
+    chrome.storage.local._store.set('llmComparatorCrossViewUiState', {
+      version: 2,
+      savedAt: now,
+      views: {
+        main: {},
+        pipeline: {
+          savedAt: now,
+          promptText: 'draft prompt survives view switch',
+          modelButtonIds: ['llm-gpt'],
+          modifiers: {
+            presetId: 'base',
+            selectedIds: ['mod-b'],
+            customText: {}
+          },
+          formControls: {}
+        }
+      },
+      shared: {}
+    });
+    const removeSpy = jest.spyOn(chrome.storage.local, 'remove');
+
+    await loadResultsScript();
+
+    expect(document.getElementById('modTa').value).toBe('draft prompt survives view switch');
+    expect(document.getElementById('llm-gpt').classList.contains('active')).toBe(true);
+    expect(chrome.storage.local._store.get('llmComparatorSelectedByPresetPipeline')).toEqual({ base: ['mod-b'] });
+    expect(chrome.storage.local._store.has('llmComparatorCrossViewNavigationIntent')).toBe(false);
+    expect(removeSpy).not.toHaveBeenCalledWith(expect.arrayContaining([
+      'llmComparatorSelected',
+      'llmComparatorSelectedByPreset',
+      'llmComparatorSelectedByPresetPipeline'
+    ]));
   });
 });

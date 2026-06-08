@@ -15,6 +15,7 @@ const VISIT_QUOTA_MAX_MS = 12000;
 const VISIT_QUOTA_COOLDOWN_MS = 15000;
 const POST_SUCCESS_SCROLL_ATTEMPTS_MS = [0, 1200, 3600];
 const DEFERRED_VISIT_DELAYS_MS = [15000, 45000, 90000];
+const TAB_LEASE_TTL_MS = HUMAN_VISIT_HARD_CAP_MS;
 
 var humanPresenceLoopTimeout = null;
 var humanPresenceActive = false;
@@ -332,6 +333,63 @@ function scheduleVisitHardCapTimer(tabId, llmName, source, startedAt) {
   }, HUMAN_VISIT_HARD_CAP_MS);
 }
 
+function buildTabLeaseKey(tabId, llmName) {
+  return `${llmName || 'unknown'}:${Number(tabId || 0)}`;
+}
+
+function isTabLeaseExpired(now = Date.now()) {
+  const expiresAt = Number(tabVisitTracker.leaseExpiresAt || 0);
+  return Boolean(expiresAt && expiresAt <= now);
+}
+
+function canPreemptActiveTabLease(tabId, llmName, source = 'tab_focus', now = Date.now()) {
+  if (!tabVisitTracker.tabId || !tabVisitTracker.llmName) {
+    return { ok: true, reason: 'no_active_lease' };
+  }
+  if (tabVisitTracker.tabId === tabId && tabVisitTracker.llmName === llmName) {
+    return { ok: true, reason: 'same_lease' };
+  }
+  if (isTabLeaseExpired(now)) {
+    return { ok: true, reason: 'lease_expired' };
+  }
+  if (source === 'user_focus') {
+    return { ok: true, reason: 'user_focus_preempt' };
+  }
+  return {
+    ok: false,
+    reason: 'active_lease',
+    owner: tabVisitTracker.leaseOwner || tabVisitTracker.source || 'unknown',
+    leaseKey: tabVisitTracker.leaseKey || buildTabLeaseKey(tabVisitTracker.tabId, tabVisitTracker.llmName),
+    expiresAt: Number(tabVisitTracker.leaseExpiresAt || 0)
+  };
+}
+
+function denyTabLease(tabId, llmName, source, decision) {
+  const meta = {
+    tabId,
+    source: source || 'tab_focus',
+    reason: decision?.reason || 'active_lease',
+    owner: decision?.owner || 'unknown',
+    activeLeaseKey: decision?.leaseKey || null,
+    leaseExpiresAt: decision?.expiresAt || null,
+    activeTabId: tabVisitTracker.tabId || null,
+    activeLlmName: tabVisitTracker.llmName || null
+  };
+  emitTelemetry(llmName, 'LEASE_DENIED', {
+    level: 'warning',
+    details: meta.reason,
+    meta,
+    force: true
+  });
+  broadcastDiagnostic(llmName, {
+    type: 'VISIT',
+    label: 'LEASE_DENIED',
+    details: meta.reason,
+    level: 'warning',
+    meta
+  });
+}
+
 async function emitFocusStuckIfStillActive() {
   if (!focusStuckMeta) return;
   const { tabId, llmName, startedAt, source } = focusStuckMeta;
@@ -357,14 +415,19 @@ async function emitFocusStuckIfStillActive() {
 }
 
 function startTabVisit(tabId, llmName, source = 'tab_focus') {
-  if (!isValidTabId(tabId) || !llmName) return;
+  if (!isValidTabId(tabId) || !llmName) return false;
   const entry = jobState?.llms?.[llmName];
   if (isTerminalEntry(entry)) {
     if (tabVisitTracker.tabId === tabId || tabVisitTracker.llmName === llmName) {
       finalizeTabVisit('terminal_focus_skip');
     }
     clearFocusStuckTimer('terminal_focus_skip');
-    return;
+    return false;
+  }
+  const leaseDecision = canPreemptActiveTabLease(tabId, llmName, source);
+  if (!leaseDecision.ok) {
+    denyTabLease(tabId, llmName, source, leaseDecision);
+    return false;
   }
   const cappedSources = new Set(['human_visit', 'automation_focus']);
   if (tabVisitTracker.tabId === tabId) {
@@ -377,18 +440,39 @@ function startTabVisit(tabId, llmName, source = 'tab_focus') {
         tabVisitTracker.startedAt = Date.now();
       }
     }
+    tabVisitTracker.leaseOwner = tabVisitTracker.source || nextSource;
+    tabVisitTracker.leaseKey = buildTabLeaseKey(tabId, llmName);
+    tabVisitTracker.leaseExpiresAt = Date.now() + TAB_LEASE_TTL_MS;
     if (cappedSources.has(tabVisitTracker.source)) {
       scheduleVisitHardCapTimer(tabId, llmName, tabVisitTracker.source, tabVisitTracker.startedAt || Date.now());
     } else {
       clearVisitHardCapTimer('same_tab_non_capped');
     }
-    return;
+    return true;
+  }
+  if (leaseDecision.reason === 'lease_expired') {
+    emitTelemetry(tabVisitTracker.llmName, 'LEASE_EXPIRED', {
+      level: 'warning',
+      details: tabVisitTracker.leaseKey || buildTabLeaseKey(tabVisitTracker.tabId, tabVisitTracker.llmName),
+      meta: {
+        tabId: tabVisitTracker.tabId,
+        llmName: tabVisitTracker.llmName,
+        source: tabVisitTracker.source || 'unknown',
+        startedAt: tabVisitTracker.startedAt || null,
+        leaseExpiresAt: tabVisitTracker.leaseExpiresAt || null
+      },
+      force: true
+    });
+    finalizeTabVisit('lease_expired_preempted');
   }
   finalizeTabVisit('tab_switch');
   tabVisitTracker.tabId = tabId;
   tabVisitTracker.llmName = llmName;
   tabVisitTracker.startedAt = Date.now();
   tabVisitTracker.source = source || 'tab_focus';
+  tabVisitTracker.leaseOwner = tabVisitTracker.source;
+  tabVisitTracker.leaseKey = buildTabLeaseKey(tabId, llmName);
+  tabVisitTracker.leaseExpiresAt = tabVisitTracker.startedAt + TAB_LEASE_TTL_MS;
   if (self.getTabSafe && self.buildTabSnapshot) {
     self.getTabSafe(tabId).then((tab) => {
       tabVisitTracker.snapshot = self.buildTabSnapshot(tab);
@@ -407,7 +491,11 @@ function startTabVisit(tabId, llmName, source = 'tab_focus') {
     meta: {
       tabId,
       source,
-      startedAt: tabVisitTracker.startedAt
+      startedAt: tabVisitTracker.startedAt,
+      leaseKey: tabVisitTracker.leaseKey,
+      leaseOwner: tabVisitTracker.leaseOwner,
+      leaseTtlMs: TAB_LEASE_TTL_MS,
+      leaseExpiresAt: tabVisitTracker.leaseExpiresAt
     },
     force: true
   });
@@ -429,6 +517,7 @@ function startTabVisit(tabId, llmName, source = 'tab_focus') {
   } else {
     clearVisitHardCapTimer('non_capped_source');
   }
+  return true;
 }
 
 function finalizeTabVisit(reason = 'tab_switch') {
@@ -438,6 +527,10 @@ function finalizeTabVisit(reason = 'tab_switch') {
     tabVisitTracker.llmName = null;
     tabVisitTracker.startedAt = 0;
     tabVisitTracker.source = null;
+    tabVisitTracker.snapshot = null;
+    tabVisitTracker.leaseOwner = null;
+    tabVisitTracker.leaseKey = null;
+    tabVisitTracker.leaseExpiresAt = null;
     return;
   }
   const endedAt = Date.now();
@@ -537,6 +630,9 @@ function finalizeTabVisit(reason = 'tab_switch') {
   tabVisitTracker.startedAt = 0;
   tabVisitTracker.source = null;
   tabVisitTracker.snapshot = null;
+  tabVisitTracker.leaseOwner = null;
+  tabVisitTracker.leaseKey = null;
+  tabVisitTracker.leaseExpiresAt = null;
 }
 
 function startAutomationVisit(tabId, llmName) {
@@ -1361,6 +1457,7 @@ self.HUMAN_VISIT_LOOP_PAUSE_MS = HUMAN_VISIT_LOOP_PAUSE_MS;
 self.HUMAN_VISIT_ALERT_THRESHOLD = HUMAN_VISIT_ALERT_THRESHOLD;
 self.POST_SUCCESS_SCROLL_ATTEMPTS_MS = POST_SUCCESS_SCROLL_ATTEMPTS_MS;
 self.DEFERRED_VISIT_DELAYS_MS = DEFERRED_VISIT_DELAYS_MS;
+self.TAB_LEASE_TTL_MS = TAB_LEASE_TTL_MS;
 self.humanPresenceLoopTimeout = humanPresenceLoopTimeout;
 self.humanPresenceActive = humanPresenceActive;
 self.humanPresencePaused = humanPresencePaused;
@@ -1380,6 +1477,9 @@ self.handleHumanVisitControl = handleHumanVisitControl;
 self.handleHumanVisitModelToggle = handleHumanVisitModelToggle;
 self.handleBrowserFocusChange = handleBrowserFocusChange;
 self.handleTabActivation = handleTabActivation;
+self.buildTabLeaseKey = buildTabLeaseKey;
+self.isTabLeaseExpired = isTabLeaseExpired;
+self.canPreemptActiveTabLease = canPreemptActiveTabLease;
 self.startTabVisit = startTabVisit;
 self.finalizeTabVisit = finalizeTabVisit;
 self.runHumanPresenceCycle = runHumanPresenceCycle;

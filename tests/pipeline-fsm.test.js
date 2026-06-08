@@ -197,6 +197,12 @@ describe('PipelineFSM lifecycle guard', () => {
           pendingFinalAnswer: 'C'.repeat(20000),
           pendingFinalAnswerHtml: 'D'.repeat(20000),
           finalStatusRecorded: true,
+          recoveryBudgets: {
+            'dispatch-1::materialize_latest::no_send': {
+              inlineDomAttempts: 2,
+              controlledVisitAttempts: 1
+            }
+          },
           snapshots: Array.from({ length: 20 }, (_, index) => ({ id: index + 1 })),
           logs: Array.from({ length: 80 }, (_, index) => ({ label: `L${index}`, details: 'x'.repeat(5000) }))
         }
@@ -212,6 +218,9 @@ describe('PipelineFSM lifecycle guard', () => {
     expect(compacted.llms.GPT.pendingFinalAnswer).toBeUndefined();
     expect(compacted.llms.GPT.pendingFinalAnswerHtml).toBeUndefined();
     expect(compacted.llms.GPT.logs).toHaveLength(8);
+    expect(compacted.llms.GPT.recoveryBudgets).toEqual(expect.objectContaining({
+      'dispatch-1::materialize_latest::no_send': expect.objectContaining({ inlineDomAttempts: 2 })
+    }));
     expect(compacted.session.pipelineRunId).toBe('run-3');
     expect(compacted.session.roundHistory).toHaveLength(6);
     expect(compacted.session.roundSnapshots).toHaveLength(6);

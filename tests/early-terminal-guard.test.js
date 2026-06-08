@@ -4,6 +4,8 @@ const vm = require('vm');
 
 const JOB_ORCHESTRATOR_PATH = path.join(__dirname, '..', 'background', 'job-orchestrator.js');
 const JOB_ORCHESTRATOR_SOURCE = fs.readFileSync(JOB_ORCHESTRATOR_PATH, 'utf8');
+const STATUS_CONTRACT_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'status-contract.js'), 'utf8');
+const FINALIZATION_CONTROLLER_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'finalization-controller.js'), 'utf8');
 
 function createSandbox() {
   const logs = [];
@@ -106,6 +108,8 @@ function createSandbox() {
   context.self = context;
 
   vm.createContext(context);
+  vm.runInContext(STATUS_CONTRACT_SOURCE, context, { filename: 'shared/status-contract.js' });
+  vm.runInContext(FINALIZATION_CONTROLLER_SOURCE, context, { filename: 'shared/finalization-controller.js' });
   vm.runInContext(JOB_ORCHESTRATOR_SOURCE, context, { filename: 'background/job-orchestrator.js' });
 
   return { context, logs, stateUpdates, partialMessages };
@@ -319,6 +323,81 @@ describe('early terminal success guard', () => {
           type: 'LLM_PARTIAL_RESPONSE',
           llmName: 'Qwen',
           metadata: expect.objectContaining({ status: 'SUCCESS' })
+        })
+      ])
+    );
+  });
+
+  test('recovers Qwen false NO_SEND when answer appears after prompt confirmation miss', async () => {
+    const { context, stateUpdates, partialMessages, logs } = createSandbox();
+    const entry = context.jobState.llms.Qwen;
+
+    context.handleLLMResponse(
+      'Qwen',
+      'Error: prompt_not_confirmed_before_round4',
+      { type: 'no_send', message: 'Prompt submission not confirmed before round4' },
+      {
+        dispatchId: 'dispatch-qwen',
+        preTerminalMaterializeFinal: true,
+        responseMeta: {
+          failureClass: 'dispatch',
+          source: 'round4_gate'
+        }
+      }
+    );
+    await Promise.resolve();
+
+    expect(entry.finalStatusRecorded).toBe(true);
+    expect(entry.finalStatus).toBe('NO_SEND');
+    expect(entry.promptSubmittedAt).toBeFalsy();
+
+    const answer = 'late recovered qwen answer '.repeat(120);
+    const accepted = context.acceptLateCollectResult('Qwen', {
+      ok: true,
+      status: 'success',
+      text: answer,
+      html: '<p>late recovered qwen answer</p>',
+      source: 'inline_executeScript',
+      candidateCount: 3
+    }, {
+      source: 'materialize_latest_retry:no_send',
+      dispatchId: 'dispatch-qwen',
+      preTerminalMaterialize: true,
+      responseMeta: {
+        source: 'materialize_latest_retry:no_send',
+        completionReason: 'late_collect',
+        recovered: true,
+        lateCollectFinal: true,
+        forceTerminalSuccess: true
+      }
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(accepted).toBe(true);
+    expect(entry.finalStatusRecorded).toBe(true);
+    expect(entry.finalStatus).toBe('SUCCESS');
+    expect(entry.promptSubmittedAt).toBeTruthy();
+    expect(entry.submitSource).toBe('inferred_answer_evidence');
+    expect(stateUpdates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ llmName: 'Qwen', status: 'SUCCESS' })
+      ])
+    );
+    expect(partialMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'LLM_PARTIAL_RESPONSE',
+          llmName: 'Qwen',
+          metadata: expect.objectContaining({ status: 'SUCCESS' })
+        })
+      ])
+    );
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          llmName: 'Qwen',
+          entry: expect.objectContaining({ label: 'Submit confirmation inferred from answer evidence' })
         })
       ])
     );
