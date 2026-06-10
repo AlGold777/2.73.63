@@ -132,17 +132,6 @@
                         </div>
                     </div>
                     <div class="top-bar-right">
-                        <label class="top-new-pages-toggle" data-tooltip="Open each model's answer in a new tab for comparison.">
-                            <span class="top-new-pages-text">New Pages</span>
-                            <input type="checkbox" id="new-pages-checkbox" class="top-new-pages-checkbox" checked="">
-                            <span class="top-toggle-track"><span class="top-toggle-thumb"></span></span>
-                        </label>
-                        <!-- Auto checkbox hidden in header; functionality handled elsewhere. -->
-                        <label class="top-new-pages-toggle hidden" data-tooltip="Auto: answers populate cards without extra clicks.">
-                            <span class="top-new-pages-text">Auto</span>
-                            <input type="checkbox" id="auto-checkbox" class="top-new-pages-checkbox">
-                            <span class="top-toggle-track"><span class="top-toggle-thumb"></span></span>
-                        </label>
                         <button type="button" class="sidebar-toggle-btn right-sidebar-toggle-btn" id="right-sidebar-toggle" aria-pressed="false" aria-controls="pipeline-sidebar" data-tooltip="Pipeline panel" aria-label="Pipeline">
                             <svg class="sidebar-toggle-icon sidebar-toggle-icon-branch-v3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                 <circle cx="6" cy="3" r="2"></circle>
@@ -154,6 +143,14 @@
                                 <path d="M8 12 C18 12 18 8 18 5"></path>
                             </svg>
                             <span class="sr-only">Pipeline</span>
+                        </button>
+                        <button type="button" class="sidebar-toggle-btn telemetry-toggle-btn" id="telemetry-toggle-btn" aria-label="Telemetry" data-tooltip="Telemetry">
+                            <svg class="sidebar-toggle-icon telemetry-toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M12 2.8l1.2 2.8a7.5 7.5 0 0 1 1.6.7l2.9-.4 1.7 2.9-2.1 2a7.3 7.3 0 0 1 0 1.8l2.1 2-1.7 2.9-2.9-.4a7.5 7.5 0 0 1-1.6.7L12 21.2l-2.2-2.8a7.5 7.5 0 0 1-1.6-.7l-2.9.4-1.7-2.9 2.1-2a7.3 7.3 0 0 1 0-1.8l-2.1-2 1.7-2.9 2.9.4a7.5 7.5 0 0 1 1.6-.7L12 2.8Z"></path>
+                                <circle cx="12" cy="12" r="4.5"></circle>
+                                <circle cx="12" cy="12" r="1.7"></circle>
+                            </svg>
+                            <span class="sr-only">Telemetry</span>
                         </button>
 
                     </div>
@@ -190,15 +187,17 @@
                     </svg>
                 </span>
             </button>
-            <button type="button" id="pro-stream-toggle-btn" class="prompt-mode-btn prompt-pro-toggle-btn" title="LLM Stream" aria-label="LLM Stream" aria-pressed="false">
-                <span class="toggle-icon toggle-icon-pro" data-icon="⌘" aria-hidden="true"></span>
-            </button>
-        </div>
-        <div class="prompt-footer-right">
             <button type="button" id="prompt-attach-btn" class="prompt-export-btn" title="Attach file" aria-label="Attach file">+</button>
             <button type="button" id="prompt-copy-btn" class="prompt-copy-btn" title="Copy prompt" aria-label="Copy prompt"><i class="ti ti-copy"></i></button>
             <!-- JSON export button removed per latest UI request -->
             <button type="button" id="clear-prompt-btn" class="prompt-clear-btn" title="Clear prompt" aria-label="Clear prompt"><i class="ti ti-trash"></i></button>
+        </div>
+        <div class="prompt-footer-right">
+            <label class="top-new-pages-toggle" data-tooltip="Open each model's answer in a new tab for comparison.">
+                <span class="top-new-pages-text">New Pages</span>
+                <input type="checkbox" id="new-pages-checkbox" class="top-new-pages-checkbox" checked="">
+                <span class="top-toggle-track"><span class="top-toggle-thumb"></span></span>
+            </label>
             <button id="start-button" class="send-button send-button-floating" title="Send prompt"><i class="ti ti-send" aria-hidden="true"></i></button>
         </div>
     </div>
@@ -244,9 +243,21 @@
         <div class="modifiers-toggle-bar pro-toggle-bar" id="pro-header">
             <div class="pro-toggle-top-row">
                 <span class="modifiers-toggle-label">
-                    <span class="view-toggle-group">
-                        <button type="button" id="view-grid-btn" class="view-mode-btn is-active" title="Grid view" aria-label="Grid view"></button>
-                        <button type="button" id="view-stack-btn" class="view-mode-btn" title="Stack view" aria-label="Stack view"></button>
+                <span class="view-toggle-group">
+                        <button type="button" id="view-grid-btn" class="view-mode-btn" title="Grid outline" aria-label="Grid outline">
+                            <svg class="view-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+                                <rect x="2" y="2" width="5" height="5" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></rect>
+                                <rect x="9" y="2" width="5" height="5" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></rect>
+                                <rect x="2" y="9" width="5" height="5" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></rect>
+                                <rect x="9" y="9" width="5" height="5" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></rect>
+                            </svg>
+                        </button>
+                        <button type="button" id="view-stack-btn" class="view-mode-btn" title="List outline" aria-label="List outline">
+                            <svg class="view-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+                                <rect x="2" y="3" width="12" height="3.5" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" rx="1"></rect>
+                                <rect x="2" y="9.5" width="12" height="3.5" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" rx="1"></rect>
+                            </svg>
+                        </button>
                     </span>
                 </span>
                 <div class="llm-header-bar controls-row pro-toggle-controls-row">
@@ -597,10 +608,10 @@
                                         </select>
                                     </div>
                                     <div class="telemetry-actions">
-                                        <button type="button" class="diag-icon-btn diag-export-all-logs-btn" id="export-all-logs-md-telemetry" aria-label="Export diagnostics and telemetry as Markdown" title="Export All Logs">Export</button>
+                                        <button type="button" class="diag-icon-btn diag-export-all-logs-btn" id="export-all-logs-md-telemetry" aria-label="Export diagnostics and telemetry as Markdown" title="Export All Logs">MD</button>
+                                        <button type="button" class="devtools-pill-btn" id="telemetry-export-json-btn" title="Export telemetry as JSON" aria-label="Export telemetry as JSON">{ }</button>
                                         <button type="button" class="devtools-pill-btn" id="telemetry-refresh-btn" title="Refresh" aria-label="Refresh">↻</button>
                                         <button type="button" class="devtools-pill-btn" id="telemetry-copy-btn" title="Copy" aria-label="Copy"><i class="ti ti-copy" aria-hidden="true"></i></button>
-                                        <button type="button" class="devtools-pill-btn" id="telemetry-export-json-btn" title="Export telemetry as JSON" aria-label="Export telemetry as JSON">{ }</button>
                                         <button type="button" class="devtools-pill-btn" id="telemetry-reset-btn" title="Reset" aria-label="Reset">🗑</button>
                                     </div>
                                 </div>

@@ -72,6 +72,7 @@ const resetChrome = () => {
 const bootstrapModules = () => {
   resetChrome();
   delete window.LLMExtension;
+  delete window.SelectorProfileLifecycle;
   delete window.SelectorResolverV2;
   delete window.ResponseLifecycleDetector;
   delete window.SelectorConfig;
@@ -79,6 +80,7 @@ const bootstrapModules = () => {
   document.body.replaceChildren();
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });
   Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
+  loadScript('shared/selector-profile-lifecycle.js');
   loadScript('content-utils/selector-resolver-v2.js');
   loadScript('content-utils/response-lifecycle-detector.js');
 };
@@ -122,6 +124,7 @@ describe('SelectorResolverV2 and ResponseLifecycleDetector', () => {
             hits: 0,
             failures: 4,
             total: 4,
+            lastKnownGoodVersion: 'stable-v1',
             updatedAt: Date.now()
           }
         }
@@ -151,6 +154,11 @@ describe('SelectorResolverV2 and ResponseLifecycleDetector', () => {
     expect(result.diagnostics).toEqual(expect.objectContaining({
       selectorProfileStatus: 'broken',
       selectorProfileBroken: true,
+      selectorProfileLifecycle: expect.objectContaining({
+        action: 'rollback_to_last_known_good',
+        rollbackRequired: true,
+        selectedVersion: 'stable-v1'
+      }),
       exactSkipped: true,
       cacheSkipped: true
     }));

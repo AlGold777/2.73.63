@@ -68,4 +68,13 @@ describe('Qwen response extraction', () => {
     expect(html).toContain('Это основной ответ модели.');
     expect(html).not.toMatch(/Автоматический/i);
   });
+
+  test('answer candidate rejects prompt echo and accepts real answer', () => {
+    const prompt = 'Составь короткий план запуска проекта';
+    const predicate = window.__qwenAllCopyV6.isQwenAnswerCandidate;
+
+    expect(predicate(prompt, prompt, '')).toBe(false);
+    expect(predicate(` ${prompt} `, prompt, '')).toBe(false);
+    expect(predicate('1. Определить цель.\n2. Назначить ответственных.\n3. Проверить риски.', prompt, '')).toBe(true);
+  });
 });

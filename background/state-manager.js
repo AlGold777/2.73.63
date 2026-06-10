@@ -239,12 +239,20 @@ function updateModelState(llmName, status, data = {}) {
   if (jobState?.llms?.[llmName]) {
     const entry = jobState.llms[llmName];
     const currentStatus = entry.status;
+    const contractTerminalBlocksNonTerminal = Boolean(
+      contract.isTerminalStatus
+      && (entry.finalStatusRecorded || entry.finalizedAt || entry.finalStatus)
+      && contract.isTerminalStatus(entry.finalStatus || currentStatus)
+      && !contract.isTerminalStatus(normalizedStatus)
+      && data?.force !== true
+      && data?.reset !== true
+    );
     const terminalRunBlocksNonTerminal = Boolean(
       runState.isTerminalRunState
       && runState.isTerminalRunState(entry)
       && !(runState.isTerminalStatus ? runState.isTerminalStatus(normalizedStatus) : contract.isTerminalStatus?.(normalizedStatus))
     );
-    if (terminalRunBlocksNonTerminal) {
+    if (terminalRunBlocksNonTerminal || contractTerminalBlocksNonTerminal) {
       if (self.commitModelRunTransition) {
         self.commitModelRunTransition(llmName, entry, 'POST_TERMINAL_NOISE', {
           label: normalizedStatus,
@@ -257,16 +265,19 @@ function updateModelState(llmName, status, data = {}) {
       } else if (runState.recordPostTerminalNoise) {
         runState.recordPostTerminalNoise(entry, { label: normalizedStatus });
       }
-      console.log(`[State Update] Skipping ${llmName}: ${normalizedStatus} blocked by modelRunState (terminal_blocks_non_terminal_status)`);
+      const terminalGuardReason = contractTerminalBlocksNonTerminal
+        ? 'legacy_terminal_blocks_non_terminal_status'
+        : 'terminal_blocks_non_terminal_status';
+      console.log(`[State Update] Skipping ${llmName}: ${normalizedStatus} blocked by terminal guard (${terminalGuardReason})`);
       appendLogEntry(llmName, {
         type: 'STATUS',
         label: 'STATUS_IGNORED',
-        details: `${currentStatus || 'UNKNOWN'} -> ${normalizedStatus} (terminal_blocks_non_terminal_status)`,
+        details: `${currentStatus || 'UNKNOWN'} -> ${normalizedStatus} (${terminalGuardReason})`,
         level: 'info',
         meta: {
           currentStatus: currentStatus || null,
           incomingStatus: normalizedStatus,
-          reason: 'terminal_blocks_non_terminal_status',
+          reason: terminalGuardReason,
           modelRunState: entry.modelRunState || null
         }
       });

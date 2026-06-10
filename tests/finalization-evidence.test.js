@@ -5,9 +5,11 @@ const vm = require('vm');
 const JOB_ORCHESTRATOR_PATH = path.join(__dirname, '..', 'background', 'job-orchestrator.js');
 const JOB_ORCHESTRATOR_SOURCE = fs.readFileSync(JOB_ORCHESTRATOR_PATH, 'utf8');
 const STATUS_CONTRACT_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'status-contract.js'), 'utf8');
+const ANSWER_EVIDENCE_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'answer-evidence.js'), 'utf8');
 const FINALIZATION_CONTROLLER_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'finalization-controller.js'), 'utf8');
 const RECOVERY_INTENT_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'recovery-intent.js'), 'utf8');
 const RUN_IDENTITY_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'run-identity.js'), 'utf8');
+const DECISION_LEDGER_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'decision-ledger.js'), 'utf8');
 
 function createSandbox() {
   const context = {
@@ -84,14 +86,62 @@ function createSandbox() {
   context.self = context;
   vm.createContext(context);
   vm.runInContext(STATUS_CONTRACT_SOURCE, context, { filename: 'shared/status-contract.js' });
+  vm.runInContext(ANSWER_EVIDENCE_SOURCE, context, { filename: 'shared/answer-evidence.js' });
   vm.runInContext(FINALIZATION_CONTROLLER_SOURCE, context, { filename: 'shared/finalization-controller.js' });
   vm.runInContext(RECOVERY_INTENT_SOURCE, context, { filename: 'shared/recovery-intent.js' });
   vm.runInContext(RUN_IDENTITY_SOURCE, context, { filename: 'shared/run-identity.js' });
+  vm.runInContext(DECISION_LEDGER_SOURCE, context, { filename: 'shared/decision-ledger.js' });
   vm.runInContext(JOB_ORCHESTRATOR_SOURCE, context, { filename: 'background/job-orchestrator.js' });
   return context;
 }
 
 describe('finalization evidence contract', () => {
+  test('builds AnswerEvidence Lite for timeout, snapshot, panel and materialize sources', () => {
+    const context = createSandbox();
+    const cases = [
+      [{ source: 'dom_snapshot_recovery' }, 'snapshot', 'Accepted answer body. '.repeat(80)],
+      [{ source: 'panel_extraction' }, 'panel', 'Accepted answer body. '.repeat(12)],
+      [{ source: 'materialize_latest' }, 'materialize', 'Accepted answer body. '.repeat(12)],
+      [{ source: 'stream_watcher', completionReason: 'hard_timeout' }, 'timeout', 'Accepted answer body. '.repeat(12)]
+    ];
+
+    cases.forEach(([responseMeta, sourceKind, baseText]) => {
+      const evidence = context.AnswerEvidence.buildAnswerEvidence({
+        llmName: 'Perplexity',
+        text: baseText,
+        responseMeta,
+        minChars: 80
+      });
+      expect(evidence).toEqual(expect.objectContaining({
+        llmName: 'Perplexity',
+        sourceKind,
+        length: baseText.trim().length,
+        terminalEligible: true
+      }));
+      expect(context.AnswerEvidence.shouldFinalizeWithEvidence(evidence).ok).toBe(true);
+    });
+  });
+
+  test('marks timeout-with-text success as partial through evidence policy', () => {
+    const context = createSandbox();
+    context.handleLLMResponse('Perplexity', 'Timeout answer text. '.repeat(20), null, {
+      dispatchId: 'dispatch-pplx',
+      responseMeta: {
+        source: 'stream_watcher',
+        completionReason: 'hard_timeout'
+      }
+    });
+
+    const entry = context.jobState.llms.Perplexity;
+    expect(entry.finalStatusRecorded).toBe(true);
+    expect(entry.finalStatus).toBe('PARTIAL');
+    expect(entry.finalizationEvidence.answerEvidence).toEqual(expect.objectContaining({
+      terminalEligible: true,
+      reason: 'timeout_with_text',
+      partialAllowed: true
+    }));
+  });
+
   test('detects prompt echo candidates', () => {
     const context = createSandbox();
     const prompt = context.jobState.prompt;
@@ -262,6 +312,15 @@ describe('finalization evidence contract', () => {
       intent: 'resend_prompt',
       reason: 'no_resend_after_answer_evidence'
     }));
+    expect(entry.decisionLedger).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          decision: 'deny_recovery_intent',
+          reason: 'no_resend_after_answer_evidence',
+          source: 'manual_resend'
+        })
+      ])
+    );
   });
 
   test('rehydrates open job state after MV3 service worker restart', async () => {
@@ -313,6 +372,14 @@ describe('finalization evidence contract', () => {
       ok: false,
       reason: 'stale_run_session'
     }));
+    expect(entry.decisionLedger).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          decision: 'ignore_stale_event',
+          reason: 'stale_run_session'
+        })
+      ])
+    );
     expect(context.updateModelState).not.toHaveBeenCalledWith(
       'Perplexity',
       'SUCCESS',

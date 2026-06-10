@@ -323,8 +323,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const totalModels = Number(session?.totalModels || llmEntries.length || 0);
                 const terminalCount = llmEntries.filter((entry) => isTerminalRouterEntry(entry)).length;
                 const hasOpenModelRun = llmEntries.some((entry) => !isTerminalRouterEntry(entry));
+                const sessionAgeMs = session?.startTime ? Math.max(0, Date.now() - Number(session.startTime || 0)) : 0;
+                const staleActiveRun = Boolean(
+                    session?.startTime
+                    && !session?.roundsInProgress
+                    && hasOpenModelRun
+                    && sessionAgeMs > 15 * 60 * 1000
+                );
                 const active = Boolean(
                     session?.startTime
+                    && !staleActiveRun
                     && (
                         session?.roundsInProgress
                         || hasOpenModelRun
@@ -334,6 +342,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sendResponse({
                     status: 'ok',
                     active,
+                    staleActiveRun,
+                    sessionAgeMs,
                     sourceView: session?.sourceView || session?.pipelineContext?.sourceView || null,
                     sessionId: session?.startTime || null,
                     totalModels,
@@ -533,6 +543,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         entry.lastRuntimeActivityAt = now;
                         entry.lastRuntimeActivitySource = 'prompt_submitted';
                         entry.csBusyUntil = 0;
+                        entry.awaitingSubmitConfirmation = false;
+                        entry.awaitingSubmitConfirmationAt = null;
+                        entry.awaitingSubmitConfirmationDispatchId = null;
                         entry.confirmedDispatchId = incomingDispatchId || entry?.lastDispatchMeta?.dispatchId || null;
                         entry.submitSource = 'content';
                         if (self.PipelineFSM?.markSubmitted) {

@@ -1119,7 +1119,21 @@
       return timeoutResult('resolver_disabled', { options: sanitizeOptionsForDiagnostics(options) });
     }
     const selectorHealthProfile = await getSelectorHealthProfile(modelName, role);
-    const selectorProfileStatus = String(selectorHealthProfile?.profileStatus || 'unknown').toLowerCase();
+    const selectorProfileLifecycle = window.SelectorProfileLifecycle?.decide
+      ? window.SelectorProfileLifecycle.decide(selectorHealthProfile || {})
+      : {
+          status: String(selectorHealthProfile?.profileStatus || 'unknown').toLowerCase(),
+          action: String(selectorHealthProfile?.profileStatus || '').toLowerCase() === 'broken' ? 'fallback_only' : 'use_current',
+          reason: String(selectorHealthProfile?.profileStatus || '').toLowerCase() === 'broken'
+            ? 'selector_profile_broken_no_last_known_good'
+            : 'profile_not_restrictive',
+          exactEnabled: String(selectorHealthProfile?.profileStatus || '').toLowerCase() !== 'broken',
+          cacheEnabled: String(selectorHealthProfile?.profileStatus || '').toLowerCase() !== 'broken',
+          fallbackOnly: String(selectorHealthProfile?.profileStatus || '').toLowerCase() === 'broken',
+          rollbackRequired: false,
+          selectedVersion: null
+        };
+    const selectorProfileStatus = selectorProfileLifecycle.status || 'unknown';
     const selectorProfileBroken = selectorProfileStatus === 'broken';
     const hasBudget = () => (Date.now() - startedAt) < timeoutMs;
     const diagnostics = {
@@ -1130,6 +1144,7 @@
       cacheValid: false,
       selectorProfileStatus,
       selectorProfileBroken,
+      selectorProfileLifecycle,
       selectorHealthProfile: selectorHealthProfile ? {
         hits: selectorHealthProfile.hits || 0,
         failures: selectorHealthProfile.failures || 0,
@@ -1155,11 +1170,11 @@
     );
     if (!hasBudget()) return timeoutResult('resolver_timeout_before_exact', diagnostics);
 
-    if (selectorProfileBroken) {
+    if (!selectorProfileLifecycle.exactEnabled) {
       diagnostics.exactSkipped = true;
-      diagnostics.exactSkipReason = 'selector_profile_broken';
+      diagnostics.exactSkipReason = selectorProfileLifecycle.reason || 'selector_profile_blocked';
     }
-    for (const selector of selectorProfileBroken ? [] : resolvedSelectors) {
+    for (const selector of selectorProfileLifecycle.exactEnabled ? resolvedSelectors : []) {
       if (!hasBudget()) return timeoutResult('resolver_timeout_before_exact', diagnostics);
       try {
         const matches = queryAllDeep(root, selector, 2, hasBudget);
@@ -1203,7 +1218,7 @@
     }
 
     if (!hasBudget()) return timeoutResult('resolver_timeout_before_cache', diagnostics);
-    if (preferCached && settings.useCache && !selectorProfileBroken) {
+    if (preferCached && settings.useCache && selectorProfileLifecycle.cacheEnabled) {
       diagnostics.cacheUsed = true;
       const cached = await validateCachedResolution({ modelName, role, root });
       if (cached?.ok && cached.element) {
@@ -1235,10 +1250,10 @@
         });
         return result;
       }
-    } else if (selectorProfileBroken) {
+    } else if (!selectorProfileLifecycle.cacheEnabled) {
       diagnostics.cacheUsed = false;
       diagnostics.cacheSkipped = true;
-      diagnostics.cacheSkipReason = 'selector_profile_broken';
+      diagnostics.cacheSkipReason = selectorProfileLifecycle.reason || 'selector_profile_blocked';
     }
 
     if (!hasBudget()) return timeoutResult('resolver_timeout_before_scan', diagnostics);

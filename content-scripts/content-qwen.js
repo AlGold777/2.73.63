@@ -138,6 +138,7 @@
   cleanupScope.addEventListener?.(window, 'beforeunload', () => stopContentScript('beforeunload'));
   const NETWORK_BUFFER_LIMIT = 6;
   const networkAnswerBuffer = [];
+  let lastPromptText = '';
   const QWEN_API_PATTERNS = [
     /\/api\/v2\/chat\/completions/i,
     /\/api\/v2\/chats\/[^/]+(?:\/messages)?$/i,
@@ -2617,12 +2618,17 @@ const keepAliveMutex = (() => {
 
   // -------------------- Публичная операция: inject → wait → extract → clean → send --------------------
   async function injectAndGetResponse(prompt, context = { isEvaluator: false }) {
+    lastPromptText = String(prompt || '');
     const dispatchMeta = window.ContentUtils?.ensureDispatchMeta
       ? window.ContentUtils.ensureDispatchMeta(context?.meta, MODEL)
       : (context?.meta && typeof context.meta === 'object' ? context.meta : null);
     return runLifecycle('qwen:inject', buildLifecycleContext(prompt, { evaluator: context.isEvaluator }), async (activity) => {
       const opId = metricsCollector.startOperation('injectAndGetResponse');
       const startTime = Date.now();
+      let qwenScope = null;
+      let baselineAssistantText = '';
+      let baselineAssistantCount = 0;
+      let baselineContainerCount = 0;
       try {
         await sleep(1000);
           activity.heartbeat(0.15, { phase: 'composer-search' });
@@ -2652,6 +2658,13 @@ const keepAliveMutex = (() => {
           if (!composer) {
             throw { type: 'selector_not_found', message: 'Qwen input field not writable' };
           }
+          emitDiagnostic({
+            type: 'DISPATCH',
+            label: 'Qwen composer ready',
+            details: describeNode(composer),
+            level: 'info',
+            meta: { dispatchId: dispatchMeta?.dispatchId || null }
+          });
           activity.heartbeat(0.3, { phase: 'composer-ready' });
 
           if (Array.isArray(context.attachments) && context.attachments.length) {
@@ -2678,6 +2691,13 @@ const keepAliveMutex = (() => {
           const pasteOk = window.ContentUtils?.pasteTextFirst
             ? await window.ContentUtils.pasteTextFirst(composer, prompt)
             : false;
+          emitDiagnostic({
+            type: 'DISPATCH',
+            label: 'Qwen prompt paste attempted',
+            details: pasteOk ? 'paste_ok' : 'paste_fallback_type',
+            level: 'info',
+            meta: { dispatchId: dispatchMeta?.dispatchId || null, pasteOk }
+          });
           if (!pasteOk) {
             await typePrompt(composer, prompt);
           }
@@ -2691,22 +2711,54 @@ const keepAliveMutex = (() => {
           if (!normalizedValue.length || (normalizedPromptHead && !normalizedValue.includes(normalizedPromptHead))) {
             throw { type: 'injection_failed', message: 'Input did not accept value (React guard).' };
           }
+          emitDiagnostic({
+            type: 'DISPATCH',
+            label: 'Qwen prompt value validated',
+            details: `len=${String(validationText || '').length}`,
+            level: 'success',
+            meta: { dispatchId: dispatchMeta?.dispatchId || null, valueLength: String(validationText || '').length }
+          });
           activity.heartbeat(0.4, { phase: 'typing' });
-          const qwenScope = resolveQwenChatRoot(composer);
+          qwenScope = resolveQwenChatRoot(composer);
           const baselineUserCount = getUserMessages(qwenScope).length;
-          const baselineContainerCount = getMessageContainers(qwenScope).length;
+          baselineContainerCount = getMessageContainers(qwenScope).length;
           const assistantMessages = getAssistantMessages(qwenScope);
-          const baselineAssistantCount = assistantMessages.length;
-          const baselineAssistantText = assistantMessages.length
+          baselineAssistantCount = assistantMessages.length;
+          baselineAssistantText = assistantMessages.length
             ? extractMessageText(assistantMessages[assistantMessages.length - 1])
             : '';
 
-          await sendComposer(composer, {
-            prompt,
-            scope: qwenScope,
-            baselineUserCount
+          emitDiagnostic({
+            type: 'DISPATCH',
+            label: 'Qwen send attempt',
+            details: `baselineUserCount=${baselineUserCount}`,
+            level: 'info',
+            meta: { dispatchId: dispatchMeta?.dispatchId || null, baselineUserCount }
           });
+          try {
+            await sendComposer(composer, {
+              prompt,
+              scope: qwenScope,
+              baselineUserCount
+            });
+          } catch (err) {
+            emitDiagnostic({
+              type: 'DISPATCH',
+              label: 'Qwen send failed',
+              details: err?.message || err?.type || String(err),
+              level: 'error',
+              meta: { dispatchId: dispatchMeta?.dispatchId || null, errorType: err?.type || null }
+            });
+            throw err;
+          }
           activity.heartbeat(0.5, { phase: 'send-dispatched' });
+          emitDiagnostic({
+            type: 'DISPATCH',
+            label: 'Qwen send confirmed',
+            details: 'PROMPT_SUBMITTED emitted',
+            level: 'success',
+            meta: { dispatchId: dispatchMeta?.dispatchId || null }
+          });
           try { chrome.runtime.sendMessage({ type: 'PROMPT_SUBMITTED', llmName: MODEL, ts: Date.now(), meta: dispatchMeta }); } catch (_) {}
           activity.heartbeat(0.6, { phase: 'waiting-response' });
 
@@ -2780,6 +2832,29 @@ const keepAliveMutex = (() => {
           activity.error(e, false);
           throw e;
         }
+        try {
+          const scope = qwenScope || resolveQwenChatRoot();
+          const fallback = await waitForQwenReply(prompt, 18000, {
+            baselineText: baselineAssistantText || '',
+            referenceElement: scope
+          });
+          const cleanedFallback = contentCleaner.clean(fallback, { maxLength: 50000 });
+          if (isQwenAnswerCandidate(cleanedFallback, prompt, baselineAssistantText || '')) {
+            const latestMarkup = grabLatestAssistantMarkup(scope);
+            if (latestMarkup.html) lastResponseHtml = latestMarkup.html;
+            metricsCollector.recordTiming('total_response_time', Date.now() - startTime);
+            metricsCollector.endOperation(opId, true, {
+              responseLength: cleanedFallback.length,
+              duration: Date.now() - startTime,
+              source: 'last_chance_fallback'
+            });
+            sendResult({ text: cleanedFallback, html: latestMarkup.html || lastResponseHtml }, true, context);
+            activity.stop({ status: 'success', answerLength: cleanedFallback.length, source: 'last_chance_fallback' });
+            return { text: cleanedFallback, html: latestMarkup.html || lastResponseHtml };
+          }
+        } catch (fallbackErr) {
+          console.warn('[content-qwen] Last-chance fallback failed', fallbackErr);
+        }
         console.error('[content-qwen] injectAndGetResponse error:', e);
         metricsCollector.recordError(e, 'injectAndGetResponse', opId);
         metricsCollector.endOperation(opId, false, { error: e?.message });
@@ -2844,6 +2919,7 @@ const keepAliveMutex = (() => {
       }
 
       if (msg?.type === 'GET_ANSWER' || msg?.type === 'GET_FINAL_ANSWER') {
+        lastPromptText = String(msg.prompt || lastPromptText || '');
         currentRequestContext = { isEvaluator: Boolean(msg.isEvaluator), attachments: msg.attachments || [], meta: msg.meta || null };
         const releaseActive = () => window.ContentUtils?.stopActiveRequest?.();
         window.ContentUtils?.startActiveRequest?.();
@@ -2881,21 +2957,25 @@ const keepAliveMutex = (() => {
         (async () => {
           try {
             await withSmartScroll(async () => {
-              const rawText = await waitForQwenReply('', 120000);
+              const promptForPing = String(msg?.meta?.prompt || lastPromptText || '');
+              const rawText = await waitForQwenReply(promptForPing, 120000);
               const cleaned = contentCleaner.clean(rawText);
               const latestMarkup = grabLatestAssistantMarkup();
               if (latestMarkup.html) {
                 lastResponseHtml = latestMarkup.html;
               }
-              if (cleaned && cleaned !== lastResponseCache) {
+              if (cleaned && isQwenAnswerCandidate(cleaned, promptForPing, '') && cleaned !== lastResponseCache) {
                 lastResponseCache = cleaned;
                 sendResult({ text: cleaned, html: latestMarkup.html || lastResponseHtml }, true, { isEvaluator: false, meta: msg?.meta || null });
                 emitDiagnostic({ type: 'PING', label: 'Answer updated after ping', level: 'success', meta: { pingId } });
                 chrome.runtime.sendMessage({ type: 'MANUAL_PING_RESULT', llmName: MODEL, status: 'success', pingId });
-              } else if (cleaned && forceEmitOnUnchanged) {
+              } else if (cleaned && forceEmitOnUnchanged && isQwenAnswerCandidate(cleaned, promptForPing, '')) {
                 sendResult({ text: cleaned, html: latestMarkup.html || lastResponseHtml }, true, { isEvaluator: false, meta: msg?.meta || null });
                 emitDiagnostic({ type: 'PING', label: 'Answer re-emitted after ping', level: 'success', meta: { pingId } });
                 chrome.runtime.sendMessage({ type: 'MANUAL_PING_RESULT', llmName: MODEL, status: 'success', pingId });
+              } else if (cleaned) {
+                emitDiagnostic({ type: 'PING', label: 'Answer rejected after ping', details: 'prompt_echo_or_invalid_candidate', level: 'warning', meta: { pingId, answerLength: cleaned.length } });
+                chrome.runtime.sendMessage({ type: 'MANUAL_PING_RESULT', llmName: MODEL, status: 'failed', error: 'prompt_echo_or_invalid_candidate', pingId });
               } else {
                 emitDiagnostic({ type: 'PING', label: 'Answer unchanged after ping', level: 'info', meta: { pingId } });
                 chrome.runtime.sendMessage({ type: 'MANUAL_PING_RESULT', llmName: MODEL, status: 'unchanged', pingId });
@@ -2932,7 +3012,8 @@ const keepAliveMutex = (() => {
     contentCleaner,
     extractMessageText,
     extractMessageHtml,
-    grabLatestAssistantMarkup
+    grabLatestAssistantMarkup,
+    isQwenAnswerCandidate
   };
 
   console.log('[content-qwen] AllCopy v6 ready.');

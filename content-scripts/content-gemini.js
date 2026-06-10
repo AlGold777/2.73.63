@@ -146,6 +146,126 @@ function readComposerText(el) {
   }
 }
 
+function emitGeminiDiagnostic(event = {}) {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'LLM_DIAGNOSTIC_EVENT',
+      llmName: MODEL,
+      event: Object.assign({
+        ts: Date.now(),
+        source: 'content-gemini'
+      }, event)
+    });
+  } catch (_) {}
+}
+
+function describeGeminiNode(node) {
+  if (!node) return 'none';
+  try {
+    const parts = [String(node.tagName || '').toLowerCase()];
+    const id = node.id ? `#${node.id}` : '';
+    const cls = node.className ? `.${String(node.className).trim().split(/\s+/).slice(0, 4).join('.')}` : '';
+    const aria = node.getAttribute?.('aria-label') || node.getAttribute?.('title') || '';
+    return `${parts[0]}${id}${cls}${aria ? `[label="${aria.slice(0, 80)}"]` : ''}`;
+  } catch (_) {
+    return 'node';
+  }
+}
+
+function isGeminiSendCandidateEnabled(button) {
+  if (!button) return false;
+  if (button.disabled) return false;
+  const ariaDisabled = button.getAttribute?.('aria-disabled');
+  if (ariaDisabled === 'true') return false;
+  const style = window.getComputedStyle?.(button);
+  if (style && (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none')) return false;
+  const rect = button.getBoundingClientRect?.();
+  if (rect && (rect.width <= 1 || rect.height <= 1)) return false;
+  return true;
+}
+
+function scoreGeminiSendButtonCandidate(button, inputField) {
+  if (!isGeminiSendCandidateEnabled(button)) return -Infinity;
+  const text = [
+    button.getAttribute?.('aria-label'),
+    button.getAttribute?.('title'),
+    button.getAttribute?.('data-testid'),
+    button.getAttribute?.('data-test-id'),
+    button.getAttribute?.('type'),
+    button.className,
+    button.id,
+    button.textContent
+  ].map(v => String(v || '')).join(' ');
+  let score = 0;
+  if (/(send|submit|ask|run|arrow|paper|plane|enviar|отправ|发送|提交)/i.test(text)) score += 12;
+  if (/(stop|cancel|voice|mic|microphone|attach|upload|image|menu|more|settings|new chat)/i.test(text)) score -= 20;
+  if (button.matches?.('button[type="submit"]')) score += 4;
+  if (button.querySelector?.('mat-icon,svg,[class*="send" i],[class*="arrow" i],[data-mat-icon-name*="send" i]')) score += 5;
+  try {
+    const form = inputField?.closest?.('form');
+    if (form && form.contains(button)) score += 8;
+    const inputRect = inputField?.getBoundingClientRect?.();
+    const btnRect = button.getBoundingClientRect?.();
+    if (inputRect && btnRect) {
+      const dx = Math.abs((btnRect.left + btnRect.right) / 2 - inputRect.right);
+      const dy = Math.abs((btnRect.top + btnRect.bottom) / 2 - (inputRect.top + inputRect.bottom) / 2);
+      if (dx < 260 && dy < 180) score += 6;
+      if (dy < 80) score += 3;
+    }
+  } catch (_) {}
+  return score;
+}
+
+function resolveGeminiSendButton(inputField, selectors = []) {
+  const candidates = [];
+  for (const selector of selectors) {
+    try {
+      document.querySelectorAll(selector).forEach(node => candidates.push(node));
+    } catch (_) {}
+  }
+  try {
+    const form = inputField?.closest?.('form');
+    form?.querySelectorAll?.('button,[role="button"]').forEach(node => candidates.push(node));
+  } catch (_) {}
+  try {
+    document.querySelectorAll('button,[role="button"]').forEach(node => candidates.push(node));
+  } catch (_) {}
+  const unique = Array.from(new Set(candidates));
+  let best = null;
+  let bestScore = -Infinity;
+  for (const candidate of unique) {
+    const score = scoreGeminiSendButtonCandidate(candidate, inputField);
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return bestScore >= 8 ? best : null;
+}
+
+async function dispatchGeminiKeyboard(inputField, init = {}) {
+  try { inputField.focus?.({ preventScroll: true }); } catch (_) { try { inputField.focus?.(); } catch (_) {} }
+  const eventInit = Object.assign({ key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }, init);
+  inputField.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+  inputField.dispatchEvent(new KeyboardEvent('keypress', eventInit));
+  inputField.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+}
+
+async function requestGeminiFormSubmit(inputField) {
+  try {
+    const form = inputField?.closest?.('form');
+    if (!form) return false;
+    if (typeof form.requestSubmit === 'function') {
+      form.requestSubmit();
+    } else {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function ensureSession(nextSessionId) {
   if (!nextSessionId) return;
   if (geminiSessionId === nextSessionId) return;
@@ -960,9 +1080,25 @@ async function injectAndGetResponse(prompt, attachments = [], meta = null) {
         ];
         const sendButtonSelectors = [
             'button[data-testid="send-button"]',
+            'button[data-testid*="send" i]:not([disabled])',
+            'button[data-test-id*="send" i]:not([disabled])',
             'button.send-button',
-            'button:has(mat-icon[svgicon="send"])', // Более специфичный для Gemini
-            'button[aria-label*="Send"]'
+            'button[class*="send" i]:not([disabled])',
+            'button[class*="submit" i]:not([disabled])',
+            'button:has(mat-icon[svgicon="send"])',
+            'button:has(mat-icon[fonticon="send"])',
+            'button:has(mat-icon[data-mat-icon-name*="send" i])',
+            'button:has(svg):not([disabled])',
+            'button[aria-label*="Send" i]:not([disabled])',
+            'button[aria-label*="Submit" i]:not([disabled])',
+            'button[aria-label*="Ask" i]:not([disabled])',
+            'button[aria-label*="Run" i]:not([disabled])',
+            'button[aria-label*="Enviar" i]:not([disabled])',
+            'button[title*="Send" i]:not([disabled])',
+            'button[title*="Submit" i]:not([disabled])',
+            'button[type="submit"]:not([disabled])',
+            '[role="button"][aria-label*="Send" i]:not([aria-disabled="true"])',
+            '[role="button"][aria-label*="Submit" i]:not([aria-disabled="true"])'
         ];
 
         console.log('[content-gemini] Looking for input field...');
@@ -1039,32 +1175,105 @@ async function injectAndGetResponse(prompt, attachments = [], meta = null) {
             return false;
         };
 
-        const tryCtrlEnterSend = async () => {
-            try { inputField.focus?.({ preventScroll: true }); } catch (_) { try { inputField.focus?.(); } catch (_) {} }
-            inputField.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, ctrlKey: true }));
-            inputField.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, ctrlKey: true }));
+        const runSendStrategy = async (strategy, action, sendButtonCandidate = null, timeout = 3500) => {
+            emitGeminiDiagnostic({
+                type: 'DISPATCH',
+                label: 'Gemini send strategy',
+                details: strategy,
+                level: 'info',
+                meta: {
+                    dispatchId: dispatchMeta?.dispatchId || null,
+                    composerLength: readComposerText(inputField).length,
+                    button: describeGeminiNode(sendButtonCandidate)
+                }
+            });
+            await action();
+            const ok = await confirmGeminiSend(sendButtonCandidate, timeout);
+            emitGeminiDiagnostic({
+                type: 'DISPATCH',
+                label: ok ? 'Gemini send confirmed' : 'Gemini send not confirmed',
+                details: strategy,
+                level: ok ? 'success' : 'warning',
+                meta: {
+                    dispatchId: dispatchMeta?.dispatchId || null,
+                    composerLength: readComposerText(inputField).length,
+                    button: describeGeminiNode(sendButtonCandidate)
+                }
+            });
+            return ok;
         };
 
         console.log('[content-gemini] Trying Ctrl+Enter send');
-        await tryCtrlEnterSend();
-        let confirmed = await confirmGeminiSend(null);
+        let confirmed = await runSendStrategy(
+            'ctrl_enter',
+            () => dispatchGeminiKeyboard(inputField, { ctrlKey: true }),
+            null,
+            2800
+        );
         let sendButton = null;
         if (!confirmed) {
             console.log('[content-gemini] Ctrl+Enter not confirmed, looking for send button');
             activity.heartbeat(0.55, { phase: 'send-button-search' });
             sendButton = await findAndCacheElement('sendButton', sendButtonSelectors).catch(() => null);
+            if (!sendButton || !isGeminiSendCandidateEnabled(sendButton)) {
+                sendButton = resolveGeminiSendButton(inputField, sendButtonSelectors);
+            }
             if (sendButton) {
-                await geminiHumanClick(sendButton);
-                confirmed = await confirmGeminiSend(sendButton);
+                confirmed = await runSendStrategy(
+                    'button_click',
+                    () => geminiHumanClick(sendButton),
+                    sendButton
+                );
             }
         }
         if (!confirmed) {
             console.warn('[content-gemini] Send not confirmed, using Enter fallback');
-            inputField.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-            inputField.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-            confirmed = await confirmGeminiSend(sendButton);
+            confirmed = await runSendStrategy(
+                'plain_enter',
+                () => dispatchGeminiKeyboard(inputField),
+                sendButton,
+                2600
+            );
         }
         if (!confirmed) {
+            confirmed = await runSendStrategy(
+                'meta_enter',
+                () => dispatchGeminiKeyboard(inputField, { metaKey: true }),
+                sendButton,
+                2600
+            );
+        }
+        if (!confirmed) {
+            confirmed = await runSendStrategy(
+                'form_submit',
+                () => requestGeminiFormSubmit(inputField),
+                sendButton,
+                2600
+            );
+        }
+        if (!confirmed) {
+            sendButton = resolveGeminiSendButton(inputField, sendButtonSelectors);
+            if (sendButton) {
+                confirmed = await runSendStrategy(
+                    'scored_button_click',
+                    () => geminiHumanClick(sendButton),
+                    sendButton,
+                    3500
+                );
+            }
+        }
+        if (!confirmed) {
+            emitGeminiDiagnostic({
+                type: 'DISPATCH',
+                label: 'Gemini send failed',
+                details: 'send_not_confirmed',
+                level: 'error',
+                meta: {
+                    dispatchId: dispatchMeta?.dispatchId || null,
+                    composerLength: readComposerText(inputField).length,
+                    button: describeGeminiNode(sendButton)
+                }
+            });
             throw { type: 'send_failed', message: 'Gemini send not confirmed' };
         }
         activity.heartbeat(0.6, { phase: 'send-dispatched' });

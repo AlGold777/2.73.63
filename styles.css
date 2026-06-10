@@ -2065,9 +2065,9 @@ body.is-resizing {
 .top-bar-right {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 26px;
     margin-left: auto;
-    margin-right: 8px;
+    margin-right: 20px;
     flex-wrap: nowrap;
     direction: ltr;
     align-self: center;
@@ -2085,6 +2085,22 @@ body.is-resizing {
 .right-sidebar-toggle-btn {
     margin-bottom: 0;
     align-self: center;
+}
+
+.telemetry-toggle-btn {
+    width: 42px;
+    height: 46px;
+    margin-bottom: 0;
+    align-self: center;
+}
+
+.telemetry-toggle-icon {
+    display: block;
+    flex: 0 0 auto;
+    line-height: 1;
+    width: 32px;
+    height: 32px;
+    color: #111827;
 }
 
 .top-new-pages-toggle {
@@ -2517,11 +2533,6 @@ body.left-sidebar-open .mode-pill .pill-dot {
     display: block;
 }
 
-.prompt-container.prompt-sandwich .prompt-footer-actions .prompt-mode-btn .toggle-icon-pro {
-    font-size: 18px;
-    line-height: 1;
-}
-
 .pro-toggle-wrapper[hidden],
 .modifiers-section[hidden] {
     display: none !important;
@@ -2795,9 +2806,19 @@ body:not(.pipeline-page) .app-main .container:has(#prefix-container:not(:empty),
 }
 
 body.prompt-submitted:not(.pipeline-page) .app-main .input-section {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
     min-height: 0;
     padding-top: 12px;
+}
+
+body.prompt-submitted:not(.pipeline-page) .prompt-container.prompt-sandwich:not(.debate-composer) {
+    min-height: 122px;
+    height: auto;
+    max-height: none;
+    justify-content: flex-start;
 }
 
 body.prompt-submitted:not(.pipeline-page) .app-main .container + .llm-controls,
@@ -3571,6 +3592,10 @@ body.prompt-submitted:not(.pipeline-page) .app-main .container:has(#prefix-conta
 }
 
 #telemetry-tabpanel .devtools-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: #ffffff;
     grid-template-columns: 1fr;
 }
 
@@ -3609,7 +3634,6 @@ body.prompt-submitted:not(.pipeline-page) .app-main .container:has(#prefix-conta
     background: transparent;
     border: none;
     font-size: 16px;
-    border-bottom: 1px solid #cbd5f5;
     border-radius: 0;
     color: #0f172a;
     box-shadow: none;
@@ -5022,15 +5046,15 @@ body.prompt-submitted:not(.pipeline-page) .app-main .container:has(#prefix-conta
 
 .control-button {
     padding: 12px 15px;
-    border: none; /*1px solid #ccc;*/
+    border: 1px solid #ccc;
     border-radius: 20px;
-    background-color: none;
+    background-color: white;
     color: #000;
-    font-size: 18px;
-    font-weight: 700;
+    font-size: 16px;
+    font-weight: 500;
     letter-spacing: 0.01em;
     cursor: pointer;
-    transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.08s ease;
+    /*transition: background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.08s ease;*/
 }
 
 .control-button.secondary {
@@ -5046,7 +5070,7 @@ body.prompt-submitted:not(.pipeline-page) .app-main .container:has(#prefix-conta
 .control-button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-    padding: 10px 20px;
+    padding: 5px 15px;
     
 }   
 
@@ -5137,28 +5161,11 @@ body.prompt-submitted:not(.pipeline-page) .app-main .container:has(#prefix-conta
     transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 
-#view-grid-btn::before,
-#view-stack-btn::before {
-    content: "";
+.view-mode-btn > .view-icon {
     display: block;
-}
-
-#view-grid-btn::before {
-    width: 18px;
-    height: 11px;
-    background:
-        linear-gradient(currentColor, currentColor) 10% center / 2.5px 100% no-repeat,
-        linear-gradient(currentColor, currentColor) 50% center / 2.5px 100% no-repeat,
-        linear-gradient(currentColor, currentColor) 90% center / 2.5px 100% no-repeat
-}
-
-#view-stack-btn::before {
-    width: 16px;
-    height: 11px;
-    background:
-        linear-gradient(currentColor, currentColor) center 0 / 100% 2px no-repeat,
-        linear-gradient(currentColor, currentColor) center 50% / 100% 2px no-repeat,
-        linear-gradient(currentColor, currentColor) center 100% / 100% 2px no-repeat;
+    flex: 0 0 auto;
+    width: 100%;
+    height: 100%;
 }
 /* -- 2. Контейнер заголовка и кнопки Copy All -- */
 /* -- 1. Центрируем заголовок и кнопку Copy All в одной линии по центру страницы -- */
@@ -5266,14 +5273,10 @@ body.prompt-submitted:not(.pipeline-page) .app-main .container:has(#prefix-conta
 }
 
 .modifiers-toggle-label .view-toggle-group {
-  display: none;
-  align-items: center;
-  gap: 0;
-  margin-left: -2px;
-}
-
-body.pro-active .modifiers-toggle-label .view-toggle-group {
   display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: -2px;
 }
 
 .modifiers-toggle-label .view-mode-btn {
@@ -5283,7 +5286,7 @@ body.pro-active .modifiers-toggle-label .view-toggle-group {
   border: none;
   border-radius: 6px;
   background: none;
-  color: #1f3b4c;
+  color: #777c89;
   padding: 0;
   line-height: 1;
   font-size: 0;
@@ -5299,27 +5302,18 @@ body.pro-active .modifiers-toggle-label .view-toggle-group {
   color: #0f172a;
 }
 
-.modifiers-toggle-label .view-mode-btn::before {
-  content: "";
-  display: block;
+.modifiers-toggle-label .view-mode-btn > .view-icon {
+    display: block;
 }
 
-.modifiers-toggle-label #view-grid-btn::before {
-  width: 15px;
-  height: 13px;
-  background:
-    linear-gradient(currentColor, currentColor) 10% center / 2.5px 100% no-repeat,
-    linear-gradient(currentColor, currentColor) 50% center / 2.5px 100% no-repeat,
-    linear-gradient(currentColor, currentColor) 90% center / 2.5px 100% no-repeat;
+.modifiers-toggle-label #view-grid-btn > .view-icon {
+    width: 18px;
+    height: 15.6px;
 }
 
-.modifiers-toggle-label #view-stack-btn::before {
-  width: 13px;
-  height: 11px;
-  background:
-    linear-gradient(currentColor, currentColor) center 0 / 100% 2px no-repeat,
-    linear-gradient(currentColor, currentColor) center 50% / 100% 2px no-repeat,
-    linear-gradient(currentColor, currentColor) center 100% / 100% 2px no-repeat;
+.modifiers-toggle-label #view-stack-btn > .view-icon {
+    width: 16px;
+    height: 18px;
 }
 
 .llm-action-block {
@@ -5485,9 +5479,9 @@ body.pro-active .modifiers-toggle-label .view-toggle-group {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  background: #77777717;
+  background: #ebecee;
   border: none;
-  padding: 8px 12px 4px 12px;
+  padding: 4px 12px 4px 12px;
   position: relative;
   z-index: 2;
 }
@@ -5498,7 +5492,7 @@ body.pro-active .modifiers-toggle-label .view-toggle-group {
   border: 1px solid #ccc;
   border-radius: 10px;
   background: none /* #eeeeeed1*/;
-  box-shadow: 0 2px 3px 2px rgba(0, 0, 0, 0.05);
+  box-shadow: none; /*0 2px 3px 2px rgba(0, 0, 0, 0.05);*/
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -5511,6 +5505,14 @@ body.pro-active .modifiers-toggle-label .view-toggle-group {
   min-height: 180px;
   border-radius: 0 0 8px 8px;
   overflow-y: auto;
+}
+
+body.llm-stream-preview-open .llm-results .llm-panel:not(.favorite-panel) {
+  padding-bottom: 0;
+}
+
+body.llm-stream-preview-open .llm-results .llm-panel:not(.favorite-panel) .output {
+  display: none;
 }
 
 .llm-panel.llm-panel-expanded {
@@ -5889,9 +5891,9 @@ body.pro-active .modifiers-toggle-label .view-toggle-group {
 }
 
 .llm-title {
-  font-weight: 600;
+  font-weight: 400;
   font-size: 15px;
-  color: #333;
+  color: #203b4d;
 }
 
 .header-right {
@@ -6179,7 +6181,7 @@ body.pro-active .modifiers-toggle-label .view-toggle-group {
   border-radius: 0 0 10px 10px;
   background: transparent;
   font-family: var(--font-family);
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1.6;
   white-space: normal;
   word-break: break-word;
@@ -8014,7 +8016,7 @@ body.pro-features-hidden .comparison-section {
     color: #4b5563ad;
     line-height: 1.4;
     text-align: left;
-    width: 85%;
+    width: 100%;
     box-sizing: border-box;
     cursor: default;
 }
@@ -8364,9 +8366,8 @@ hr.section-divider {
     color: #343a40;
 }
 
-/* Footer icons that open Tuning Console / LLM Stream */
-.toggle-modifiers-btn,
-#pro-stream-toggle-btn {
+/* Footer icons that open Tuning Console */
+.toggle-modifiers-btn {
     border: none;
     background: transparent;
     color: #1f2937;
@@ -8379,12 +8380,10 @@ hr.section-divider {
     align-items: center;
     justify-content: center;
 }
-.toggle-modifiers-btn:hover,
-#pro-stream-toggle-btn:hover {
+.toggle-modifiers-btn:hover {
     background-color: rgba(0,0,0,0.05);
 }
-.toggle-modifiers-btn:active,
-#pro-stream-toggle-btn:active {
+.toggle-modifiers-btn:active {
     transform: scale(0.96);
 }
 .pro-toggle-wrapper {
@@ -8399,7 +8398,7 @@ hr.section-divider {
 }
 
 .pro-toggle-bar {
-    background: #00000008;
+    background: none;
     border-radius: 0;
     padding: 2px 0 4px;
     display: flex;
@@ -8407,7 +8406,7 @@ hr.section-divider {
     align-items: stretch;
     gap: 8px;
     cursor: default;
-    margin-top: 0;
+    /*margin-top: 0;*/
     position: relative;
 }
 
@@ -8449,11 +8448,6 @@ hr.section-divider {
     pointer-events: auto;
     align-self: center;
     flex: 0 0 auto;
-}
-
-.pro-toggle-bar .toggle-icon-pro,
-.pro-toggle-bar .modifiers-toggle-label-pro {
-    cursor: pointer;
 }
 
 .pro-toggle-bar .llm-action-block {
@@ -8523,10 +8517,6 @@ hr.section-divider {
 }
 .toggle-icon-console
  {
-    font-size: 22px;
-}
-
-.toggle-icon-pro {
     font-size: 22px;
 }
 .dropdown-judge {

@@ -4,6 +4,14 @@ const vm = require('vm');
 
 const HUMAN_PRESENCE_PATH = path.join(__dirname, '..', 'background', 'human-presence.js');
 const HUMAN_PRESENCE_SOURCE = fs.readFileSync(HUMAN_PRESENCE_PATH, 'utf8');
+const VISIT_POLICY_PATH = path.join(__dirname, '..', 'shared', 'visit-policy.js');
+const VISIT_POLICY_SOURCE = fs.readFileSync(VISIT_POLICY_PATH, 'utf8');
+
+const flushPromises = async (cycles = 1) => {
+  for (let index = 0; index < cycles; index += 1) {
+    await Promise.resolve();
+  }
+};
 
 function createHumanPresenceSandbox() {
   const telemetry = [];
@@ -110,6 +118,7 @@ function createHumanPresenceSandbox() {
   context.self = context;
 
   vm.createContext(context);
+  vm.runInContext(VISIT_POLICY_SOURCE, context, { filename: 'shared/visit-policy.js' });
   vm.runInContext(HUMAN_PRESENCE_SOURCE, context, { filename: 'background/human-presence.js' });
 
   return { context, telemetry, diagnostics, tabVisitTracker, jobState };
@@ -175,6 +184,55 @@ describe('human presence tab lease arbitration', () => {
       expect.objectContaining({ llmName: 'GPT', label: 'LEASE_EXPIRED' }),
       expect.objectContaining({ llmName: 'GPT', label: 'LEASE_RELEASED' }),
       expect.objectContaining({ llmName: 'Claude', label: 'LEASE_GRANTED' })
+    ]));
+  });
+
+  test('returns interrupted automation visit summary as short visit', async () => {
+    const { context, telemetry, diagnostics, jobState } = createHumanPresenceSandbox();
+
+    const visitPromise = context.visitTabWithAutomation('GPT', 101, {
+      dwellMs: 3000,
+      scrollDurationMs: 1200,
+      reason: 'forced_test_visit',
+      sessionId: 1000
+    });
+
+    await flushPromises(4);
+    jest.advanceTimersByTime(400);
+    context.handleTabActivation(202, 1);
+    jest.advanceTimersByTime(3000);
+
+    const summary = await visitPromise;
+
+    expect(summary).toEqual(expect.objectContaining({
+      llmName: 'GPT',
+      tabId: 101,
+      shortVisit: true,
+      usefulVisit: false,
+      retryable: true,
+      reason: 'tab_switch'
+    }));
+    expect(jobState.llms.GPT.lastAutomationVisitSummary).toEqual(expect.objectContaining({
+      shortVisit: true,
+      reason: 'tab_switch'
+    }));
+    expect(jobState.llms.GPT.shortHumanVisitDurations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: 'tab_switch' })
+    ]));
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        llmName: 'GPT',
+        payload: expect.objectContaining({ label: 'TAB_VISIT_SHORT' })
+      })
+    ]));
+    expect(telemetry).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        llmName: 'GPT',
+        label: 'HUMAN_VISIT_END',
+        payload: expect.objectContaining({
+          meta: expect.objectContaining({ shortVisit: true, usefulVisit: false })
+        })
+      })
     ]));
   });
 });

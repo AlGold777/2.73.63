@@ -4,6 +4,7 @@ const vm = require('vm');
 
 const DISPATCH_COORDINATOR_PATH = path.join(__dirname, '..', 'background', 'dispatch-coordinator.js');
 const DISPATCH_COORDINATOR_SOURCE = fs.readFileSync(DISPATCH_COORDINATOR_PATH, 'utf8');
+const PAGE_BLOCKER_POLICY_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'page-blocker-policy.js'), 'utf8');
 
 function createDispatchSandbox() {
   const context = {
@@ -76,6 +77,7 @@ function createDispatchSandbox() {
   context.self = context;
 
   vm.createContext(context);
+  vm.runInContext(PAGE_BLOCKER_POLICY_SOURCE, context, { filename: 'shared/page-blocker-policy.js' });
   vm.runInContext(DISPATCH_COORDINATOR_SOURCE, context, { filename: 'background/dispatch-coordinator.js' });
   return context;
 }
@@ -110,7 +112,11 @@ describe('PageReadyState Lite normalization', () => {
       blockers: ['login_required']
     })).toEqual(expect.objectContaining({
       ok: false,
-      reason: 'login_required'
+      reason: 'auth_required',
+      blockerPolicy: expect.objectContaining({
+        action: 'terminal_user_action_required',
+        retryable: false
+      })
     }));
 
     expect(context.normalizePageReadyState({

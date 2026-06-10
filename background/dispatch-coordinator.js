@@ -406,6 +406,9 @@ function normalizePageReadyState(response = null) {
     : (typeof raw.ready === 'boolean' ? raw.ready : null);
   const composerReady = typeof raw.composerReady === 'boolean' ? raw.composerReady : null;
   const requiresFocus = raw.requiresFocus === true || raw.timeout === true || Boolean(raw.error);
+  const blockerPolicy = self.PageBlockerPolicy?.classify
+    ? self.PageBlockerPolicy.classify({ status, reason: raw.reason, blockers })
+    : null;
   const terminalStatuses = new Set([
     'login_required',
     'captcha_required',
@@ -428,7 +431,10 @@ function normalizePageReadyState(response = null) {
 
   let ok = true;
   let reason = 'ready';
-  if (terminalStatuses.has(status)) {
+  if (blockerPolicy?.blocker && blockerPolicy.terminal) {
+    ok = false;
+    reason = blockerPolicy.blocker;
+  } else if (terminalStatuses.has(status)) {
     ok = false;
     reason = status;
   } else {
@@ -453,6 +459,7 @@ function normalizePageReadyState(response = null) {
     pageReady,
     composerReady,
     blockers,
+    blockerPolicy,
     source: raw.source || null,
     raw
   };
@@ -779,6 +786,13 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
       decidedAt: Date.now()
     };
     if (!intentDecision.ok) {
+      self.DecisionLedger?.append?.(entry, {
+        decision: 'deny_recovery_intent',
+        reason: intentDecision.reason || 'recovery_intent_denied',
+        source: 'dispatchPromptToTab',
+        inputs: { tabId, dispatchReason: reason, intentDecision },
+        resultingState: entry.finalStatus || entry.status || 'open'
+      });
       emitTelemetry(llmName, 'RECOVERY_INTENT_DENIED', {
         level: 'warning',
         details: `${intentDecision.intent}:${intentDecision.reason}`,
@@ -1115,6 +1129,7 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
           composerReady: pageReadyState.composerReady,
           requiresFocus: pageReadyState.requiresFocus,
           blockers: pageReadyState.blockers,
+          blockerPolicy: pageReadyState.blockerPolicy || null,
           source: pageReadyState.source
         }
       });
@@ -1127,6 +1142,7 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
           composerReady: pageReadyState.composerReady,
           requiresFocus: pageReadyState.requiresFocus,
           blockers: pageReadyState.blockers,
+          blockerPolicy: pageReadyState.blockerPolicy || null,
           checkedAt: Date.now(),
           dispatchId
         };
@@ -1142,7 +1158,8 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
             status: pageReadyState.status,
             pageReady: pageReadyState.pageReady,
             composerReady: pageReadyState.composerReady,
-            blockers: pageReadyState.blockers
+            blockers: pageReadyState.blockers,
+            blockerPolicy: pageReadyState.blockerPolicy || null
           }
         });
         emitTelemetry(llmName, 'PAGE_READY_BLOCKED', {
@@ -1153,10 +1170,13 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
             dispatchReason: reason,
             tabId,
             status: pageReadyState.status,
-            blockers: pageReadyState.blockers
+            blockers: pageReadyState.blockers,
+            blockerPolicy: pageReadyState.blockerPolicy || null
           }
         });
-        scheduleDispatchRetry(entry, llmName, { type: 'page_not_ready', reason: pageReadyState.reason });
+        if (pageReadyState.blockerPolicy?.retryable !== false) {
+          scheduleDispatchRetry(entry, llmName, { type: 'page_not_ready', reason: pageReadyState.reason });
+        }
         if (machine) {
           machine.error({ error: pageReadyState.reason || 'page_not_ready', code: 'PAGE_NOT_READY' });
         }
@@ -1278,9 +1298,26 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
       }
       //-- 2.1. Если Round 1 (skipSubmitWait), выходим сразу после клика, не блокируя очередь --//
       if (options.skipSubmitWait) {
-        return;
-      }
-      if (options.skipSubmitWait) {
+        entry.awaitingSubmitConfirmation = true;
+        entry.awaitingSubmitConfirmationAt = Date.now();
+        entry.awaitingSubmitConfirmationDispatchId = dispatchId;
+        entry.submitSource = entry.submitSource || null;
+        emitTelemetry(llmName, 'PROMPT_SUBMITTED_PENDING', {
+          details: 'skip_submit_wait',
+          meta: {
+            dispatchId,
+            dispatchReason: reason,
+            tabId,
+            submitTimeoutMs
+          }
+        });
+        broadcastDiagnostic(llmName, {
+          type: 'DISPATCH',
+          label: 'Prompt submit confirmation pending',
+          details: 'Round1 command sent; waiting for content confirmation or Round2 repair',
+          level: 'info',
+          meta: { dispatchId, dispatchReason: reason, tabId }
+        });
         if (options.resetStateAfterSend && machine) {
           machine.reset();
         }
@@ -1289,6 +1326,9 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
       const submittedOk = submittedPayload === true || (submittedPayload && submittedPayload.ok === true);
       if (submittedOk) {
         entry.promptSubmittedAt = Date.now();
+        entry.awaitingSubmitConfirmation = false;
+        entry.awaitingSubmitConfirmationAt = null;
+        entry.awaitingSubmitConfirmationDispatchId = null;
         broadcastDiagnostic(llmName, { type: 'DISPATCH', label: 'Prompt submitted (confirmed)', level: 'success' });
         armScriptRuntimeHardStopForConfirmedPrompt(llmName, {
           dispatchId: entry?.confirmedDispatchId || dispatchId || null,

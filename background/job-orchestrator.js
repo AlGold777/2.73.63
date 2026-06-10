@@ -11,7 +11,7 @@ const ROUND0_BIND_WAIT_TIMEOUT_MS = 15000;
 const ROUND0_BIND_POLL_MS = 250;
 //- 1.1. Сокращаем подготовку -//
 const ROUND1_BEFORE_SEND_MS = 500;
-//- 1.2. Не ждем подтверждения в Round 1, идем к следующей модели -//
+//- 1.2. Round 1 sends the command quickly, but confirmation is handled explicitly in Round 2. -//
 const ROUND1_POST_SEND_MS = 500;
 const ROUND2_VISIT_COUNT = 2;
 const ROUND2_VISIT_MIN_MS = 5000;
@@ -20,6 +20,8 @@ const ROUND2_BATCH_MAX_MS = 45000;
 const ROUND2_MODEL_VISIT_BUDGET_MS = 7000;
 const ROUND2_MODEL_MIN_REMAINING_MS = 1800;
 const ROUND2_MODEL_MIN_DWELL_MS = 1400;
+const ROUND2_REPAIR_CONFIRM_WAIT_MS = 3500;
+const ROUND2_REPAIR_CONFIRM_POLL_MS = 250;
 const PRECOLLECT_NUDGE_STABILIZE_MS = 250;
 //-- 4.1. ÐšÐ¾Ð½ÑÑ‚Ð°Ð½Ñ‚Ð° Ð´Ð»Ñ Round 3 --//
 const ROUND3_COLLECT_DELAY_MS = 2000;
@@ -31,7 +33,7 @@ const ROUND4_FOCUS_DELAY_MS = 500;
 const ROUND4_PENDING_WAIT_MAX_MS = 190000;
 const ROUND4_PENDING_POLL_MS = 1500;
 const NO_SEND_STALL_GRACE_MS = 45000;
-const ROUND2_REPAIR_MODELS = new Set(['Gemini', 'Claude', 'Grok', 'Qwen']);
+const ROUND2_REPAIR_MODELS = new Set(['GPT', 'Gemini', 'Claude', 'Grok', 'Le Chat', 'Qwen']);
 const POST_R2_AUTO_COLLECT_DELAY_MS = 8000;
 const POST_R2_AUTO_COLLECT_VISIT_COUNT = 1;
 const POST_R2_AUTO_COLLECT_VISIT_MIN_MS = 5000;
@@ -113,6 +115,8 @@ const MANUAL_RECOVERY_STRATEGIES = Object.freeze([
 const DEFER_STREAM_FINAL_MODELS = new Set(['GPT', 'Gemini', 'Claude', 'Le Chat', 'Perplexity', 'Grok', 'Qwen', 'DeepSeek']);
 const DEFER_STREAM_FINAL_RECHECK_MS = 8000;
 const DEFER_STREAM_FINAL_MAX_MS = 180000;
+const DEFER_STREAM_STABLE_FORCE_MS = 30000;
+const DEFER_STREAM_STABLE_FORCE_MIN_CHARS = 1200;
 const EARLY_TERMINAL_GUARD_MODELS = new Set(['GPT', 'Gemini', 'Claude', 'Le Chat', 'Perplexity', 'Grok', 'Qwen', 'DeepSeek']);
 const EARLY_TERMINAL_GUARD_FORCE_SUCCESS_CHARS = 1800;
 const EARLY_TERMINAL_GUARD_MAX_WAIT_MS = 20000;
@@ -789,10 +793,55 @@ async function lateCollectAnswer({ llmName, tabId, reason = 'late_collect', meta
 function acceptLateCollectResult(llmName, result, meta = {}) {
   if (!llmName || !result?.ok || !result.text) return false;
   const entry = jobState?.llms?.[llmName] || null;
+  const incomingText = String(result.text || '').trim();
+  const incomingHtml = String(result.html || '');
+  const currentText = String(entry?.answer || entry?.pendingFinalAnswer || '').trim();
+  const terminalEntry = Boolean(entry && isFinalizedEntry(entry));
   const incomingResponseMeta = meta?.responseMeta && typeof meta.responseMeta === 'object' ? meta.responseMeta : {};
   const resultStatus = String(result.status || '').toLowerCase();
   const isSnapshotPartial = resultStatus === 'partial_from_snapshot';
-  const sourceHint = String(incomingResponseMeta.source || meta?.source || '').toLowerCase();
+  const sourceHint = String(incomingResponseMeta.source || meta?.source || result.source || '').toLowerCase();
+  const snapshotLikeSource = isSnapshotPartial
+    || sourceHint.includes('snapshot')
+    || sourceHint.includes('inline_executescript')
+    || sourceHint.includes('inline_execute_script')
+    || sourceHint.includes('dom_snapshot');
+  const currentDispatchConfirmed = Boolean(entry?.promptSubmittedAt || entry?.submitSource === 'content' || entry?.submitSource === 'inferred_answer_evidence');
+  if (entry && !terminalEntry && snapshotLikeSource && !currentDispatchConfirmed) {
+    emitTelemetry(llmName, 'LATE_COLLECT_STALE_ANSWER_REJECTED', {
+      level: 'warning',
+      details: `source=${sourceHint || result.source || 'unknown'} len=${incomingText.length}`,
+      meta: {
+        dispatchId: meta?.dispatchId || entry?.lastDispatchMeta?.dispatchId || null,
+        source: sourceHint || result.source || null,
+        status: result.status || null,
+        answerLength: incomingText.length,
+        promptSubmittedAt: entry?.promptSubmittedAt || null,
+        submitSource: entry?.submitSource || null,
+        reason: 'unconfirmed_dispatch_snapshot_like_answer'
+      },
+      force: true
+    });
+    appendLogEntry(llmName, {
+      type: 'RECOVERY',
+      label: 'Late collect stale answer rejected',
+      details: 'unconfirmed_dispatch_snapshot_like_answer',
+      level: 'warning',
+      meta: {
+        source: sourceHint || result.source || null,
+        status: result.status || null,
+        answerLength: incomingText.length,
+        dispatchId: meta?.dispatchId || entry?.lastDispatchMeta?.dispatchId || null
+      }
+    });
+    return false;
+  }
+  const improvesTerminalAnswer = Boolean(
+    terminalEntry
+    && incomingText.length >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+    && incomingText.length > currentText.length + 24
+    && !isPromptEchoAnswerCandidate(incomingText, jobState?.prompt || '')
+  );
   const manualRecovery = Boolean(meta?.manualRecovery || incomingResponseMeta.manualRecovery || incomingResponseMeta.manualOverride);
   const preTerminalMaterialize = Boolean(
     meta?.preTerminalMaterialize
@@ -812,9 +861,53 @@ function acceptLateCollectResult(llmName, result, meta = {}) {
       || userCollectLate
     )
   );
+  if (entry && improvesTerminalAnswer) {
+    entry.answer = incomingText;
+    entry.answerHtml = incomingHtml || entry.answerHtml || '';
+    entry.pendingFinalAnswer = incomingText;
+    entry.pendingFinalAnswerHtml = incomingHtml || entry.pendingFinalAnswerHtml || '';
+    entry.responseMeta = {
+      ...(entry.responseMeta || {}),
+      ...(incomingResponseMeta || {}),
+      source: incomingResponseMeta.source || meta?.source || result.source || 'late_collect',
+      answerSource: incomingResponseMeta.answerSource || result.source || null,
+      completionReason: incomingResponseMeta.completionReason || 'manual_improved_terminal_answer',
+      improvedAfterTerminal: true,
+      previousAnswerLength: currentText.length,
+      improvedAnswerLength: incomingText.length
+    };
+    appendLogEntry(llmName, {
+      type: 'RESPONSE',
+      label: 'Terminal answer improved after late collect',
+      details: `${currentText.length} -> ${incomingText.length}`,
+      level: 'success',
+      meta: {
+        source: incomingResponseMeta.source || meta?.source || result.source || 'late_collect',
+        previousAnswerLength: currentText.length,
+        improvedAnswerLength: incomingText.length,
+        status: entry.finalStatus || entry.status || null
+      }
+    });
+    sendMessageToResultsTab({
+      type: 'LLM_PARTIAL_RESPONSE',
+      llmName,
+      answer: incomingText,
+      answerHtml: entry.answerHtml || '',
+      requestId: entry.requestId || null,
+      metadata: {
+        status: entry.finalStatus || entry.status || 'SUCCESS',
+        reason: 'improved_after_terminal',
+        completionReason: 'manual_improved_terminal_answer',
+        improvedAfterTerminal: true,
+        previousAnswerLength: currentText.length,
+        improvedAnswerLength: incomingText.length
+      },
+      logs: getLogSnapshot(llmName)
+    });
+  }
   handleLLMResponse(
     llmName,
-    result.text,
+    incomingText,
     null,
     {
       ...(meta || {}),
@@ -847,7 +940,7 @@ function acceptLateCollectResult(llmName, result, meta = {}) {
         textHash: result.textHash || simpleLateAnswerHash(result.text)
       }
     },
-    result.html || ''
+    incomingHtml
   );
   return true;
 }
@@ -1318,9 +1411,22 @@ async function runPreTerminalMaterializeRecovery(llmName, tabId, sessionId, reas
         force: true
       });
       if (visitBudget.ok) {
-        await focusTabForVerification(llmName, tabId, 2600, sessionId);
+        const fallbackVisit = await focusTabForVerification(llmName, tabId, 2600, sessionId);
         await runPreCollectScrollNudge(llmName, tabId, sessionId, `materialize_recovery_fallback:${reason}`);
-        didVisit = true;
+        didVisit = fallbackVisit === true || (fallbackVisit && typeof fallbackVisit === 'object' && fallbackVisit.usefulVisit !== false);
+        if (!didVisit) {
+          emitTelemetry(llmName, 'MATERIALIZE_RECOVERY_VISIT_FALLBACK_SHORT', {
+            level: 'warning',
+            details: `duration=${fallbackVisit?.durationMs || 0}ms reason=${reason}`,
+            meta: {
+              tabId,
+              reason,
+              dispatchId,
+              visit: fallbackVisit && typeof fallbackVisit === 'object' ? fallbackVisit : null
+            },
+            force: true
+          });
+        }
       }
     }
     const tabAfter = await getTabSafe(tabId);
@@ -1636,6 +1742,37 @@ function maybeDeferStreamingFinalization(llmName, answer, metaObj, answerHtml, n
   entry.finalizationDeferStartedAt = startedAt;
   entry.pendingFinalAnswer = String(normalizedAnswer || answer || '');
   entry.pendingFinalAnswerHtml = String(answerHtml || '');
+  const precheckAnswerEvidence = self.AnswerEvidence?.buildAnswerEvidence?.({
+    llmName,
+    text: entry.pendingFinalAnswer,
+    html: entry.pendingFinalAnswerHtml,
+    source: responseMeta?.source || metaObj?.source || null,
+    responseMeta,
+    dispatchId: metaObj?.dispatchId || entry?.lastDispatchMeta?.dispatchId || null,
+    tabId,
+    minChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS,
+    stableMinChars: DEFER_STREAM_STABLE_FORCE_MIN_CHARS
+  }) || null;
+  const precheckFinalization = self.AnswerEvidence?.shouldFinalizeWithEvidence?.(precheckAnswerEvidence, {
+    minChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+  }) || { ok: false };
+  if (
+    precheckFinalization.ok
+    && ['timeout_with_text', 'hardstop_with_text', 'snapshot_with_text', 'materialize_with_text', 'panel_with_text'].includes(precheckFinalization.reason)
+  ) {
+    appendLogEntry(llmName, {
+      type: 'RESPONSE',
+      label: 'Finalization defer bypassed (answer evidence policy)',
+      details: `reason=${precheckFinalization.reason} len=${precheckAnswerEvidence.length}`,
+      level: 'warning',
+      meta: {
+        tabId,
+        answerEvidence: precheckAnswerEvidence,
+        finalizationPolicy: precheckFinalization
+      }
+    });
+    return false;
+  }
   chrome.scripting.executeScript({
     target: { tabId },
     func: detectActiveGenerationInPage,
@@ -1646,8 +1783,44 @@ function maybeDeferStreamingFinalization(llmName, answer, metaObj, answerHtml, n
     const state = Array.isArray(results) ? results.find((item) => item?.result)?.result : null;
     const elapsedMs = Math.max(0, Date.now() - Number(liveEntry.finalizationDeferStartedAt || Date.now()));
     const pendingAnswerLength = String(liveEntry.pendingFinalAnswer || normalizedAnswer || answer || '').trim().length;
+    const pendingAnswerEvidence = self.AnswerEvidence?.buildAnswerEvidence?.({
+      llmName,
+      text: liveEntry.pendingFinalAnswer || normalizedAnswer || answer || '',
+      html: liveEntry.pendingFinalAnswerHtml || answerHtml || '',
+      source: responseMeta?.source || metaObj?.source || 'deferred_finalization',
+      responseMeta,
+      dispatchId: metaObj?.dispatchId || liveEntry?.lastDispatchMeta?.dispatchId || null,
+      tabId,
+      generationActive: !!state?.active,
+      stopButtonVisible: !!state?.stopVisible,
+      busyIndicatorVisible: !!state?.busyVisible,
+      stableMinChars: DEFER_STREAM_STABLE_FORCE_MIN_CHARS,
+      minChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+    }) || null;
+    const evidenceFinalization = self.AnswerEvidence?.shouldFinalizeWithEvidence?.(pendingAnswerEvidence, {
+      minChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+    }) || { ok: false };
     const streamingMaxReached = Boolean(state?.active && elapsedMs >= DEFER_STREAM_FINAL_MAX_MS);
-    if (state?.active && !streamingMaxReached) {
+    const hasCompletionEvidence = Boolean(
+      liveEntry.lifecycleReadyAt
+      || liveEntry.answerCompleteDetectedAt
+      || liveEntry.lifecycleReadyMeta?.state === 'COMPLETE'
+      || String(responseMeta?.completionReason || '').includes('timeout')
+      || String(responseMeta?.source || '').includes('snapshot')
+    );
+    const stableAnswerForceFinal = Boolean(
+      state?.active
+      && !state?.stopVisible
+      && pendingAnswerLength >= DEFER_STREAM_STABLE_FORCE_MIN_CHARS
+      && (elapsedMs >= DEFER_STREAM_STABLE_FORCE_MS || hasCompletionEvidence)
+    );
+    const evidenceCanOverrideStop = ['timeout_with_text', 'hardstop_with_text', 'materialize_with_text'].includes(String(evidenceFinalization.reason || ''));
+    const evidenceForceFinal = Boolean(
+      evidenceFinalization.ok
+      && state?.active
+      && (!state?.stopVisible || evidenceCanOverrideStop)
+    );
+    if (state?.active && !streamingMaxReached && !stableAnswerForceFinal && !evidenceForceFinal) {
       appendLogEntry(llmName, {
         type: 'RESPONSE',
         label: 'Finalization deferred (generation active)',
@@ -1685,6 +1858,38 @@ function maybeDeferStreamingFinalization(llmName, answer, metaObj, answerHtml, n
       }, DEFER_STREAM_FINAL_RECHECK_MS));
       return;
     }
+    if (stableAnswerForceFinal) {
+      appendLogEntry(llmName, {
+        type: 'RESPONSE',
+        label: 'Finalization forced (stable answer evidence)',
+        details: `len=${pendingAnswerLength} elapsed=${elapsedMs}ms stop=${!!state.stopVisible} busy=${!!state.busyVisible}`,
+        level: 'warning',
+        meta: {
+          tabId,
+          elapsedMs,
+          pendingAnswerLength,
+          stopVisible: !!state.stopVisible,
+          busyVisible: !!state.busyVisible,
+          hasCompletionEvidence,
+          thresholdMs: DEFER_STREAM_STABLE_FORCE_MS,
+          thresholdChars: DEFER_STREAM_STABLE_FORCE_MIN_CHARS
+        }
+      });
+    } else if (evidenceForceFinal) {
+      appendLogEntry(llmName, {
+        type: 'RESPONSE',
+        label: 'Finalization forced (answer evidence policy)',
+        details: `reason=${evidenceFinalization.reason} len=${pendingAnswerLength} stop=${!!state.stopVisible} busy=${!!state.busyVisible}`,
+        level: 'warning',
+        meta: {
+          tabId,
+          elapsedMs,
+          pendingAnswerLength,
+          answerEvidence: pendingAnswerEvidence,
+          finalizationPolicy: evidenceFinalization
+        }
+      });
+    }
     handleLLMResponse(
       llmName,
       liveEntry.pendingFinalAnswer || answer,
@@ -1695,8 +1900,9 @@ function maybeDeferStreamingFinalization(llmName, answer, metaObj, answerHtml, n
         responseMeta: {
           ...(metaObj?.responseMeta || {}),
           source: metaObj?.responseMeta?.source || 'deferred_finalization',
-          completionReason: streamingMaxReached ? 'streaming_incomplete' : 'generation_inactive',
-          partial: streamingMaxReached || undefined,
+          completionReason: streamingMaxReached ? 'streaming_incomplete' : (evidenceFinalization.ok ? evidenceFinalization.reason : 'generation_inactive'),
+          partial: streamingMaxReached || pendingAnswerEvidence?.partialAllowed || undefined,
+          answerEvidence: pendingAnswerEvidence || undefined,
           forceTerminalSuccess: streamingMaxReached ? false : metaObj?.responseMeta?.forceTerminalSuccess,
           lateCollectFinal: streamingMaxReached ? false : metaObj?.responseMeta?.lateCollectFinal
         }
@@ -2699,6 +2905,84 @@ function orchestratorSleepMs(ms, signal = getOrchestratorAbortSignal()) {
     signal?.addEventListener('abort', finish, { once: true });
   });
 }
+
+function hasRound2SubmitOrAnswerEvidence(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  if (entry.promptSubmittedAt) return true;
+  if (entry.answerCompleteDetectedAt || entry.lifecycleReadyAt) return true;
+  const answerText = String(entry.answer || '').trim();
+  const pendingFinalAnswer = String(entry.pendingFinalAnswer || '').trim();
+  const pendingAnswer = String(entry.pendingAnswer || '').trim();
+  return answerText.length >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+    || pendingFinalAnswer.length >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+    || pendingAnswer.length >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+    || Number(entry.answerCompleteTextLength || entry.lifecycleReadyMeta?.textLength || 0) >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS;
+}
+
+function getRound2SubmitConfirmationState(llmName, dispatchId = null) {
+  const entry = jobState?.llms?.[llmName] || null;
+  if (!entry) return { ok: false, reason: 'entry_missing', entry: null };
+  if (isFinalizedEntry(entry)) return { ok: true, reason: 'terminal', entry };
+  const liveDispatchId = entry.lastDispatchMeta?.dispatchId || entry.awaitingSubmitConfirmationDispatchId || entry.confirmedDispatchId || null;
+  const sameDispatch = !dispatchId || !liveDispatchId || liveDispatchId === dispatchId || entry.confirmedDispatchId === dispatchId;
+  if (sameDispatch && entry.promptSubmittedAt) {
+    return { ok: true, reason: entry.submitSource === 'content' ? 'prompt_submitted' : 'prompt_submitted_non_content', entry };
+  }
+  if (sameDispatch && hasRound2SubmitOrAnswerEvidence(entry)) {
+    return { ok: true, reason: 'answer_evidence', entry };
+  }
+  if (sameDispatch && (entry.messageSent || entry.awaitingSubmitConfirmation || entry.dispatchInFlight)) {
+    return { ok: false, reason: 'dispatch_pending', entry };
+  }
+  return { ok: false, reason: sameDispatch ? 'not_confirmed' : 'stale_dispatch', entry };
+}
+
+async function waitForRound2SubmitConfirmation(llmName, dispatchId = null, timeoutMs = ROUND2_REPAIR_CONFIRM_WAIT_MS) {
+  const startedAt = Date.now();
+  const maxWaitMs = Math.max(0, Number(timeoutMs) || 0);
+  let state = getRound2SubmitConfirmationState(llmName, dispatchId);
+  if (state.ok || maxWaitMs <= 0) {
+    return { ...state, waitedMs: Date.now() - startedAt };
+  }
+  while ((Date.now() - startedAt) < maxWaitMs) {
+    const remainingMs = maxWaitMs - (Date.now() - startedAt);
+    await orchestratorSleepMs(Math.min(ROUND2_REPAIR_CONFIRM_POLL_MS, Math.max(0, remainingMs)));
+    state = getRound2SubmitConfirmationState(llmName, dispatchId);
+    if (state.ok) {
+      return { ...state, waitedMs: Date.now() - startedAt };
+    }
+  }
+  return { ...state, waitedMs: Date.now() - startedAt };
+}
+
+function isRound2DelayedConfirmationState(state) {
+  return state?.reason === 'dispatch_pending';
+}
+
+async function scheduleRound2DelayedConfirmationContinuation(llmName, tabId, sessionId, reason, state = {}) {
+  broadcastDiagnostic(llmName, {
+    type: 'DISPATCH',
+    label: 'ROUND2_VERIFY',
+    details: 'prompt confirmation delayed; collection/probes scheduled',
+    level: 'info',
+    meta: { tabId, reason: state.reason || 'dispatch_pending', source: reason }
+  });
+  emitTelemetry(llmName, 'ROUND2_VERIFY_DELAYED_CONFIRMATION', {
+    level: 'info',
+    details: 'dispatch still pending',
+    meta: { tabId, reason: state.reason || 'dispatch_pending', source: reason }
+  });
+  const liveEntry = jobState?.llms?.[llmName];
+  if (liveEntry && !isFinalizedEntry(liveEntry)) {
+    await runPreCollectScrollNudge(llmName, tabId, sessionId, `${reason}_precollect`);
+    triggerResponseCollectionPing(llmName, tabId, `${reason}_probe`);
+    schedulePostR2AutoCollect(llmName, tabId, sessionId);
+    scheduleAdaptiveCollectionProbe(llmName, sessionId, {
+      reason,
+      source: 'adaptive_round2'
+    });
+  }
+}
 const getActiveSessionId = () => jobState?.session?.startTime || null;
 const isSessionActive = (sessionId) => !!sessionId && jobState?.session?.startTime === sessionId;
 const MV3_SURVIVAL_ALARM = 'llm_orchestrator_mv3_survival_v1';
@@ -3431,9 +3715,21 @@ async function dispatchRound1Sequentially(selectedLLMs, prompt, attachments = []
     const elapsed = Date.now() - roundStart;
     const targetMs = ROUND1_BEFORE_SEND_MS + ROUND1_POST_SEND_MS;
     await orchestratorSleepMs(Math.max(0, targetMs - elapsed));
-    endMeta.reason = 'dispatch_complete';
-    emitModelRoundTelemetry(llmName, 1, 'END', 'dispatch complete', {
-      meta: { tabId, durationMs: Date.now() - roundStart }
+    const postDispatchEntry = jobState?.llms?.[llmName] || entry;
+    const confirmedByContent = !!postDispatchEntry?.promptSubmittedAt && postDispatchEntry?.submitSource === 'content';
+    endMeta.reason = confirmedByContent ? 'prompt_confirmed' : 'awaiting_submit_confirmation';
+    endDetails = confirmedByContent ? 'prompt confirmed' : 'dispatch command sent (awaiting confirmation)';
+    endLevel = confirmedByContent ? 'success' : 'info';
+    emitModelRoundTelemetry(llmName, 1, 'END', endDetails, {
+      level: endLevel,
+      meta: {
+        tabId,
+        durationMs: Date.now() - roundStart,
+        reason: endMeta.reason,
+        promptSubmittedAt: postDispatchEntry?.promptSubmittedAt || null,
+        submitSource: postDispatchEntry?.submitSource || null,
+        dispatchId: postDispatchEntry?.lastDispatchMeta?.dispatchId || null
+      }
     });
     endBudgetPhase(llmName, 'dispatch');
   }
@@ -3441,17 +3737,32 @@ async function dispatchRound1Sequentially(selectedLLMs, prompt, attachments = []
 }
 
 async function focusTabForVerification(llmName, tabId, durationMs, sessionId) {
-  if (!isValidTabId(tabId)) return;
-  if (sessionId && !isSessionActive(sessionId)) return;
+  if (!isValidTabId(tabId)) return false;
+  if (sessionId && !isSessionActive(sessionId)) return false;
   const previousTab = await getActiveTabSnapshot();
+  let visitStarted = false;
   await withPromptDispatchFocusLock(async () => {
     await activateTabForDispatch(tabId);
   });
+  if (typeof startTabVisit === 'function') {
+    visitStarted = startTabVisit(tabId, llmName, 'verification_focus') === true;
+  }
   await orchestratorSleepMs(durationMs);
-  if (sessionId && !isSessionActive(sessionId)) return;
+  let visitSummary = null;
+  if (
+    visitStarted
+    && typeof finalizeTabVisit === 'function'
+    && typeof tabVisitTracker !== 'undefined'
+    && tabVisitTracker?.tabId === tabId
+    && tabVisitTracker?.llmName === llmName
+  ) {
+    visitSummary = finalizeTabVisit('verification_focus_end');
+  }
+  if (sessionId && !isSessionActive(sessionId)) return visitSummary || false;
   if (previousTab?.id && previousTab.id !== tabId) {
     restoreFocusIfStillOnDispatchTab(tabId, previousTab);
   }
+  return visitSummary || true;
 }
 
 async function runPreCollectScrollNudge(llmName, tabId, sessionId, reason = 'precollect_nudge') {
@@ -3582,11 +3893,14 @@ async function runPreCollectScrollNudge(llmName, tabId, sessionId, reason = 'pre
 async function runForcedAutomationVisits(llmName, tabId, sessionId, options = {}) {
   if (!isValidTabId(tabId)) return false;
   const visitFn = (typeof self.visitTabWithAutomation === 'function') ? self.visitTabWithAutomation : null;
+  const visitPolicy = self.VisitPolicy || null;
   const visits = Math.max(1, Number(options.visits || 1) || 1);
   const minMs = Math.max(1000, Number(options.minMs || 0) || 1000);
   const maxMs = Math.max(minMs, Number(options.maxMs || minMs) || minMs);
   const reason = options.reason || 'automation_visit';
+  const maxShortRetries = Math.max(0, Number(options.maxShortRetries ?? visitPolicy?.DEFAULT_MAX_SHORT_RETRIES ?? 1) || 0);
   let performed = 0;
+  let shortRetries = 0;
   for (let index = 0; index < visits; index += 1) {
     if (sessionId && !isSessionActive(sessionId)) return false;
     const liveEntry = jobState?.llms?.[llmName];
@@ -3604,14 +3918,42 @@ async function runForcedAutomationVisits(llmName, tabId, sessionId, options = {}
       details: `reason=${reason} dwell=${dwellMs}ms`,
       meta: { tabId, reason, dwellMs, scrollDurationMs, visitIndex: index + 1, total: visits }
     });
-    let didVisit = false;
+    let visitResult = false;
     if (visitFn) {
-      didVisit = await visitFn(llmName, tabId, { dwellMs, scrollDurationMs, reason, sessionId });
+      visitResult = await visitFn(llmName, tabId, { dwellMs, scrollDurationMs, reason, sessionId });
     } else {
       await focusTabForVerification(llmName, tabId, dwellMs, sessionId);
-      didVisit = true;
+      visitResult = true;
     }
-    if (didVisit) performed += 1;
+    const visitSummary = visitResult && typeof visitResult === 'object' ? visitResult : null;
+    const usefulVisit = visitResult === true || (visitSummary && visitSummary.usefulVisit !== false);
+    const retryShortVisit = visitPolicy?.shouldRetryVisit
+      ? visitPolicy.shouldRetryVisit(visitSummary, { attempt: shortRetries, maxShortRetries })
+      : Boolean(visitSummary?.shortVisit && shortRetries < maxShortRetries);
+    if (retryShortVisit) {
+      shortRetries += 1;
+      emitTelemetry(llmName, 'FORCED_VISIT_SHORT_RETRY', {
+        level: 'warning',
+        details: `duration=${visitSummary?.durationMs || 0}ms retry=${shortRetries}/${maxShortRetries}`,
+        meta: {
+          tabId,
+          reason,
+          visitIndex: index + 1,
+          total: visits,
+          shortRetries,
+          maxShortRetries,
+          durationMs: visitSummary?.durationMs || 0,
+          minUsefulMs: visitSummary?.minUsefulMs || null,
+          source: visitSummary?.source || 'unknown',
+          finishReason: visitSummary?.reason || 'unknown'
+        },
+        force: true
+      });
+      index -= 1;
+      await orchestratorSleepMs(Math.min(1000, Math.max(250, Math.floor(minMs * 0.2))));
+      continue;
+    }
+    if (usefulVisit) performed += 1;
     const afterVisitEntry = jobState?.llms?.[llmName];
     if (!afterVisitEntry || isFinalizedEntry(afterVisitEntry)) break;
   }
@@ -3787,6 +4129,147 @@ async function dispatchRound2Verification(selectedLLMs, sessionId) {
         endMeta.reason = readiness.reason || 'tab_not_ready';
         continue;
       }
+      let confirmedByContent = !!entry?.promptSubmittedAt && entry?.submitSource === 'content';
+      let repairAttemptedBeforeVisit = false;
+      if (!confirmedByContent && ROUND2_REPAIR_MODELS.has(llmName) && jobState?.prompt) {
+        repairAttemptedBeforeVisit = true;
+        const repairIntentDecision = self.RecoveryIntent?.authorize
+          ? self.RecoveryIntent.authorize(entry, {
+            intent: 'resend_prompt',
+            reason: 'round2_repair_pre_visit',
+            minChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+          })
+          : { ok: true };
+        if (!repairIntentDecision.ok) {
+          emitTelemetry(llmName, 'ROUND2_REPAIR_DISPATCH_SKIPPED', {
+            level: 'warning',
+            details: repairIntentDecision.reason || 'recovery_intent_denied',
+            meta: { tabId, reason: 'repair_dispatch_pre_visit', intentDecision: repairIntentDecision },
+            force: true
+          });
+          broadcastDiagnostic(llmName, {
+            type: 'DISPATCH',
+            label: 'ROUND2 repair skipped',
+            details: repairIntentDecision.reason || 'recovery_intent_denied',
+            level: 'warning',
+            meta: { tabId, intentDecision: repairIntentDecision }
+          });
+        } else {
+          emitTelemetry(llmName, 'ROUND2_REPAIR_DISPATCH_START', {
+            level: 'warning',
+            details: 'prompt not confirmed before verify visit',
+            meta: { tabId, reason: 'repair_dispatch_pre_visit' }
+          });
+          try {
+            const previousDispatchId = entry?.lastDispatchMeta?.dispatchId || null;
+            const machine = self.DispatchStateManager ? self.DispatchStateManager.get(llmName) : null;
+            if (machine && machine.isInProgress && machine.isInProgress()) {
+              machine.reset();
+            }
+            if (entry) {
+              entry.dispatchInFlight = false;
+              entry.messageSent = false;
+              entry.dispatchState = 'IDLE';
+              entry.csBusyUntil = 0;
+            }
+            await dispatchPromptToTab(llmName, tabId, jobState.prompt, jobState.attachments || [], 'round2_repair_pre_visit', {
+              forceFocus: true,
+              skipNoFocusProbe: true,
+              deferSendMs: 250,
+              skipSubmitWait: false,
+              skipTypingGuard: true,
+              resetStateAfterSend: false,
+              recoveryIntent: 'resend_prompt'
+            });
+            const repairDispatchId = jobState?.llms?.[llmName]?.lastDispatchMeta?.dispatchId || previousDispatchId || null;
+            const waitBudgetMs = Math.min(
+              ROUND2_REPAIR_CONFIRM_WAIT_MS,
+              Math.max(0, getRound2Timing().remainingMs - ROUND2_MODEL_MIN_REMAINING_MS)
+            );
+            const repairWait = await waitForRound2SubmitConfirmation(llmName, repairDispatchId, waitBudgetMs);
+            emitTelemetry(llmName, 'ROUND2_REPAIR_CONFIRM_WAIT', {
+              level: repairWait.ok ? 'info' : 'warning',
+              details: `${repairWait.waitedMs}ms:${repairWait.reason}`,
+              meta: {
+                tabId,
+                dispatchId: repairDispatchId,
+                reason: 'repair_dispatch_pre_visit',
+                confirmationReason: repairWait.reason,
+                waitedMs: repairWait.waitedMs,
+                ok: repairWait.ok
+              },
+              force: true
+            });
+          } catch (repairErr) {
+            emitTelemetry(llmName, 'ROUND2_REPAIR_DISPATCH_ERROR', {
+              level: 'warning',
+              details: repairErr?.message || String(repairErr),
+              meta: { tabId, reason: 'repair_dispatch_pre_visit_error' }
+            });
+          }
+        }
+        const repairedEntry = jobState?.llms?.[llmName] || entry;
+        const repairConfirmation = getRound2SubmitConfirmationState(llmName, repairedEntry?.lastDispatchMeta?.dispatchId || null);
+        const delayedConfirmation = isRound2DelayedConfirmationState(repairConfirmation);
+        confirmedByContent = repairConfirmation.ok || (!!repairedEntry?.promptSubmittedAt && repairedEntry?.submitSource === 'content');
+        emitTelemetry(llmName, confirmedByContent ? 'ROUND2_REPAIR_DISPATCH_OK' : (delayedConfirmation ? 'ROUND2_REPAIR_DISPATCH_PENDING' : 'ROUND2_REPAIR_DISPATCH_FAIL'), {
+          level: confirmedByContent || delayedConfirmation ? 'info' : 'warning',
+          details: confirmedByContent
+            ? 'submit/evidence confirmed after pre-visit repair'
+            : (delayedConfirmation ? 'submit confirmation still pending after pre-visit repair' : 'submit still not confirmed after pre-visit repair'),
+          meta: {
+            tabId,
+            reason: confirmedByContent
+              ? 'repair_confirmed_pre_visit'
+              : (delayedConfirmation ? 'repair_pending_pre_visit' : 'repair_not_confirmed_pre_visit'),
+            confirmationReason: repairConfirmation.reason
+          },
+          force: true
+        });
+        if (!confirmedByContent && delayedConfirmation) {
+          await scheduleRound2DelayedConfirmationContinuation(
+            llmName,
+            tabId,
+            sessionId,
+            'round2_repair_delayed_confirmation',
+            repairConfirmation
+          );
+          endDetails = 'awaiting delayed confirmation';
+          endLevel = 'info';
+          endMeta.reason = 'awaiting_delayed_confirmation_after_repair';
+          endMeta.confirmationReason = repairConfirmation.reason;
+          continue;
+        }
+        if (!confirmedByContent) {
+          broadcastDiagnostic(llmName, {
+            type: 'DISPATCH',
+            label: 'ROUND2_VERIFY',
+            details: 'prompt not confirmed after repair dispatch',
+            level: 'warning',
+            meta: { tabId, repairAttemptedBeforeVisit }
+          });
+          endDetails = 'prompt not confirmed';
+          endLevel = 'warning';
+          endMeta.reason = 'not_confirmed_after_repair';
+          continue;
+        }
+        endDetails = 'prompt confirmed';
+        endLevel = 'info';
+        endMeta.reason = repairConfirmation.reason === 'answer_evidence'
+          ? 'repair_answer_evidence_pre_visit'
+          : 'repair_confirmed_pre_visit';
+        const liveEntry = jobState?.llms?.[llmName];
+        if (liveEntry && !isFinalizedEntry(liveEntry)) {
+          await runPreCollectScrollNudge(llmName, tabId, sessionId, 'round2_repair_precollect');
+          triggerResponseCollectionPing(llmName, tabId, 'round2_repair_probe');
+          schedulePostR2AutoCollect(llmName, tabId, sessionId);
+          scheduleAdaptiveCollectionProbe(llmName, sessionId, {
+            reason: 'round2_repair_confirmed',
+            source: 'adaptive_round2'
+          });
+        }
+        continue;
+      }
       const preVisitTiming = getRound2Timing();
       if (preVisitTiming.elapsedMs > ROUND2_BATCH_MAX_MS || preVisitTiming.remainingMs <= 0) {
         endDetails = 'verification skipped (batch timeout)';
@@ -3851,8 +4334,7 @@ async function dispatchRound2Verification(selectedLLMs, sessionId) {
         await emitRound2CutoffFrom(index + 1, postVisitTiming);
         break;
       }
-      let confirmedByContent = !!entry?.promptSubmittedAt && entry?.submitSource === 'content';
-      if (!confirmedByContent && ROUND2_REPAIR_MODELS.has(llmName) && jobState?.prompt) {
+      if (!confirmedByContent && !repairAttemptedBeforeVisit && ROUND2_REPAIR_MODELS.has(llmName) && jobState?.prompt) {
         const repairIntentDecision = self.RecoveryIntent?.authorize
           ? self.RecoveryIntent.authorize(entry, {
             intent: 'resend_prompt',
@@ -3881,6 +4363,7 @@ async function dispatchRound2Verification(selectedLLMs, sessionId) {
             meta: { tabId, reason: 'repair_dispatch' }
           });
           try {
+            const previousDispatchId = entry?.lastDispatchMeta?.dispatchId || null;
             const machine = self.DispatchStateManager ? self.DispatchStateManager.get(llmName) : null;
             if (machine && machine.isInProgress && machine.isInProgress()) {
               machine.reset();
@@ -3900,6 +4383,25 @@ async function dispatchRound2Verification(selectedLLMs, sessionId) {
               resetStateAfterSend: false,
               recoveryIntent: 'resend_prompt'
             });
+            const repairDispatchId = jobState?.llms?.[llmName]?.lastDispatchMeta?.dispatchId || previousDispatchId || null;
+            const waitBudgetMs = Math.min(
+              ROUND2_REPAIR_CONFIRM_WAIT_MS,
+              Math.max(0, getRound2Timing().remainingMs - ROUND2_MODEL_MIN_REMAINING_MS)
+            );
+            const repairWait = await waitForRound2SubmitConfirmation(llmName, repairDispatchId, waitBudgetMs);
+            emitTelemetry(llmName, 'ROUND2_REPAIR_CONFIRM_WAIT', {
+              level: repairWait.ok ? 'info' : 'warning',
+              details: `${repairWait.waitedMs}ms:${repairWait.reason}`,
+              meta: {
+                tabId,
+                dispatchId: repairDispatchId,
+                reason: 'repair_dispatch',
+                confirmationReason: repairWait.reason,
+                waitedMs: repairWait.waitedMs,
+                ok: repairWait.ok
+              },
+              force: true
+            });
           } catch (repairErr) {
             emitTelemetry(llmName, 'ROUND2_REPAIR_DISPATCH_ERROR', {
             level: 'warning',
@@ -3909,34 +4411,56 @@ async function dispatchRound2Verification(selectedLLMs, sessionId) {
           }
         }
         const repairedEntry = jobState?.llms?.[llmName] || entry;
-        confirmedByContent = !!repairedEntry?.promptSubmittedAt && repairedEntry?.submitSource === 'content';
+        const repairConfirmation = getRound2SubmitConfirmationState(llmName, repairedEntry?.lastDispatchMeta?.dispatchId || null);
+        const delayedConfirmation = isRound2DelayedConfirmationState(repairConfirmation);
+        confirmedByContent = repairConfirmation.ok || (!!repairedEntry?.promptSubmittedAt && repairedEntry?.submitSource === 'content');
         if (confirmedByContent) {
           emitTelemetry(llmName, 'ROUND2_REPAIR_DISPATCH_OK', {
-            details: 'submit confirmed after repair dispatch',
-            meta: { tabId, reason: 'repair_confirmed' }
+            details: 'submit/evidence confirmed after repair dispatch',
+            meta: { tabId, reason: 'repair_confirmed', confirmationReason: repairConfirmation.reason }
+          });
+        } else if (delayedConfirmation) {
+          emitTelemetry(llmName, 'ROUND2_REPAIR_DISPATCH_PENDING', {
+            level: 'info',
+            details: 'submit confirmation still pending',
+            meta: { tabId, reason: 'repair_pending', confirmationReason: repairConfirmation.reason }
           });
         } else {
           emitTelemetry(llmName, 'ROUND2_REPAIR_DISPATCH_FAIL', {
             level: 'warning',
             details: 'submit still not confirmed',
-            meta: { tabId, reason: 'repair_not_confirmed' }
+            meta: { tabId, reason: 'repair_not_confirmed', confirmationReason: repairConfirmation.reason }
           });
         }
       }
       if (!confirmedByContent) {
-        broadcastDiagnostic(llmName, {
-          type: 'DISPATCH',
-          label: 'ROUND2_VERIFY',
-          details: 'prompt not confirmed as sent yet',
-          level: 'warning'
-        });
-        emitTelemetry(llmName, 'ROUND2_VERIFY', {
-          details: 'prompt not confirmed',
-          meta: { tabId, reason: 'not_confirmed' }
-        });
-        endDetails = 'prompt not confirmed';
-        endLevel = 'warning';
-        endMeta.reason = 'not_confirmed';
+        const delayedState = getRound2SubmitConfirmationState(llmName, entry?.lastDispatchMeta?.dispatchId || null);
+        if (isRound2DelayedConfirmationState(delayedState)) {
+          await scheduleRound2DelayedConfirmationContinuation(
+            llmName,
+            tabId,
+            sessionId,
+            'round2_delayed_confirmation',
+            delayedState
+          );
+          endDetails = 'awaiting delayed confirmation';
+          endLevel = 'info';
+          endMeta.reason = 'awaiting_delayed_confirmation';
+        } else {
+          broadcastDiagnostic(llmName, {
+            type: 'DISPATCH',
+            label: 'ROUND2_VERIFY',
+            details: 'prompt not confirmed as sent yet',
+            level: 'warning'
+          });
+          emitTelemetry(llmName, 'ROUND2_VERIFY', {
+            details: 'prompt not confirmed',
+            meta: { tabId, reason: 'not_confirmed', confirmationReason: delayedState.reason }
+          });
+          endDetails = 'prompt not confirmed';
+          endLevel = 'warning';
+          endMeta.reason = 'not_confirmed';
+        }
       } else {
         endDetails = 'prompt confirmed';
         endLevel = 'info';
@@ -3944,7 +4468,7 @@ async function dispatchRound2Verification(selectedLLMs, sessionId) {
       }
 
       const liveEntry = jobState?.llms?.[llmName];
-      if (liveEntry && !isFinalizedEntry(liveEntry) && liveEntry.promptSubmittedAt) {
+      if (liveEntry && !isFinalizedEntry(liveEntry) && (liveEntry.promptSubmittedAt || endMeta.reason === 'awaiting_delayed_confirmation' || hasRound2SubmitOrAnswerEvidence(liveEntry))) {
         await runPreCollectScrollNudge(llmName, tabId, sessionId, 'round2_precollect');
         triggerResponseCollectionPing(llmName, tabId, 'round2_probe');
         schedulePostR2AutoCollect(llmName, tabId, sessionId);
@@ -4465,6 +4989,7 @@ function buildAnswerCandidate(llmName, entry, context = {}) {
     manualRecovery: Boolean(metaObj.manualRecovery || responseMeta.manualRecovery || responseMeta.manualOverride),
     preFinalRecovery: Boolean(metaObj.preTerminalMaterializeFinal || metaObj.preTerminalMaterialize || responseMeta.preTerminalMaterialize),
     promptEcho: isPromptEchoAnswerCandidate(text, jobState?.prompt || ''),
+    answerEvidence: context.answerEvidence || responseMeta.answerEvidence || null,
     createdAt: Date.now()
   };
 }
@@ -4498,6 +5023,7 @@ function submitAnswerCandidate(llmName, entry, candidate = {}, context = {}) {
       length: candidate.length || 0,
       hash: candidate.hash || null,
       promptEcho: !!candidate.promptEcho,
+      answerEvidence: candidate.answerEvidence || context.answerEvidence || null,
       accepted: !!evaluation.accepted,
       rejectionReasons: evaluation.rejectionReasons,
       createdAt: candidate.createdAt || Date.now()
@@ -4547,6 +5073,21 @@ function buildFinalizationEvidence(llmName, entry, context = {}) {
   const lastDispatchAt = Number(entry?.lastDispatchAt || 0) || null;
   const lifecycleReadyAt = Number(entry?.lifecycleReadyAt || entry?.answerCompleteDetectedAt || 0) || null;
   const source = responseMeta?.source || responseMeta?.answerSource || context.responseSource || null;
+  const answerEvidence = context.answerEvidence || responseMeta?.answerEvidence || (self.AnswerEvidence?.buildAnswerEvidence?.({
+    llmName,
+    text: answerText,
+    html: context.normalizedHtml || '',
+    source,
+    responseMeta,
+    dispatchId,
+    tabId: entry?.tabId || null,
+    promptConfirmed: context.sendConfirmed,
+    minChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS,
+    stableMinChars: DEFER_STREAM_STABLE_FORCE_MIN_CHARS
+  }) || null);
+  const evidencePolicy = self.AnswerEvidence?.shouldFinalizeWithEvidence?.(answerEvidence, {
+    minChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+  }) || { ok: false };
   const answerLength = answerText.length;
   const promptEcho = isPromptEchoAnswerCandidate(answerText, jobState?.prompt || '');
   const hasAcceptedAnswer = answerLength >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS && !promptEcho && !error;
@@ -4586,6 +5127,10 @@ function buildFinalizationEvidence(llmName, entry, context = {}) {
     hasPriorAnswer,
     hasPendingFinalAnswer,
     hasAnswerEvidence: !!hasAnswerEvidence,
+    answerEvidence,
+    evidencePolicy,
+    terminalEligible: !!answerEvidence?.terminalEligible,
+    terminalEligibleReason: answerEvidence?.reason || null,
     promptSubmittedAt,
     lastDispatchAt,
     lifecycleReadyAt,
@@ -4643,6 +5188,9 @@ function inferPromptSubmittedFromAnswerEvidence(llmName, entry, context = {}) {
   entry.promptSubmittedAt = now;
   entry.lastRuntimeActivityAt = now;
   entry.lastRuntimeActivitySource = 'answer_evidence_submit_inferred';
+  entry.awaitingSubmitConfirmation = false;
+  entry.awaitingSubmitConfirmationAt = null;
+  entry.awaitingSubmitConfirmationDispatchId = null;
   entry.confirmedDispatchId = dispatchId || entry.confirmedDispatchId || null;
   entry.submitSource = 'inferred_answer_evidence';
   entry.submitConfirmedBy = responseMeta.source || responseMeta.answerSource || metaObj.source || 'answer_evidence';
@@ -4851,6 +5399,13 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
       decidedAt: Date.now()
     };
     if (!identityDecision.ok) {
+      self.DecisionLedger?.append?.(entry, {
+        decision: 'ignore_stale_event',
+        reason: identityDecision.reason || 'stale_event',
+        source: 'handleLLMResponse',
+        inputs: { identityDecision },
+        resultingState: entry.finalStatus || entry.status || 'open'
+      });
       appendLogEntry(llmName, {
         type: 'RESPONSE',
         label: 'Response ignored (stale identity)',
@@ -5059,6 +5614,21 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
     }
   }
   const isSuccess = !error && !!String(normalizedAnswer || '').trim() && !normalizedAnswer.startsWith('Error:');
+  const answerEvidence = self.AnswerEvidence?.buildAnswerEvidence?.({
+    llmName,
+    text: trimmedAnswer,
+    html: normalizedHtml,
+    source: responseSource || metaObj?.source || null,
+    responseMeta,
+    dispatchId: metaObj?.dispatchId || entry?.lastDispatchMeta?.dispatchId || null,
+    tabId: entry?.tabId || null,
+    promptConfirmed: sendConfirmed,
+    minChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS,
+    stableMinChars: DEFER_STREAM_STABLE_FORCE_MIN_CHARS
+  }) || null;
+  const answerEvidencePolicy = self.AnswerEvidence?.shouldFinalizeWithEvidence?.(answerEvidence, {
+    minChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+  }) || { ok: false };
   const allowManualTerminalOverride = Boolean(manualTerminalOverrideRequested && isSuccess && trimmedAnswer.length >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS);
   if (isSuccess && entry) {
     inferPromptSubmittedFromAnswerEvidence(llmName, entry, {
@@ -5094,7 +5664,8 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
   const isPartial = Boolean(
     (responseMeta?.partial && !fullSnapshotCompletionEvidence)
     || responseMeta?.degraded
-    || (completionSuggestsPartial && shortAnswer)
+    || (completionSuggestsPartial && (shortAnswer || trimmedAnswer.length >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS))
+    || (answerEvidencePolicy.ok && answerEvidence?.partialAllowed)
     || hasPartialWarnings
     || (typeof sanityConfidence === 'number' && sanityConfidence < 0.7)
   );
@@ -5293,6 +5864,19 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
       dispatchId: incomingDispatchId || null,
       decidedAt: Date.now()
     };
+    self.DecisionLedger?.append?.(entry, {
+      decision: finalizationControl.ok
+        ? (finalizationControl.allowTerminalUpgrade ? 'upgrade_terminal' : (isSuccess ? 'accept_success' : 'finalize_error'))
+        : (finalizationControl.reason === 'duplicate_terminal' ? 'ignore_duplicate_final' : 'reject_final_candidate'),
+      reason: finalizationControl.reason || null,
+      source: 'FinalizationController',
+      inputs: {
+        finalizationControl,
+        finalStatus,
+        incomingDispatchId
+      },
+      resultingState: finalizationControl.finalStatusOverride || finalStatus
+    });
   }
   if (finalizationControl.action === 'keep_locked_status') {
     appendLogEntry(llmName, {
@@ -5420,6 +6004,7 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
     metaObj,
     responseMeta,
     responseSource
+    , answerEvidence
   });
   const answerEvaluation = submitAnswerCandidate(llmName, entry, answerCandidate, {
     finalStatus,
@@ -5431,6 +6016,7 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
     responseMeta,
     responseSource,
     trimmedAnswer,
+    answerEvidence,
     sendConfirmed,
     completionReason,
     failureClassification: isSuccess ? null : failureClassification,
@@ -6216,6 +6802,13 @@ function handleManualResendRequest(llmName) {
     decidedAt: Date.now()
   };
   if (!intentDecision.ok) {
+    self.DecisionLedger?.append?.(llmEntry, {
+      decision: 'deny_recovery_intent',
+      reason: intentDecision.reason || 'recovery_intent_denied',
+      source: 'manual_resend',
+      inputs: { intentDecision },
+      resultingState: llmEntry.finalStatus || llmEntry.status || 'open'
+    });
     emitTelemetry(llmName, 'MANUAL_RESEND_DENIED', {
       level: 'warning',
       details: intentDecision.reason || 'recovery_intent_denied',
@@ -6303,6 +6896,10 @@ function sendCleanupCommand(llmName) {
   self.evaluateAnswerCandidate = evaluateAnswerCandidate;
   self.submitAnswerCandidate = submitAnswerCandidate;
   self.buildFinalizationEvidence = buildFinalizationEvidence;
+  self.hasRound2SubmitOrAnswerEvidence = hasRound2SubmitOrAnswerEvidence;
+  self.getRound2SubmitConfirmationState = getRound2SubmitConfirmationState;
+  self.waitForRound2SubmitConfirmation = waitForRound2SubmitConfirmation;
+  self.isRound2DelayedConfirmationState = isRound2DelayedConfirmationState;
   self.shouldInferSubmitFromAnswerEvidence = shouldInferSubmitFromAnswerEvidence;
   self.inferPromptSubmittedFromAnswerEvidence = inferPromptSubmittedFromAnswerEvidence;
   self.recordModelRunState = recordModelRunState;

@@ -13,6 +13,7 @@ const HUMAN_VISIT_HARD_CAP_MS = 12000;
 const VISIT_QUOTA_WINDOW_MS = 60000;
 const VISIT_QUOTA_MAX_MS = 12000;
 const VISIT_QUOTA_COOLDOWN_MS = 15000;
+const HUMAN_VISIT_MIN_USEFUL_MS = 1500;
 const POST_SUCCESS_SCROLL_ATTEMPTS_MS = [0, 1200, 3600];
 const DEFERRED_VISIT_DELAYS_MS = [15000, 45000, 90000];
 const TAB_LEASE_TTL_MS = HUMAN_VISIT_HARD_CAP_MS;
@@ -531,79 +532,136 @@ function finalizeTabVisit(reason = 'tab_switch') {
     tabVisitTracker.leaseOwner = null;
     tabVisitTracker.leaseKey = null;
     tabVisitTracker.leaseExpiresAt = null;
-    return;
+    return null;
   }
   const endedAt = Date.now();
   const startedAt = tabVisitTracker.startedAt || endedAt;
   const durationMs = Math.max(0, endedAt - startedAt);
   const llmName = tabVisitTracker.llmName;
+  const tabId = tabVisitTracker.tabId;
+  const source = tabVisitTracker.source || 'unknown';
   const entry = jobState?.llms?.[llmName];
   const snapshot = tabVisitTracker.snapshot || null;
   const timingMeta = self.buildTabTimingMeta ? self.buildTabTimingMeta(snapshot) : {};
-    if (entry) {
-      if (!Array.isArray(entry.humanVisitDurations)) entry.humanVisitDurations = [];
-      entry.humanVisitDurations.push({
-        startedAt,
-        endedAt,
-        durationMs,
-        source: tabVisitTracker.source || 'unknown',
-        reason: reason || 'unknown'
-      });
-    if (entry.humanVisitDurations.length > 50) {
-      entry.humanVisitDurations.splice(0, entry.humanVisitDurations.length - 50);
+  const policySummary = self.VisitPolicy?.classifyVisit
+    ? self.VisitPolicy.classifyVisit({
+      durationMs,
+      source,
+      reason: reason || 'unknown',
+      minUsefulMs: HUMAN_VISIT_MIN_USEFUL_MS
+    })
+    : {
+      schemaVersion: 1,
+      durationMs,
+      source,
+      reason: reason || 'unknown',
+      minUsefulMs: HUMAN_VISIT_MIN_USEFUL_MS,
+      shortVisit: durationMs < HUMAN_VISIT_MIN_USEFUL_MS,
+      usefulVisit: durationMs >= HUMAN_VISIT_MIN_USEFUL_MS,
+      retryable: durationMs < HUMAN_VISIT_MIN_USEFUL_MS
+    };
+  const visitSummary = {
+    tabId,
+    llmName,
+    startedAt,
+    endedAt,
+    durationMs,
+    source,
+    reason: reason || 'unknown',
+    snapshot,
+    ...policySummary
+  };
+  if (entry) {
+    if (!Array.isArray(entry.humanVisitDurations)) entry.humanVisitDurations = [];
+    entry.lastTabVisitSummary = visitSummary;
+    if (source === 'automation_focus') {
+      entry.lastAutomationVisitSummary = visitSummary;
     }
-      entry.humanVisitTotalMs = (entry.humanVisitTotalMs || 0) + durationMs;
-      const now = Date.now();
-      const recentVisits = entry.humanVisitDurations.filter((visit) =>
-        Number(visit?.endedAt || 0) >= (now - VISIT_QUOTA_WINDOW_MS)
-      );
-      const recentWindowMs = recentVisits.reduce((sum, visit) =>
-        sum + Math.max(0, Number(visit?.durationMs || 0)), 0
-      );
-      if (recentWindowMs > VISIT_QUOTA_MAX_MS) {
-        const backoffUntil = now + VISIT_QUOTA_COOLDOWN_MS;
-        entry.visitQuotaBackoffUntil = Math.max(Number(entry.visitQuotaBackoffUntil || 0), backoffUntil);
-        emitTelemetry(llmName, 'VISIT_QUOTA_BACKOFF', {
-          level: 'warning',
-          details: `${recentWindowMs}ms/${VISIT_QUOTA_WINDOW_MS}ms`,
-          meta: {
-            tabId: tabVisitTracker.tabId,
-            reason: reason || 'unknown',
-            source: tabVisitTracker.source || 'unknown',
-            recentWindowMs,
-            quotaMs: VISIT_QUOTA_MAX_MS,
-            quotaWindowMs: VISIT_QUOTA_WINDOW_MS,
-            cooldownMs: VISIT_QUOTA_COOLDOWN_MS,
-            backoffUntil
-          },
-          force: true
-        });
-      }
-      saveJobState(jobState);
-      broadcastDiagnostic(llmName, {
-        type: 'VISIT',
-        label: 'TAB_VISIT',
-        details: `${durationMs}ms`,
-        level: 'info',
-        meta: {
-          startedAt,
-          endedAt,
-          durationMs,
-          source: tabVisitTracker.source || 'unknown',
-          reason: reason || 'unknown',
-          snapshot,
-          ...timingMeta
-        }
-      });
-    }
-  emitTelemetry(llmName, 'HUMAN_VISIT_END', {
-    meta: {
-      tabId: tabVisitTracker.tabId,
+    entry.humanVisitDurations.push({
       startedAt,
       endedAt,
       durationMs,
-      source: tabVisitTracker.source || 'unknown',
+      source,
       reason: reason || 'unknown',
+      shortVisit: visitSummary.shortVisit,
+      usefulVisit: visitSummary.usefulVisit,
+      minUsefulMs: visitSummary.minUsefulMs
+    });
+    if (entry.humanVisitDurations.length > 50) {
+      entry.humanVisitDurations.splice(0, entry.humanVisitDurations.length - 50);
+    }
+    if (visitSummary.shortVisit) {
+      if (!Array.isArray(entry.shortHumanVisitDurations)) entry.shortHumanVisitDurations = [];
+      entry.shortHumanVisitDurations.push({
+        startedAt,
+        endedAt,
+        durationMs,
+        source,
+        reason: reason || 'unknown',
+        minUsefulMs: visitSummary.minUsefulMs
+      });
+      if (entry.shortHumanVisitDurations.length > 50) {
+        entry.shortHumanVisitDurations.splice(0, entry.shortHumanVisitDurations.length - 50);
+      }
+    }
+    entry.humanVisitTotalMs = (entry.humanVisitTotalMs || 0) + durationMs;
+    const now = Date.now();
+    const recentVisits = entry.humanVisitDurations.filter((visit) =>
+      Number(visit?.endedAt || 0) >= (now - VISIT_QUOTA_WINDOW_MS)
+    );
+    const recentWindowMs = recentVisits.reduce((sum, visit) =>
+      sum + Math.max(0, Number(visit?.durationMs || 0)), 0
+    );
+    if (recentWindowMs > VISIT_QUOTA_MAX_MS) {
+      const backoffUntil = now + VISIT_QUOTA_COOLDOWN_MS;
+      entry.visitQuotaBackoffUntil = Math.max(Number(entry.visitQuotaBackoffUntil || 0), backoffUntil);
+      emitTelemetry(llmName, 'VISIT_QUOTA_BACKOFF', {
+        level: 'warning',
+        details: `${recentWindowMs}ms/${VISIT_QUOTA_WINDOW_MS}ms`,
+        meta: {
+          tabId,
+          reason: reason || 'unknown',
+          source,
+          recentWindowMs,
+          quotaMs: VISIT_QUOTA_MAX_MS,
+          quotaWindowMs: VISIT_QUOTA_WINDOW_MS,
+          cooldownMs: VISIT_QUOTA_COOLDOWN_MS,
+          backoffUntil
+        },
+        force: true
+      });
+    }
+    saveJobState(jobState);
+    broadcastDiagnostic(llmName, {
+      type: 'VISIT',
+      label: visitSummary.shortVisit ? 'TAB_VISIT_SHORT' : 'TAB_VISIT',
+      details: `${durationMs}ms`,
+      level: visitSummary.shortVisit ? 'warning' : 'info',
+      meta: {
+        startedAt,
+        endedAt,
+        durationMs,
+        source,
+        reason: reason || 'unknown',
+        shortVisit: visitSummary.shortVisit,
+        usefulVisit: visitSummary.usefulVisit,
+        minUsefulMs: visitSummary.minUsefulMs,
+        snapshot,
+        ...timingMeta
+      }
+    });
+  }
+  emitTelemetry(llmName, 'HUMAN_VISIT_END', {
+    meta: {
+      tabId,
+      startedAt,
+      endedAt,
+      durationMs,
+      source,
+      reason: reason || 'unknown',
+      shortVisit: visitSummary.shortVisit,
+      usefulVisit: visitSummary.usefulVisit,
+      minUsefulMs: visitSummary.minUsefulMs,
       snapshot,
       ...timingMeta
     },
@@ -611,12 +669,15 @@ function finalizeTabVisit(reason = 'tab_switch') {
   });
   emitTelemetry(llmName, 'LEASE_RELEASED', {
     meta: {
-      tabId: tabVisitTracker.tabId,
+      tabId,
       startedAt,
       endedAt,
       durationMs,
-      source: tabVisitTracker.source || 'unknown',
+      source,
       reason: reason || 'unknown',
+      shortVisit: visitSummary.shortVisit,
+      usefulVisit: visitSummary.usefulVisit,
+      minUsefulMs: visitSummary.minUsefulMs,
       foregroundMsUsed: entry?.humanVisitTotalMs || 0,
       snapshot,
       ...timingMeta
@@ -633,28 +694,35 @@ function finalizeTabVisit(reason = 'tab_switch') {
   tabVisitTracker.leaseOwner = null;
   tabVisitTracker.leaseKey = null;
   tabVisitTracker.leaseExpiresAt = null;
+  return visitSummary;
 }
 
 function startAutomationVisit(tabId, llmName) {
   if (!llmName || !tabId) return false;
   const entry = jobState?.llms?.[llmName];
   if (isTerminalEntry(entry)) return false;
+  const granted = startTabVisit(tabId, llmName, 'automation_focus');
+  if (!granted) return false;
   if (entry) {
+    entry.lastAutomationVisitSummary = null;
     entry.automationVisitActive = true;
     entry.automationVisitStartedAt = Date.now();
   }
-  startTabVisit(tabId, llmName, 'automation_focus');
   return true;
 }
 
 function endAutomationVisit(llmName, reason = 'automation_focus_end') {
-  if (!llmName) return;
+  if (!llmName) return null;
   const entry = jobState?.llms?.[llmName];
   if (entry) {
     entry.automationVisitActive = false;
     entry.automationVisitStartedAt = null;
   }
-  finalizeTabVisit(reason);
+  if (tabVisitTracker.llmName !== llmName) {
+    return entry?.lastAutomationVisitSummary || null;
+  }
+  const summary = finalizeTabVisit(reason);
+  return summary || entry?.lastAutomationVisitSummary || null;
 }
 
 async function runHumanPresenceCycle() {
@@ -889,11 +957,20 @@ function visitTabWithAutomation(llmName, tabId, options = {}) {
           terminalPollTimer = null;
         }
         automationVisitLocks.delete(lockKey);
-        endAutomationVisit(llmName, finalizeReason);
+        const visitSummary = endAutomationVisit(llmName, finalizeReason) || {
+          llmName,
+          tabId,
+          durationMs: Math.max(0, Date.now() - startTs),
+          source: 'automation_focus',
+          reason: finalizeReason,
+          shortVisit: false,
+          usefulVisit: true,
+          retryable: false
+        };
         if (previousTab?.id && previousTab.id !== tabId && typeof restoreFocusIfStillOnDispatchTab === 'function') {
           restoreFocusIfStillOnDispatchTab(tabId, previousTab);
         }
-        resolve(true);
+        resolve(visitSummary);
       };
       const focusWindow = () => new Promise((focusResolve) => {
         chrome.windows.update(tab.windowId, { focused: true }, () => {
@@ -918,7 +995,11 @@ function visitTabWithAutomation(llmName, tabId, options = {}) {
               finalizeVisit(previousTab, 'automation_terminal_success');
               return;
             }
-            startAutomationVisit(tabId, llmName);
+            if (!startAutomationVisit(tabId, llmName)) {
+              automationVisitLocks.delete(lockKey);
+              resolve(false);
+              return;
+            }
             terminalPollTimer = setInterval(() => {
               if (!sessionStillValid() || !modelStillPending()) {
                 finalizeVisit(previousTab, modelStillPending() ? 'automation_session_stale' : 'automation_terminal_success');

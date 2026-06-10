@@ -7,6 +7,7 @@
     "test": "jest --config tests/jest.config.js",
     "test:telemetry": "node tests/telemetry-devtools-check.js",
     "test:qwen": "node tests/qwen-playwright-check.js",
+    "auth:models": "node scripts/manual-auth-real-pages.js",
     "build:bundles": "node scripts/build-bundles.js",
     "scroll:stress": "node tests/scroll-coordinator.stress.js"
   },

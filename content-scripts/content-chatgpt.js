@@ -110,6 +110,26 @@ const attachmentHandler = window.AttachmentHandler || null;
     return { html: '', text: '', node: null };
   }
   const generatePingId = () => `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  function emitDiagnostic(event = {}) {
+    try {
+      chrome.runtime.sendMessage({
+        type: 'LLM_DIAGNOSTIC_EVENT',
+        llmName: MODEL,
+        event: {
+          ts: event.ts || Date.now(),
+          type: event.type || 'INFO',
+          label: event.label || '',
+          details: event.details || '',
+          level: event.level || 'info',
+          meta: event.meta || {}
+        }
+      });
+    } catch (err) {
+      console.warn('[content-chatgpt] Failed to emit diagnostic event', err);
+    }
+  }
+
   // Pragmatist integration
   const prag = window.__PragmatistAdapter;
   const getPragSessionId = () => prag?.sessionId;
@@ -1226,6 +1246,13 @@ const chatgptScrollCoordinator = window.ScrollCoordinator
 
         let sendButton = null;
         console.log('[CONTENT-GPT] Trying Ctrl+Enter send');
+        emitDiagnostic({
+          type: 'DISPATCH',
+          label: 'GPT send attempt',
+          details: 'ctrl_enter',
+          level: 'info',
+          meta: { dispatchId: dispatchMeta?.dispatchId || null }
+        });
         await tryCtrlEnterSend();
         let confirmed = await confirmChatgptSend();
         if (!confirmed) {
@@ -1240,9 +1267,23 @@ const chatgptScrollCoordinator = window.ScrollCoordinator
           }
           if (sendButton) {
             console.log('[CONTENT-GPT] Clicking send button');
+            emitDiagnostic({
+              type: 'DISPATCH',
+              label: 'GPT send button found',
+              details: `${sendButton.tagName.toLowerCase()}${sendButton.id ? `#${sendButton.id}` : ''}`,
+              level: 'info',
+              meta: { dispatchId: dispatchMeta?.dispatchId || null }
+            });
             await humanClick(sendButton);
           } else {
             console.warn('[CONTENT-GPT] Send button not found, trying Enter fallback');
+            emitDiagnostic({
+              type: 'DISPATCH',
+              label: 'GPT send button missing',
+              details: 'enter_fallback',
+              level: 'warning',
+              meta: { dispatchId: dispatchMeta?.dispatchId || null }
+            });
             await tryEnterSend();
           }
 
@@ -1254,9 +1295,23 @@ const chatgptScrollCoordinator = window.ScrollCoordinator
           }
         }
         if (!confirmed) {
+          emitDiagnostic({
+            type: 'DISPATCH',
+            label: 'GPT send failed',
+            details: 'ChatGPT send not confirmed',
+            level: 'error',
+            meta: { dispatchId: dispatchMeta?.dispatchId || null }
+          });
           throw { type: 'send_failed', message: 'ChatGPT send not confirmed' };
         }
         activity.heartbeat(0.5, { phase: 'send-dispatched' });
+        emitDiagnostic({
+          type: 'DISPATCH',
+          label: 'GPT send confirmed',
+          details: 'PROMPT_SUBMITTED emitted',
+          level: 'success',
+          meta: { dispatchId: dispatchMeta?.dispatchId || null }
+        });
         try { chrome.runtime.sendMessage({ type: 'PROMPT_SUBMITTED', llmName: MODEL, ts: Date.now(), meta: dispatchMeta }); } catch (_) {}
 
         console.log('[CONTENT-GPT] Message sent, waiting for response...');

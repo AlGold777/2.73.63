@@ -5,6 +5,7 @@ const vm = require('vm');
 const JOB_ORCHESTRATOR_PATH = path.join(__dirname, '..', 'background', 'job-orchestrator.js');
 const JOB_ORCHESTRATOR_SOURCE = fs.readFileSync(JOB_ORCHESTRATOR_PATH, 'utf8');
 const STATUS_CONTRACT_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'status-contract.js'), 'utf8');
+const ANSWER_EVIDENCE_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'answer-evidence.js'), 'utf8');
 const FINALIZATION_CONTROLLER_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'shared', 'finalization-controller.js'), 'utf8');
 
 function createSandbox() {
@@ -109,6 +110,7 @@ function createSandbox() {
 
   vm.createContext(context);
   vm.runInContext(STATUS_CONTRACT_SOURCE, context, { filename: 'shared/status-contract.js' });
+  vm.runInContext(ANSWER_EVIDENCE_SOURCE, context, { filename: 'shared/answer-evidence.js' });
   vm.runInContext(FINALIZATION_CONTROLLER_SOURCE, context, { filename: 'shared/finalization-controller.js' });
   vm.runInContext(JOB_ORCHESTRATOR_SOURCE, context, { filename: 'background/job-orchestrator.js' });
 
@@ -328,6 +330,60 @@ describe('early terminal success guard', () => {
     );
   });
 
+  test('updates cached terminal answer when manual late collect finds longer text', async () => {
+    const { context, partialMessages, logs } = createSandbox();
+    const entry = context.jobState.llms.Qwen;
+    entry.status = 'PARTIAL';
+    entry.finalStatus = 'PARTIAL';
+    entry.finalStatusRecorded = true;
+    entry.finalizedAt = Date.now();
+    entry.answer = 'short terminal answer '.repeat(20);
+    const previousLength = entry.answer.trim().length;
+    const improved = 'longer terminal answer from manual late collect '.repeat(120);
+
+    const accepted = context.acceptLateCollectResult('Qwen', {
+      ok: true,
+      status: 'success',
+      text: improved,
+      html: '<p>longer terminal answer</p>',
+      source: 'inline_executeScript',
+      candidateCount: 4
+    }, {
+      source: 'manual_ping_late_collect',
+      dispatchId: 'dispatch-qwen',
+      manualRecovery: true,
+      responseMeta: {
+        source: 'manual_ping_late_collect',
+        completionReason: 'manual_ping_late_collect',
+        manualRecovery: true,
+        manualOverride: true,
+        lateCollectFinal: true
+      }
+    });
+    await Promise.resolve();
+
+    expect(accepted).toBe(true);
+    expect(entry.finalStatus).toBe('SUCCESS');
+    expect(entry.answer.length).toBeGreaterThan(previousLength);
+    expect(entry.answer).toBe(improved.trim());
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        entry: expect.objectContaining({ label: 'Terminal answer improved after late collect' })
+      })
+    ]));
+    expect(partialMessages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'LLM_PARTIAL_RESPONSE',
+        llmName: 'Qwen',
+        answer: improved.trim(),
+        metadata: expect.objectContaining({
+          reason: 'improved_after_terminal',
+          improvedAfterTerminal: true
+        })
+      })
+    ]));
+  });
+
   test('recovers Qwen false NO_SEND when answer appears after prompt confirmation miss', async () => {
     const { context, stateUpdates, partialMessages, logs } = createSandbox();
     const entry = context.jobState.llms.Qwen;
@@ -486,6 +542,43 @@ describe('early terminal success guard', () => {
     );
   });
 
+  test('forces finalization for long stable answer when only busy indicator remains', async () => {
+    const { context, logs, stateUpdates } = createSandbox();
+    context.chrome.scripting.executeScript = jest.fn(() => Promise.resolve([
+      { result: { active: true, stopVisible: false, busyVisible: true } }
+    ]));
+    const entry = context.jobState.llms.GPT;
+    entry.finalizationDeferStartedAt = Date.now() - 35000;
+    const answer = 'stable completed answer '.repeat(90);
+
+    context.handleLLMResponse('GPT', answer, null, {
+      dispatchId: 'dispatch-gpt',
+      responseMeta: {
+        source: 'manual_ping_late_collect',
+        completionReason: 'manual_ping_late_collect',
+        lateCollectFinal: true,
+        forceTerminalSuccess: true
+      }
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(entry.finalStatusRecorded).toBe(true);
+    expect(stateUpdates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ llmName: 'GPT', status: 'SUCCESS' })
+      ])
+    );
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          llmName: 'GPT',
+          entry: expect.objectContaining({ label: 'Finalization forced (stable answer evidence)' })
+        })
+      ])
+    );
+  });
+
   test('records active generation at streaming max as partial, not success', async () => {
     const { context, partialMessages } = createSandbox();
     context.chrome.scripting.executeScript = jest.fn(() => Promise.resolve([
@@ -518,6 +611,86 @@ describe('early terminal success guard', () => {
             status: 'PARTIAL',
             completionReason: 'streaming_incomplete'
           })
+        })
+      ])
+    );
+  });
+
+  test('treats Round2 answer evidence as confirmation signal', () => {
+    const { context } = createSandbox();
+    const entry = context.jobState.llms.GPT;
+    entry.pendingFinalAnswer = 'Recovered answer evidence. '.repeat(8);
+
+    expect(context.hasRound2SubmitOrAnswerEvidence(entry)).toBe(true);
+    expect(context.getRound2SubmitConfirmationState('GPT', 'dispatch-gpt')).toEqual(
+      expect.objectContaining({
+        ok: true,
+        reason: 'answer_evidence'
+      })
+    );
+  });
+
+  test('keeps delayed Round2 dispatch pending instead of hard not-confirmed', async () => {
+    const { context } = createSandbox();
+    const entry = context.jobState.llms.GPT;
+    entry.messageSent = true;
+    entry.awaitingSubmitConfirmation = true;
+    entry.lastDispatchMeta = { dispatchId: 'dispatch-gpt' };
+
+    const immediate = context.getRound2SubmitConfirmationState('GPT', 'dispatch-gpt');
+    expect(immediate).toEqual(
+      expect.objectContaining({
+        ok: false,
+        reason: 'dispatch_pending'
+      })
+    );
+
+    const waited = await context.waitForRound2SubmitConfirmation('GPT', 'dispatch-gpt', 1);
+    expect(waited).toEqual(
+      expect.objectContaining({
+        ok: false,
+        reason: 'dispatch_pending'
+      })
+    );
+    expect(context.isRound2DelayedConfirmationState(waited)).toBe(true);
+  });
+
+  test('rejects snapshot cache answer when current dispatch is unconfirmed', () => {
+    const { context, logs, stateUpdates } = createSandbox();
+    const entry = context.jobState.llms.GPT;
+    entry.promptSubmittedAt = null;
+    entry.submitSource = null;
+    entry.messageSent = true;
+    entry.awaitingSubmitConfirmation = true;
+
+    const accepted = context.acceptLateCollectResult('GPT', {
+      ok: true,
+      status: 'partial_from_snapshot',
+      source: 'snapshot_cache',
+      text: 'Previous answer from an older Gemini/GPT tab. '.repeat(8),
+      html: '<p>previous</p>'
+    }, {
+      dispatchId: 'dispatch-gpt',
+      source: 'manual_ping_late_collect',
+      responseMeta: {
+        source: 'snapshot_cache',
+        completionReason: 'soft_timeout',
+        partial: true
+      }
+    });
+
+    expect(accepted).toBe(false);
+    expect(entry.finalStatusRecorded).not.toBe(true);
+    expect(stateUpdates).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ llmName: 'GPT', status: 'PARTIAL' })
+      ])
+    );
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          llmName: 'GPT',
+          entry: expect.objectContaining({ label: 'Late collect stale answer rejected' })
         })
       ])
     );

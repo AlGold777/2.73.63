@@ -294,11 +294,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     //-- 2.1. Логика для переключения и сохранения состояния Pro-режима --//
     const proLink = document.getElementById('pro-header');
     const proToggleWrapper = document.querySelector('.pro-toggle-wrapper');
-    const promptProToggleBtn = document.getElementById('pro-stream-toggle-btn');
     const justiceToggleBtn = document.getElementById('justice-toggle-btn');
     const proHeaderActionBlock = document.querySelector('.pro-toggle-bar .llm-action-block');
-    const proModeStorageKey = 'llmComparatorProModeActive';
     const judgeControlsVisibleStorageKey = 'llmComparatorJudgeControlsVisible';
+    const mainPromptContainer = document.querySelector('.prompt-container.prompt-sandwich.debate-composer')
+        || document.querySelector('.prompt-container.prompt-sandwich');
 
     const applyJudgeControlsVisibility = (visible) => {
         const isVisible = Boolean(visible);
@@ -311,33 +311,28 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     };
 
-    //-- 2.2. Улучшенная логика переключения Pro: помимо pro-features-hidden, ставим явный флаг pro-active --//
-    const updateProModeUI = (isActive) => {
-    // Сохраняем существующую логику скрытия/показа секций (обратная семантика — ok)
-    document.body.classList.toggle('pro-features-hidden', !isActive);
+    const syncProStreamVisibility = () => {
+        const hasSelectedLLMs = Boolean(document.querySelector('.llm-button.active'));
+        const hasPromptBeenSubmitted = document.body.classList.contains('prompt-submitted');
+        const shouldShowPreview = hasSelectedLLMs && !hasPromptBeenSubmitted;
+        const shouldShowStream = hasSelectedLLMs;
 
-    // Добавляем явный флаг активности Pro — удобнее для CSS и будущих селекторов
-    document.body.classList.toggle('pro-active', isActive);
-    if (proToggleWrapper) {
-        proToggleWrapper.hidden = !isActive;
-    }
-    if (promptProToggleBtn) {
-        promptProToggleBtn.setAttribute('aria-pressed', String(isActive));
-    }
-    const mainPromptContainer = document.querySelector('.prompt-container.prompt-sandwich.debate-composer')
-        || document.querySelector('.prompt-container.prompt-sandwich');
-    if (mainPromptContainer) {
-        mainPromptContainer.classList.toggle('has-debate-feed', isActive);
-    }
+        document.body.classList.toggle('pro-features-hidden', !shouldShowStream);
+        document.body.classList.toggle('llm-stream-preview-open', shouldShowPreview);
+        document.body.classList.toggle('pro-active', hasPromptBeenSubmitted && hasSelectedLLMs);
 
-    // Обновляем атрибут состояния кнопки (доступность)
+        if (proToggleWrapper) {
+            proToggleWrapper.hidden = !shouldShowStream;
+        }
+        if (mainPromptContainer) {
+            mainPromptContainer.classList.toggle('has-debate-feed', hasPromptBeenSubmitted);
+        }
         if (proLink) {
-            proLink.setAttribute('aria-pressed', String(isActive));
+            proLink.setAttribute('aria-pressed', String(hasPromptBeenSubmitted && hasSelectedLLMs));
         }
     };
 
-    let isProModeActive = false;
-    updateProModeUI(isProModeActive);
+    syncProStreamVisibility();
 
     try {
         const judgeControlsData = await new Promise(resolve => {
@@ -361,27 +356,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
-    if (proLink) {
-        proLink.addEventListener('click', (event) => {
-            const toggleTarget = event.target?.closest?.('.toggle-icon-pro, .modifiers-toggle-label-pro');
-            if (!toggleTarget) {
-                return;
-            }
-            event.preventDefault();
-            isProModeActive = !isProModeActive;
-            chrome.storage.local.set({ [proModeStorageKey]: isProModeActive });
-            updateProModeUI(isProModeActive);
-        });
-    }
-
-    if (promptProToggleBtn) {
-        promptProToggleBtn.addEventListener('click', (event) => {
-            event.preventDefault();
-            isProModeActive = !isProModeActive;
-            chrome.storage.local.set({ [proModeStorageKey]: isProModeActive });
-            updateProModeUI(isProModeActive);
-        });
-    }
 //-- Конец блока 2.1 --//
     const deriveOutputLabel = (element) => {
         const panelTitle = element.closest('.llm-panel')?.querySelector('.llm-title');
@@ -1536,11 +1510,15 @@ document.addEventListener('click', (event) => {
         const existing = stored[crossViewUiStateKey];
         if (!existing || typeof existing !== 'object') return;
         const nextState = normalizeCrossViewUiState(existing);
+        if (nextState.shared && typeof nextState.shared === 'object') {
+            delete nextState.shared.outputs;
+        }
         ['main', 'pipeline'].forEach((viewKey) => {
             const viewState = nextState.views?.[viewKey];
             if (!viewState || typeof viewState !== 'object') return;
             delete viewState.promptText;
             delete viewState.modelButtonIds;
+            delete viewState.modifiers;
             if (viewState.bodyFlags && typeof viewState.bodyFlags === 'object') {
                 delete viewState.bodyFlags.promptSubmitted;
                 if (!Object.keys(viewState.bodyFlags).length) {
@@ -1748,6 +1726,7 @@ document.addEventListener('click', (event) => {
     const leftSidebarCloseBtn = document.getElementById('left-sidebar-close');
     const leftSidebarResizer = document.getElementById('left-sidebar-resizer');
     const rightSidebarToggleBtn = document.getElementById('right-sidebar-toggle');
+    const telemetryToggleBtn = document.getElementById('telemetry-toggle-btn');
     const rightSidebar = document.getElementById('pipeline-sidebar');
     const promptSaveBtn = document.getElementById('prompt-save-btn');
     const saveSessionBtn = document.getElementById('save-session-btn');
@@ -1883,6 +1862,10 @@ document.addEventListener('click', (event) => {
         if (!runState?.active) return true;
         const currentView = getCurrentViewKey();
         if (runState.sourceView && runState.sourceView === currentView) return true;
+        if (runState.staleActiveRun) {
+            showNotification('Предыдущий зависший запрос больше не блокирует запуск.', 'warn');
+            return true;
+        }
         const sourceLabel = runState.sourceView === 'pipeline' ? 'Pipeline' : 'главной странице';
         showNotification(`Дождитесь завершения запроса на ${sourceLabel}.`, 'warn');
         return false;
@@ -9563,6 +9546,8 @@ document.addEventListener('click', (event) => {
 
     if (modifiersSection && toggleModifiersBtn && modifiersContainer) {
         let modifiersOpen = modifiersSection.classList.contains('is-open');
+        let modifiersToggleClickTimer = null;
+        const modifiersToggleClickDelayMs = 220;
 
         const applyModifiersState = () => {
             modifiersSection.classList.toggle('is-open', modifiersOpen);
@@ -9592,12 +9577,6 @@ document.addEventListener('click', (event) => {
         };
 
         applyModifiersState();
-
-        toggleModifiersBtn.addEventListener('click', (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            setModifiersOpen(!modifiersOpen);
-        });
 
         if (modifiersHeader) {
             modifiersHeader.addEventListener('click', (event) => {
@@ -9629,19 +9608,33 @@ document.addEventListener('click', (event) => {
             updateModifierGroupHighlights();
         };
 
-        if (expandCollapseIcon) {
-            expandCollapseIcon.addEventListener('click', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                if (!modifiersOpen) {
-                    setModifiersOpen(true);
-                }
-                const cards = document.querySelectorAll('.modifier-group-card');
-                const hasCollapsed = Array.from(cards).some(card => !card.classList.contains('is-expanded'));
-                setAllModifierGroupsState(hasCollapsed);
-                updateModifierGroupHighlights();
-            });
-        }
+        toggleModifiersBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (modifiersToggleClickTimer) {
+                window.clearTimeout(modifiersToggleClickTimer);
+            }
+            modifiersToggleClickTimer = window.setTimeout(() => {
+                modifiersToggleClickTimer = null;
+                setModifiersOpen(!modifiersOpen);
+            }, modifiersToggleClickDelayMs);
+        });
+
+        toggleModifiersBtn.addEventListener('dblclick', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (modifiersToggleClickTimer) {
+                window.clearTimeout(modifiersToggleClickTimer);
+                modifiersToggleClickTimer = null;
+            }
+            if (!modifiersOpen) {
+                setModifiersOpen(true);
+            }
+            const cards = document.querySelectorAll('.modifier-group-card');
+            const hasCollapsed = Array.from(cards).some(card => !card.classList.contains('is-expanded'));
+            setAllModifierGroupsState(hasCollapsed);
+            updateModifierGroupHighlights();
+        });
     }
     
     const makeLocalDiagEntry = (label, details = '', level = 'info', type = 'PING') => ({
@@ -11282,6 +11275,7 @@ document.addEventListener('click', (event) => {
     document.addEventListener('llm-selection-change', () => {
         syncModeratorSelectors();
         applyDebateSessionFilter();
+        syncProStreamVisibility();
     });
     
     // --- "SELECT ALL" CHECKBOX LOGIC ---
@@ -14955,12 +14949,6 @@ function checkCompareButtonState() {
                 }
             }
 
-            if (!isProModeActive) {
-                isProModeActive = true;
-                chrome.storage.local.set({ [proModeStorageKey]: true });
-                updateProModeUI(true);
-            }
-
             let response = null;
             try {
                 response = await sendToBackground({
@@ -14987,6 +14975,8 @@ function checkCompareButtonState() {
             if (!response || response.status !== 'process_started') {
                 showNotification(`Process start: unexpected background response (${response?.status || 'no_response'})`, 'warn');
             }
+
+            syncProStreamVisibility();
 
             if (forceNewTabs && newPagesCheckbox) {
                 newPagesCheckbox.checked = false;
@@ -15262,6 +15252,7 @@ if (smartCompareButton) {
             syncModeratorSelectors();
             syncModeratorMiniPrompts();
             persistCrossViewUiState();
+            syncProStreamVisibility();
         });
         button.addEventListener('dblclick', (event) => {
             event.preventDefault();
@@ -15269,11 +15260,13 @@ if (smartCompareButton) {
             syncModeratorSelectors();
             syncModeratorMiniPrompts();
             persistCrossViewUiState();
+            syncProStreamVisibility();
         });
     });
     checkCompareButtonState();
     syncModeratorSelectors();
     syncModeratorMiniPrompts();
+    syncProStreamVisibility();
     syncModeratorTime();
     renderDebateSessionTabs();
     applyDebateSessionFilter();
@@ -16279,6 +16272,16 @@ function exportSingleTemplate(templateName, sourceData = null) {
             modalManager.show(apiKeysModal);
             syncDevtoolsPanelHeight();
         };
+
+        if (telemetryToggleBtn) {
+            telemetryToggleBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                openDevtoolsModal().catch((err) => {
+                    console.error('[results] openDevtoolsModal error', err);
+                });
+            });
+        }
 
         if (openApiKeysBtn) {
             openApiKeysBtn.addEventListener('click', () => openDevtoolsModal().catch((err) => {
