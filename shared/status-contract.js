@@ -14,7 +14,10 @@
     'API_FAILED',
     'NO_SEND',
     'EXTRACT_FAILED',
-    'STREAM_TIMEOUT'
+    'STREAM_TIMEOUT',
+    'EXTERNAL_LLM_FAILURE',
+    'USER_ACTION_REQUIRED',
+    'UNCERTAIN'
   ]);
   const NON_TERMINAL_FAILURE_STATUSES = Object.freeze(['RECOVERABLE_ERROR']);
   const TERMINAL_STATUSES = Object.freeze([
@@ -36,6 +39,9 @@
     CIRCUIT_OPEN: 2,
     API_FAILED: 2,
     EXTRACT_FAILED: 2,
+    EXTERNAL_LLM_FAILURE: 2,
+    USER_ACTION_REQUIRED: 2,
+    UNCERTAIN: 2,
     NO_SEND: 1
   });
 
@@ -135,6 +141,8 @@
     const answerState = (() => {
       if (['SUCCESS', 'COMPLETE', 'COPY_SUCCESS', 'DONE'].includes(uiStatus)) return 'complete';
       if (['PARTIAL', 'STREAM_TIMEOUT_HIDDEN'].includes(uiStatus)) return 'partial';
+      if (uiStatus === 'USER_ACTION_REQUIRED') return 'action_required';
+      if (uiStatus === 'UNCERTAIN') return 'unknown';
       if (isFailureStatus(uiStatus)) return 'failed';
       return entry?.answer ? 'partial' : 'none';
     })();
@@ -153,6 +161,8 @@
     const state = deriveStatusContract(entry);
     const uiStatus = normalizeStatus(state.uiStatus || entry?.status || 'UNKNOWN');
     const phase = (() => {
+      if (uiStatus === 'USER_ACTION_REQUIRED') return 'action_required';
+      if (uiStatus === 'UNCERTAIN') return 'unknown';
       if (isFailureStatus(uiStatus)) return 'error';
       if (state.answerState === 'partial') return 'partial';
       if (['PARTIAL', 'STREAM_TIMEOUT_HIDDEN', 'STREAM_TIMEOUT'].includes(uiStatus)) return 'partial';
@@ -163,7 +173,9 @@
       pending: 'Pending',
       success: 'Success',
       partial: 'Partial',
-      error: 'Error'
+      error: 'Error',
+      action_required: 'Action required',
+      unknown: 'Uncertain'
     };
     return {
       phase,

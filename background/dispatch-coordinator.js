@@ -776,7 +776,9 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
     const intentDecision = self.RecoveryIntent.authorize(entry, {
       intent: recoveryIntent,
       reason,
-      minChars: self.DOM_SNAPSHOT_RECOVERY_MIN_CHARS || 120,
+      minChars: self.AnswerLengthPolicy?.getPolicy?.(llmName)?.minTerminalChars
+        || self.DOM_SNAPSHOT_RECOVERY_MIN_CHARS
+        || 80,
       explicitUserOverride: options.explicitUserOverride === true,
       allowAfterEvidence: options.allowAfterEvidence === true
     });
@@ -1176,6 +1178,26 @@ async function dispatchPromptToTab(llmName, tabId, prompt, attachments = [], rea
         });
         if (pageReadyState.blockerPolicy?.retryable !== false) {
           scheduleDispatchRetry(entry, llmName, { type: 'page_not_ready', reason: pageReadyState.reason });
+        } else if (typeof handleLLMResponse === 'function') {
+          handleLLMResponse(
+            llmName,
+            `Error: ${pageReadyState.reason || 'user_action_required'}`,
+            {
+              type: 'user_action_required',
+              message: pageReadyState.reason || 'User action required before dispatch'
+            },
+            {
+              dispatchId,
+              sessionId,
+              runSessionId: sessionId,
+              responseMeta: {
+                failureClass: 'page_readiness',
+                blockerPolicy: pageReadyState.blockerPolicy || null,
+                source: 'page_ready_blocked'
+              }
+            },
+            ''
+          );
         }
         if (machine) {
           machine.error({ error: pageReadyState.reason || 'page_not_ready', code: 'PAGE_NOT_READY' });

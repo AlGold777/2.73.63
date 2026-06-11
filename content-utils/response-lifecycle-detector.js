@@ -3,6 +3,7 @@
 
   const VERSION = '1.0.0';
   const BODY_MUTATION_THROTTLE_MS = 500;
+  const ANSWER_GENERATING_TELEMETRY_THROTTLE_MS = 15000;
   const MIN_COMPLETE_CONFIDENCE = 0.75;
   const LIFECYCLE_READINESS_RESOLVER_TIMEOUT_MS = 800;
   const RESPONSE_LIFECYCLE_DEFAULTS = {
@@ -569,15 +570,25 @@
       if (completionSignals.sendButtonReady) confidence += 0.05;
       tracker.state = stability.stable && (indicators.hasLoadingIndicator || indicators.hasStopButton) ? 'GENERATING' : (stability.stable ? 'STABLE' : 'ANSWER_STARTED');
       if (stability.stable && (indicators.hasLoadingIndicator || indicators.hasStopButton)) {
-        emitLifecycleTelemetry('ANSWER_GENERATING', {
-          modelName,
-          state: 'GENERATING',
-          textLength: snapshot.textLength,
-          elapsedMs: Date.now() - tracker.promptSubmittedAt,
-          mutationCount: tracker.mutationCount,
-          hasStopButton: indicators.hasStopButton,
-          hasLoadingIndicator: indicators.hasLoadingIndicator
-        });
+        // Throttle: a stuck busy indicator over stable text used to emit this on every
+        // poll tick (~50 identical events for DeepSeek in run 1781157526316), flooding
+        // the diagnostics buffer and evicting terminal events before export.
+        const lastGenerating = tracker.lastGeneratingTelemetry || null;
+        const generatingChanged = !lastGenerating
+          || lastGenerating.textLength !== snapshot.textLength
+          || (Date.now() - lastGenerating.ts) >= ANSWER_GENERATING_TELEMETRY_THROTTLE_MS;
+        if (generatingChanged) {
+          tracker.lastGeneratingTelemetry = { textLength: snapshot.textLength, ts: Date.now() };
+          emitLifecycleTelemetry('ANSWER_GENERATING', {
+            modelName,
+            state: 'GENERATING',
+            textLength: snapshot.textLength,
+            elapsedMs: Date.now() - tracker.promptSubmittedAt,
+            mutationCount: tracker.mutationCount,
+            hasStopButton: indicators.hasStopButton,
+            hasLoadingIndicator: indicators.hasLoadingIndicator
+          });
+        }
       } else if (stability.stable) {
         emitLifecycleTelemetry('ANSWER_TEXT_STABLE', {
           modelName,

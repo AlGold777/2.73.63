@@ -329,8 +329,8 @@ function updateModelState(llmName, status, data = {}) {
   }
 
   const severity = (() => {
-    if (['CRITICAL_ERROR', 'API_FAILED', 'NO_SEND', 'EXTRACT_FAILED', 'STREAM_TIMEOUT'].includes(normalizedStatus)) return 'error';
-    if (['RECOVERABLE_ERROR', 'ERROR', 'UNRESPONSIVE', 'CIRCUIT_OPEN', 'PARTIAL', 'STREAM_TIMEOUT_HIDDEN'].includes(normalizedStatus)) return 'warning';
+    if (['CRITICAL_ERROR', 'API_FAILED', 'NO_SEND', 'EXTRACT_FAILED', 'STREAM_TIMEOUT', 'EXTERNAL_LLM_FAILURE', 'USER_ACTION_REQUIRED'].includes(normalizedStatus)) return 'error';
+    if (['RECOVERABLE_ERROR', 'ERROR', 'UNRESPONSIVE', 'CIRCUIT_OPEN', 'PARTIAL', 'STREAM_TIMEOUT_HIDDEN', 'UNCERTAIN'].includes(normalizedStatus)) return 'warning';
     return 'info';
   })();
 

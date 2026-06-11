@@ -1695,6 +1695,9 @@ document.addEventListener('click', (event) => {
     });
     const autoCheckbox = document.getElementById('auto-checkbox');
     const debateAutoPauseBtn = document.getElementById('debate-auto-pause-btn');
+    const debateMaxTurnsInput = document.getElementById('debate-max-turns-input');
+    const debateRunPolicySelect = document.getElementById('debate-run-policy-select');
+    let autoMode = autoCheckbox ? autoCheckbox.checked : false;
     const prefixToggleLabel = document.querySelector('.modifiers-toggle-label[data-mod-type="prefix"]');
     const suffixToggleLabel = document.querySelector('.modifiers-toggle-label[data-mod-type="suffix"]');
     const proSection = document.getElementById('pro-section');
@@ -2719,9 +2722,8 @@ document.addEventListener('click', (event) => {
         const pipelineExportBtn = document.getElementById('pipeline-export-btn');
         const pipelineImportBtn = document.getElementById('pipeline-import-btn');
         const pipelineRunBtn = document.getElementById('pipeline-run-btn');
-        const debateStartBtn = document.getElementById('debate-start-btn');
+        const debateRunToggleBtn = document.getElementById('debate-run-toggle-btn');
         const debateStepBtn = document.getElementById('debate-step-btn');
-        const debatePauseBtn = document.getElementById('debate-pause-btn');
         const pipelineCloseBtn = document.getElementById('pipeline-close-btn');
         const pipelineItems = document.getElementById('pipelineItems');
         const pipelineName = document.getElementById('currentPipelineName');
@@ -3322,15 +3324,72 @@ document.addEventListener('click', (event) => {
         let debateApprovalResolver = null;
         let debateApprovalRejecter = null;
         let debateApprovalCleanup = null;
+        const getDebateMaxTurns = () => {
+            const value = Number(debateMaxTurnsInput?.value || debateRunState.maxTurns || 5);
+            return Number.isFinite(value) ? Math.max(1, Math.min(50, Math.round(value))) : 5;
+        };
+        const getDebateRunPolicy = () => {
+            const value = String(debateRunPolicySelect?.value || (autoCheckbox?.checked ? 'auto' : 'manual')).trim();
+            return value === 'auto' ? 'auto' : 'manual';
+        };
+        const isDebateAutoPolicy = () => getDebateRunPolicy() === 'auto';
+        const syncDebateAutoCompatibilityState = () => {
+            const isAuto = isDebateAutoPolicy();
+            if (autoCheckbox && autoCheckbox.checked !== isAuto) {
+                autoCheckbox.checked = isAuto;
+            }
+            if (debateRunPolicySelect && debateRunPolicySelect.value !== (isAuto ? 'auto' : 'manual')) {
+                debateRunPolicySelect.value = isAuto ? 'auto' : 'manual';
+            }
+            autoMode = isAuto;
+            return isAuto;
+        };
+        const setDebatePausedState = (paused, reason = '') => {
+            debatePaused = !!paused;
+            debateRunState.status = debatePaused ? 'paused' : (pipelineRunActive ? 'running' : 'idle');
+            debateRunState.pauseReason = debatePaused ? reason : '';
+            sendToBackground({
+                type: debatePaused ? 'PAUSE_DEBATE' : 'RESUME_DEBATE',
+                reason,
+                sessionId: debateTabsState?.activeSessionId || '1'
+            }).catch((err) => {
+                console.warn('[RESULTS] Debate background pause/resume sync failed', err);
+            });
+            if (!debatePaused && debateApprovalResolver) {
+                resolveDebateApproval();
+            } else if (!debatePaused && typeof debateApprovalBridge.resolve === 'function') {
+                debateApprovalBridge.resolve();
+            } else {
+                updateDebateButtonsUi();
+            }
+        };
         const updateDebateButtonsUi = () => {
-            if (debatePauseBtn) {
-                debatePauseBtn.textContent = pipelineRunActive ? 'Cancel' : (debatePaused ? 'Resume' : 'Pause');
+            const waiting = typeof debateApprovalResolver === 'function';
+            if (debateRunToggleBtn) {
+                if (debatePaused) {
+                    debateRunToggleBtn.textContent = '▶';
+                    debateRunToggleBtn.title = 'Resume debate';
+                    debateRunToggleBtn.setAttribute('aria-label', 'Resume debate');
+                } else if (pipelineRunActive || waiting) {
+                    debateRunToggleBtn.textContent = 'Ⅱ';
+                    debateRunToggleBtn.title = 'Pause after current turn';
+                    debateRunToggleBtn.setAttribute('aria-label', 'Pause after current turn');
+                } else {
+                    debateRunToggleBtn.textContent = '▶';
+                    debateRunToggleBtn.title = 'Run debate';
+                    debateRunToggleBtn.setAttribute('aria-label', 'Run debate');
+                }
+                debateRunToggleBtn.disabled = false;
+                debateRunToggleBtn.classList.toggle('is-active', debatePaused);
             }
             if (debateStepBtn) {
-                const waiting = typeof debateApprovalResolver === 'function';
                 debateStepBtn.disabled = !waiting;
                 debateStepBtn.textContent = waiting ? 'Approve' : 'Step';
             }
+            if (debateMaxTurnsInput) {
+                debateMaxTurnsInput.value = String(getDebateMaxTurns());
+            }
+            syncDebateAutoCompatibilityState();
             syncDebateAutoPauseButton();
         };
         const resolveDebateApproval = () => {
@@ -3393,8 +3452,17 @@ document.addEventListener('click', (event) => {
         return extra.length ? `\n\n${extra.join('\n')}` : '';
     };
         const waitForDebateApproval = async ({ signal, timeoutMs = 0 } = {}) => {
-            const isAuto = !!autoCheckbox?.checked;
-            if (isAuto && !debatePaused) return true;
+            const isAuto = isDebateAutoPolicy();
+            if (isAuto && !debatePaused) {
+                debateRunState.turnCount = Number(debateRunState.turnCount || 0) + 1;
+                debateRunState.maxTurns = getDebateMaxTurns();
+                if (debateRunState.turnCount <= debateRunState.maxTurns) {
+                    updateDebateButtonsUi();
+                    return true;
+                }
+                setDebatePausedState(true, 'max_turns_reached');
+                showNotification(`Debate paused after ${debateRunState.maxTurns} auto turns.`, 'warn');
+            }
             if (debateApprovalResolver) return true;
             await new Promise((resolve, reject) => {
                 let timeoutId = null;
@@ -3725,6 +3793,11 @@ document.addEventListener('click', (event) => {
             }
 
             pipelineRunActive = true;
+            debatePaused = false;
+            debateRunState.status = 'running';
+            debateRunState.turnCount = 0;
+            debateRunState.maxTurns = getDebateMaxTurns();
+            debateRunState.pauseReason = '';
             activePipelineAbortController = new AbortController();
             activePipelineRunContext = {
                 pipelineRunId: makePipelineRunId(),
@@ -3759,6 +3832,26 @@ document.addEventListener('click', (event) => {
                 const orderedPromptsSnapshot = clonePipelineConfig(getOrderedJudgePrompts()) || [];
                 const moderatorOnly = String(debateReceiverSelect?.value || '').trim() === '__none__';
                 if (moderatorOnly) {
+                    await sendToBackground({
+                        type: 'START_DEBATE_RUN',
+                        sessionId: activePipelineRunContext.sessionId,
+                        title: `Debate ${activePipelineRunContext.sessionId}`,
+                        prompt: moderatorEntryText,
+                        targets: [],
+                        participants: getSelectedLLMs(),
+                        settings: {
+                            runPolicy: getDebateRunPolicy(),
+                            maxTurns: debateRunState.maxTurns
+                        },
+                        command: {
+                            action: debateActionSelect?.value || '',
+                            targets: [],
+                            instruction: moderatorEntryText,
+                            maxTokens: debateLengthSelect?.value || '',
+                            roleOverride: debateRoleSelect?.value || '',
+                            mode: getDebateRunPolicy()
+                        }
+                    }).catch((err) => console.warn('[RESULTS] Debate background start sync failed', err));
                     appendModeratorFeedEntry(moderatorEntryText);
                     clearModeratorComposer();
                     return;
@@ -3769,6 +3862,26 @@ document.addEventListener('click', (event) => {
                     return;
                 }
                 debateFeedState.lastCommittedHashByModel = {};
+                await sendToBackground({
+                    type: 'START_DEBATE_RUN',
+                    sessionId: activePipelineRunContext.sessionId,
+                    title: `Debate ${activePipelineRunContext.sessionId}`,
+                    prompt: moderatorEntryText,
+                    targets: firstRoundState.inputModels.slice(),
+                    participants: getSelectedLLMs(),
+                    settings: {
+                        runPolicy: getDebateRunPolicy(),
+                        maxTurns: debateRunState.maxTurns
+                    },
+                    command: {
+                        action: debateActionSelect?.value || '',
+                        targets: firstRoundState.inputModels.slice(),
+                        instruction: moderatorEntryText,
+                        maxTokens: debateLengthSelect?.value || '',
+                        roleOverride: debateRoleSelect?.value || '',
+                        mode: getDebateRunPolicy()
+                    }
+                }).catch((err) => console.warn('[RESULTS] Debate background start sync failed', err));
                 appendModeratorFeedEntry(moderatorEntryText);
                 renderDebateModelCards(debateRunState.activeRole, firstRoundState.inputModels, { approvalSelectable: true });
                 clearModeratorComposer();
@@ -3967,6 +4080,9 @@ document.addEventListener('click', (event) => {
                 }
                 cleanupDebateApprovalWaiter();
                 debateRunState.activeRole = '';
+                debateRunState.status = 'idle';
+                debateRunState.pauseReason = '';
+                debatePaused = false;
                 pipelineRunActive = false;
                 activePipelineAbortController = null;
                 activePipelineRunContext = null;
@@ -3997,6 +4113,13 @@ document.addEventListener('click', (event) => {
                     console.warn('[RESULTS] Pipeline cancel background cleanup failed', fallbackErr || err);
                 }
             }
+            sendToBackground({
+                type: 'CANCEL_DEBATE',
+                reason: 'pipeline_cancel',
+                sessionId: activePipelineRunContext?.sessionId || debateTabsState?.activeSessionId || '1'
+            }).catch((err) => {
+                console.warn('[RESULTS] Debate background cancel sync failed', err);
+            });
             return true;
         };
         window.runPipeline = runPipeline;
@@ -4021,6 +4144,13 @@ document.addEventListener('click', (event) => {
                 syncDebateCardOutputLayout,
                 setDebateCardExpanded,
                 safePipelineMarkdownToHtml,
+                getDebateRunPolicy,
+                collectDebateArtifact,
+                collectDebateMarkdown,
+                hydrateDebateTranscriptFromArtifact,
+                renderDebateTranscriptSession,
+                loadDebateTranscriptFromStorage,
+                getDebateTranscriptStore: () => debateTranscriptStore,
                 getApprovalWaiting: () => typeof debateApprovalResolver === 'function'
             };
         }
@@ -4632,18 +4762,47 @@ document.addEventListener('click', (event) => {
         pipelineExportBtn?.addEventListener('click', exportPipelines);
         pipelineImportBtn?.addEventListener('click', importPipelines);
         pipelineRunBtn?.addEventListener('click', triggerPipelineRun);
-        debateStartBtn?.addEventListener('click', triggerPipelineRun);
-        debatePauseBtn?.addEventListener('click', async () => {
-            if (pipelineRunActive) {
-                await cancelPipelineRun();
+        debateRunToggleBtn?.addEventListener('click', (event) => {
+            if (debatePaused) {
+                event.preventDefault();
+                setDebatePausedState(false, 'resume_button');
                 return;
             }
-            debatePaused = !debatePaused;
-            if (!debatePaused && debateApprovalResolver) {
-                resolveDebateApproval();
-            } else {
-                updateDebateButtonsUi();
+            if (pipelineRunActive || debateApprovalResolver) {
+                event.preventDefault();
+                setDebatePausedState(true, 'pause_button');
+                return;
             }
+            triggerPipelineRun(event);
+        });
+        debateMaxTurnsInput?.addEventListener('change', () => {
+            debateRunState.maxTurns = getDebateMaxTurns();
+        updateDebateButtonsUi();
+        loadDebateTranscriptFromStorage().then((restored) => {
+            if (restored) {
+                syncModeratorSelectors();
+                applyDebateSessionFilter();
+            }
+        });
+        });
+        debateRunPolicySelect?.addEventListener('change', () => {
+            const isAuto = debateRunPolicySelect.value === 'auto';
+            if (autoCheckbox && autoCheckbox.checked !== isAuto) {
+                autoCheckbox.checked = isAuto;
+                autoCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
+            } else {
+                autoMode = isAuto;
+                if (isAuto) {
+                    approvePendingDebateCandidate();
+                    if (typeof debateApprovalBridge.resolve === 'function') {
+                        debateApprovalBridge.resolve();
+                    }
+                }
+                syncDebateAutoPauseButton();
+                if (syncAutoToggleState) syncAutoToggleState();
+            }
+            updateDebateButtonsUi();
+            console.log('[RESULTS] Debate run policy:', debateRunPolicySelect.value);
         });
         debateStepBtn?.addEventListener('click', () => {
             if (!debateApprovalResolver) {
@@ -10240,9 +10399,6 @@ document.addEventListener('click', (event) => {
         if (normalizedLabel === 'ROUND0_TAB_OPENED') {
             return { roundIndex: 0, phase: 'END' };
         }
-        if (normalizedLabel === 'MODEL_FINAL' || normalizedLabel === 'FINAL_STATUS') {
-            return { roundIndex: 4, phase: 'END' };
-        }
         const metaRound = Number(event?.meta?.round);
         let roundIndex = Number.isFinite(metaRound) ? metaRound : null;
         let phase = null;
@@ -10416,7 +10572,43 @@ document.addEventListener('click', (event) => {
         }).join('\n\n');
         return `${header}\n\n${sections}\n`;
     };
-    const buildAllLogsMarkdown = (telemetryEvents = [], sources = [], logs = {}) => {
+    const buildRunOutcomeSummaryMarkdown = (summary) => {
+        if (!summary?.success || !Array.isArray(summary.models) || !summary.models.length) {
+            return '';
+        }
+        const header = '## Run Summary (background state)';
+        const stateLine = summary.complete
+            ? '> Run state: complete (all models terminal)'
+            : '> Run state: export during active run — some models have no terminal outcome yet';
+        const rows = summary.models.map((model) => {
+            const finalStatus = model.terminal ? (model.finalStatus || 'terminal') : 'no_terminal_outcome';
+            const finalizedAt = model.finalizedAt ? new Date(model.finalizedAt).toLocaleTimeString() : '-';
+            const lengthInfo = model.suspectShortSuccess
+                ? `${model.answerLength} (suspect short)`
+                : String(model.answerLength || 0);
+            return `${model.llmName} | ${finalStatus} | ${finalizedAt} | ${lengthInfo} | ${model.answerSource || '-'} | ${model.lengthPolicyRef || '-'}`;
+        }).join('\n');
+        return `${header}\n\n${stateLine}\n\nModel | Final | Finalized at | Answer chars | Source | Length policy\n--- | --- | --- | --- | --- | ---\n${rows}\n\n`;
+    };
+    const requestRunOutcomeSummary = () => new Promise((resolve) => {
+        const runtime = (typeof chrome !== 'undefined' && chrome?.runtime) ? chrome.runtime : null;
+        if (!runtime?.sendMessage) {
+            resolve(null);
+            return;
+        }
+        try {
+            runtime.sendMessage({ type: 'GET_RUN_OUTCOME_SUMMARY' }, (resp) => {
+                if (runtime.lastError) {
+                    resolve(null);
+                    return;
+                }
+                resolve(resp || null);
+            });
+        } catch (_) {
+            resolve(null);
+        }
+    });
+    const buildAllLogsMarkdown = (telemetryEvents = [], sources = [], logs = {}, runOutcomeSummary = null) => {
         const title = 'All Logs';
         const version = chrome?.runtime?.getManifest?.()?.version || 'unknown';
         const exportedAt = new Date().toLocaleString();
@@ -10431,13 +10623,14 @@ document.addEventListener('click', (event) => {
         );
         const telemetrySection = buildTelemetrySectionMarkdown(scopedTelemetryEvents);
         const telemetryRoundsSection = buildTelemetryRoundsMarkdown(scopedTelemetryEvents);
+        const runSummarySection = buildRunOutcomeSummaryMarkdown(runOutcomeSummary);
         const diagnosticsSection = buildDiagnosticsSectionMarkdown(scopedDiagnostics.sources, scopedDiagnostics.logs);
         const runLine = runScope.runSessionId
             ? `Run session: ${runScope.runSessionId} (${runScope.strict ? 'current' : 'fallback'})`
             : (runScope.scopeMode === 'cycle'
                 ? 'Run session: n/a (cycle fallback)'
                 : 'Run session: n/a (no active run)');
-        return `# ${title}\nVersion: ${version}\nExported: ${exportedAt}\n${runLine}\n\n${telemetrySection}${telemetryRoundsSection}${diagnosticsSection}`;
+        return `# ${title}\nVersion: ${version}\nExported: ${exportedAt}\n${runLine}\n\n${telemetrySection}${telemetryRoundsSection}${runSummarySection}${diagnosticsSection}`;
     };
 
     const cloneLogEntry = (entry) => {
@@ -10773,7 +10966,8 @@ document.addEventListener('click', (event) => {
             flashButtonFeedback(btn, 'warn');
             return;
         }
-        const markdownContent = buildAllLogsMarkdown(telemetryEvents, sources, llmLogs);
+        const runOutcomeSummary = await requestRunOutcomeSummary();
+        const markdownContent = buildAllLogsMarkdown(telemetryEvents, sources, llmLogs, runOutcomeSummary);
         downloadDiagnosticsMarkdown('All Logs', markdownContent, btn);
     });
 
@@ -10937,8 +11131,6 @@ document.addEventListener('click', (event) => {
         });
     }
     
-    let autoMode = autoCheckbox ? autoCheckbox.checked : false;
-
     const newPagesStorageKey = 'llmComparatorNewPages';
     const storeNewPagesState = (checked) => {
         chrome.storage.local.set({ [newPagesStorageKey]: checked });
@@ -11479,13 +11671,16 @@ document.addEventListener('click', (event) => {
         // Terminal / outcome states
         'SUCCESS': 'success',
         'COMPLETE': 'success',
-        'PARTIAL': 'success',
-        'STREAM_TIMEOUT_HIDDEN': 'success',
+        'PARTIAL': 'partial',
+        'STREAM_TIMEOUT_HIDDEN': 'partial',
         'RECOVERABLE_ERROR': 'error',
         'CRITICAL_ERROR': 'error',
         'NO_SEND': 'error',
         'EXTRACT_FAILED': 'error',
         'STREAM_TIMEOUT': 'error',
+        'EXTERNAL_LLM_FAILURE': 'error',
+        'USER_ACTION_REQUIRED': 'action-required',
+        'UNCERTAIN': 'uncertain',
 
         // Backwards-compatible aliases (existing code might still emit these)
         'GENERATING': 'generating',
@@ -11556,6 +11751,12 @@ document.addEventListener('click', (event) => {
                 return 'Extract failed';
             case 'STREAM_TIMEOUT':
                 return 'Stream timeout';
+            case 'EXTERNAL_LLM_FAILURE':
+                return 'External LLM failure';
+            case 'USER_ACTION_REQUIRED':
+                return 'User action required';
+            case 'UNCERTAIN':
+                return 'Uncertain state';
             // legacy/alias fallbacks
             case 'GENERATING':
                 return 'Prompt --> LLM';
@@ -11787,6 +11988,9 @@ document.addEventListener('click', (event) => {
     if (autoCheckbox) {
         autoCheckbox.addEventListener('change', () => {
             autoMode = autoCheckbox.checked;
+            if (debateRunPolicySelect) {
+                debateRunPolicySelect.value = autoMode ? 'auto' : 'manual';
+            }
             if (autoMode) {
                 approvePendingDebateCandidate();
                     if (typeof debateApprovalBridge.resolve === 'function') {
@@ -13665,7 +13869,11 @@ function checkCompareButtonState() {
         sessions: new Map([['1', { id: '1', title: '1', favoriteOnly: false, cards: [], messages: [] }]])
     };
     const debateRunState = {
-        activeRole: ''
+        activeRole: '',
+        status: 'idle',
+        turnCount: 0,
+        maxTurns: 5,
+        pauseReason: ''
     };
     const debateSelectionState = { range: null, target: null };
     const debateDirectionState = { mode: 'forward' };
@@ -13680,8 +13888,100 @@ function checkCompareButtonState() {
     };
     const debateMessageStore = new Map();
     const debateDomIndex = new Map();
+    const DebateEngineRuntime = window.DebateEngine || null;
+    const debateTranscriptStore = DebateEngineRuntime?.createStore?.({
+        session: {
+            sessionId: '1',
+            title: '1',
+            status: 'idle',
+            settings: {
+                runPolicy: debateRunPolicySelect?.value || 'manual',
+                maxTurns: debateRunState.maxTurns
+            }
+        }
+    }) || null;
+    let debateTranscriptPersistTimer = null;
     function makeDebateEntryId(prefix = 'entry') {
         return `${prefix}-${Date.now()}-${debateFeedState.nextId++}`;
+    }
+    function getDebateTranscriptSession(sessionId = debateTabsState.activeSessionId) {
+        const id = String(sessionId || '1');
+        if (!debateTranscriptStore || !DebateEngineRuntime) return null;
+        let session = debateTranscriptStore.getSession(id);
+        if (!session) {
+            session = debateTranscriptStore.upsertSession({
+                sessionId: id,
+                title: id,
+                status: 'idle',
+                settings: {
+                    runPolicy: debateRunPolicySelect?.value || 'manual',
+                    maxTurns: debateRunState.maxTurns
+                }
+            });
+        }
+        return session;
+    }
+    function syncDebateTranscriptSettings(sessionId = debateTabsState.activeSessionId) {
+        if (!debateTranscriptStore || !DebateEngineRuntime) return null;
+        getDebateTranscriptSession(sessionId);
+        const maxTurnsValue = Number(debateMaxTurnsInput?.value || debateRunState.maxTurns || 5);
+        return debateTranscriptStore.updateSettings(String(sessionId || '1'), {
+            runPolicy: debateRunPolicySelect?.value || 'manual',
+            maxTurns: Number.isFinite(maxTurnsValue) ? Math.max(1, Math.min(50, Math.round(maxTurnsValue))) : 5
+        });
+    }
+    function scheduleDebateTranscriptPersist() {
+        if (!DebateEngineRuntime?.persistStore || !debateTranscriptStore) return;
+        if (debateTranscriptPersistTimer) clearTimeout(debateTranscriptPersistTimer);
+        debateTranscriptPersistTimer = setTimeout(() => {
+            debateTranscriptPersistTimer = null;
+            DebateEngineRuntime.persistStore(debateTranscriptStore).catch((err) => {
+                console.warn('[RESULTS] Debate transcript persist failed', err);
+            });
+        }, 250);
+    }
+    function mapDebateMessageStatusToTurnStatus(message = {}) {
+        if (message.kind === 'moderator') return 'approved';
+        if (message.status === 'printing') return 'streaming';
+        if (message.status === 'approved') return 'approved';
+        if (message.status === 'rejected') return 'rejected';
+        if (message.status === 'pending') return 'awaiting_approval';
+        return 'pending';
+    }
+    function upsertDebateTranscriptTurn(message = {}) {
+        if (!debateTranscriptStore || !DebateEngineRuntime || !message?.id) return null;
+        const sessionId = String(message.sessionId || debateTabsState.activeSessionId || '1');
+        getDebateTranscriptSession(sessionId);
+        syncDebateTranscriptSettings(sessionId);
+        const session = debateTranscriptStore.getSession(sessionId);
+        const turnId = message.turnId || `turn-${message.id}`;
+        const existing = session?.turns?.find((turn) => turn.turnId === turnId);
+        const turnPatch = {
+            turnId,
+            author: message.kind === 'moderator' ? 'Moderator' : (message.model || 'Model'),
+            authorType: message.kind === 'moderator' ? 'moderator' : 'model',
+            role: message.role || '',
+            targets: Array.isArray(message.targets) && message.targets.length
+                ? message.targets.slice()
+                : (message.kind === 'moderator'
+                    ? (debateReceiverSelect?.value && debateReceiverSelect.value !== '__none__' ? [debateReceiverSelect.value] : getDebateTargetModels())
+                    : ['Moderator']),
+            text: message.text || '',
+            html: message.html || '',
+            status: mapDebateMessageStatusToTurnStatus(message),
+            terminalStatus: message.terminalStatus || '',
+            evidence: message.evidence || null,
+            createdAt: message.createdAt ? new Date(message.createdAt).toISOString() : undefined,
+            completedAt: message.status === 'printing' ? null : (message.completedAt || new Date(message.updatedAt || Date.now()).toISOString()),
+            approvedAt: message.status === 'approved' ? (message.approvedAt || new Date(message.updatedAt || Date.now()).toISOString()) : null,
+            delivery: message.delivery || {}
+        };
+        const turn = existing
+            ? debateTranscriptStore.updateTurn(sessionId, turnId, turnPatch)
+            : debateTranscriptStore.appendTurn(sessionId, turnPatch);
+        message.turnId = turn.turnId;
+        scheduleDebateTranscriptPersist();
+        return turn;
     }
     function normalizeDebateBoolean(value) {
         return value === true || value === 'true';
@@ -13692,7 +13992,9 @@ function checkCompareButtonState() {
     }
     function syncDebateAutoPauseButton() {
         if (!debateAutoPauseBtn) return;
-        const isAuto = !!autoCheckbox?.checked;
+        const isAuto = typeof isDebateAutoPolicy === 'function'
+            ? isDebateAutoPolicy()
+            : !!autoCheckbox?.checked;
         debateAutoPauseBtn.classList.toggle('hidden', !isAuto);
         debateAutoPauseBtn.textContent = debatePaused ? '▶' : 'Ⅱ';
         debateAutoPauseBtn.title = debatePaused ? 'Resume auto debate' : 'Pause auto debate';
@@ -13810,6 +14112,7 @@ function checkCompareButtonState() {
         const prev = debateMessageStore.get(messageId) || null;
         const message = {
             id: messageId,
+            turnId: String(snapshot.turnId ?? prev?.turnId ?? card.dataset.turnId ?? ''),
             sessionId: String(snapshot.sessionId || prev?.sessionId || debateTabsState.activeSessionId || '1'),
             kind: normalizeDebateKind(snapshot.kind ?? prev?.kind, 'answer'),
             status: String(snapshot.status ?? prev?.status ?? 'pending'),
@@ -13818,13 +14121,18 @@ function checkCompareButtonState() {
             sourceCardId: String(snapshot.sourceCardId ?? prev?.sourceCardId ?? ''),
             model: String(snapshot.model ?? prev?.model ?? ''),
             role: String(snapshot.role ?? prev?.role ?? ''),
+            targets: Array.isArray(snapshot.targets) ? snapshot.targets.slice() : (Array.isArray(prev?.targets) ? prev.targets.slice() : []),
             text: String(snapshot.text ?? prev?.text ?? ''),
             html: String(snapshot.html ?? prev?.html ?? ''),
+            terminalStatus: String(snapshot.terminalStatus ?? prev?.terminalStatus ?? ''),
+            evidence: snapshot.evidence ?? prev?.evidence ?? null,
+            delivery: snapshot.delivery ?? prev?.delivery ?? {},
             timeLabel: String(snapshot.timeLabel ?? prev?.timeLabel ?? ''),
             createdAt: prev?.createdAt || Date.now(),
             order: typeof prev?.order === 'number' ? prev.order : debateFeedState.nextId++,
             updatedAt: Date.now()
         };
+        if (!message.turnId) message.turnId = `turn-${message.id}`;
         debateMessageStore.set(messageId, message);
         debateDomIndex.set(messageId, card);
         const existingIndex = session.messages.findIndex((m) => m.id === messageId);
@@ -13833,7 +14141,9 @@ function checkCompareButtonState() {
         } else {
             session.messages.push(message);
         }
+        card.dataset.turnId = message.turnId;
         syncDebateCardFromMessage(card, message);
+        upsertDebateTranscriptTurn(message);
         return message;
     }
     function patchDebateCardMessage(card, patch = {}) {
@@ -13842,6 +14152,7 @@ function checkCompareButtonState() {
         if (!message) return null;
         Object.assign(message, patch, { updatedAt: new Date().toISOString() });
         syncDebateCardFromMessage(card, message);
+        upsertDebateTranscriptTurn(message);
         return message;
     }
     function removeDebateCardMessage(card) {
@@ -13853,6 +14164,15 @@ function checkCompareButtonState() {
         debateDomIndex.delete(messageId);
         const session = ensureDebateSession(sessionId);
         session.messages = session.messages.filter((message) => message.id !== messageId);
+        if (debateTranscriptStore?.deleteTurn) {
+            try {
+                getDebateTranscriptSession(sessionId);
+                debateTranscriptStore.deleteTurn(String(sessionId || '1'), card.dataset.turnId || `turn-${messageId}`);
+                scheduleDebateTranscriptPersist();
+            } catch (err) {
+                console.warn('[RESULTS] Debate transcript delete failed', err);
+            }
+        }
     }
     function shouldShowDebateCard(card, options = {}) {
         if (!(card instanceof HTMLElement)) return false;
@@ -14083,6 +14403,155 @@ function checkCompareButtonState() {
         if (!debateModelCards || !card) return;
         normalizeDebateCardState(card);
         insertDebateCard(card);
+    }
+    function formatDebateTurnTime(turn = {}) {
+        const date = turn.completedAt || turn.approvedAt || turn.createdAt || Date.now();
+        const parsed = new Date(date);
+        const safeDate = Number.isFinite(parsed.getTime()) ? parsed : new Date();
+        return `${String(safeDate.getHours()).padStart(2, '0')}:${String(safeDate.getMinutes()).padStart(2, '0')}`;
+    }
+    function debateTurnKind(turn = {}) {
+        if (turn.authorType === 'moderator' || turn.author === 'Moderator') return 'moderator';
+        if (turn.authorType === 'system') return 'system';
+        return 'model';
+    }
+    function debateTurnStatus(turn = {}) {
+        if (turn.status === 'streaming') return 'printing';
+        if (turn.status === 'approved' || turn.authorType === 'moderator') return 'approved';
+        if (turn.status === 'rejected') return 'rejected';
+        if (turn.status === 'completed' || turn.status === 'awaiting_approval') return 'pending';
+        return turn.status || 'pending';
+    }
+    function createDebateCardFromTurn(turn = {}) {
+        if (!debateModelCards || !turn.turnId) return null;
+        const kind = debateTurnKind(turn);
+        const status = debateTurnStatus(turn);
+        const modelName = kind === 'moderator' ? 'Moderator' : (turn.author || 'Model');
+        const timeLabel = formatDebateTurnTime(turn);
+        const card = document.createElement('div');
+        card.className = `debate-model-card${kind === 'moderator' ? ' debate-moderator-card' : ''}`;
+        card.dataset.sessionId = String(turn.sessionId || debateTabsState.activeSessionId || '1');
+        card.dataset.entryId = String(turn.turnId);
+        card.dataset.messageId = String(turn.turnId);
+        card.dataset.turnId = String(turn.turnId);
+        card.dataset.llmName = modelName;
+        card.dataset.entryKind = 'response';
+        card.dataset.kind = kind === 'moderator' ? 'moderator' : 'answer';
+        card.dataset.starred = 'false';
+        card.dataset.approved = (status === 'approved' || kind === 'moderator') ? 'true' : 'false';
+        card.dataset.approvalSelectable = status === 'pending' ? 'true' : 'false';
+        card.dataset.live = status === 'printing' ? 'true' : 'false';
+        const approvalHtml = status === 'pending' && kind !== 'moderator' ? buildApprovalCheckboxHtml(true) : '';
+        card.innerHTML = `
+            <div class="debate-model-card-header">
+                <span class="debate-model-card-title">
+                    ${kind === 'moderator' ? '' : '<span class="status-indicator success"></span>'}
+                    <span class="debate-model-card-title-main">
+                        <span class="debate-model-card-name">${escapeHtml(modelName)}</span>
+                        ${kind === 'moderator' ? '' : `<span class="debate-model-card-role">${escapeHtml(turn.role || '')}</span>`}
+                        ${approvalHtml}
+                    </span>
+                </span>
+                <span class="debate-model-card-meta">
+                    <span class="debate-model-card-time">${escapeHtml(timeLabel)}</span>
+                    ${kind === 'moderator' ? '' : '<button type="button" class="ib debate-card-branch" title="Branch" aria-label="Branch"><i class="ti ti-git-branch" aria-hidden="true"></i></button>'}
+                    <button type="button" class="ib debate-card-copy" title="Copy" aria-label="Copy"><i class="ti ti-copy" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-card-export" title="Export HTML" aria-label="Export HTML"><i class="ti ti-download" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-card-delete" title="Delete" aria-label="Delete"><i class="ti ti-trash" aria-hidden="true"></i></button>
+                    <button type="button" class="ib debate-fav" title="Favorite" aria-label="Favorite"><i class="ti ti-star" aria-hidden="true"></i></button>
+                </span>
+            </div>
+            <div class="debate-model-card-output"></div>
+        `;
+        const body = card.querySelector('.debate-model-card-output');
+        const html = sanitizeInlineHtml(String(turn.html || '').trim());
+        if (html) {
+            replaceChildrenFromSanitizedHtml(body, html);
+        } else {
+            body.textContent = String(turn.text || '');
+        }
+        bindApprovalCheckbox(card);
+        ensureDebateCardMessage(card, {
+            id: String(turn.turnId),
+            turnId: String(turn.turnId),
+            kind,
+            status,
+            model: modelName,
+            role: turn.role || '',
+            targets: Array.isArray(turn.targets) ? turn.targets.slice() : [],
+            text: String(turn.text || ''),
+            html: html || escapeHtml(turn.text || ''),
+            terminalStatus: turn.terminalStatus || '',
+            evidence: turn.evidence || null,
+            timeLabel,
+            createdAt: turn.createdAt || Date.now(),
+            completedAt: turn.completedAt || null,
+            approvedAt: turn.approvedAt || null,
+            delivery: turn.delivery || {}
+        });
+        normalizeDebateCardState(card);
+        return card;
+    }
+    function renderDebateTranscriptSession(sessionId = debateTabsState.activeSessionId) {
+        if (!debateModelCards || !debateTranscriptStore) return false;
+        const session = debateTranscriptStore.getSession(String(sessionId || '1'));
+        if (!session) return false;
+        const id = String(session.sessionId || sessionId || '1');
+        const uiSession = ensureDebateSession(id);
+        uiSession.title = session.title || id;
+        uiSession.messages = [];
+        Array.from(debateModelCards.children).forEach((card) => {
+            if (card instanceof HTMLElement && String(card.dataset.sessionId || '') === id) {
+                removeDebateCardMessage(card);
+                card.remove();
+            }
+        });
+        (session.turns || []).forEach((turn) => {
+            const card = createDebateCardFromTurn(turn);
+            if (card) insertDebateCard(card, { zone: card.dataset.approved === 'true' ? 'approved' : 'pending' });
+        });
+        renderDebateSessionTabs();
+        applyDebateSessionFilter();
+        return true;
+    }
+    function hydrateDebateTranscriptFromArtifact(artifact = {}, options = {}) {
+        if (!DebateEngineRuntime || !debateTranscriptStore || !artifact) return false;
+        const sessions = Array.isArray(artifact.sessions) ? artifact.sessions : [];
+        if (!sessions.length) return false;
+        sessions.forEach((session) => {
+            const sessionId = String(session.sessionId || session.id || '1');
+            debateTranscriptStore.upsertSession({
+                ...session,
+                sessionId,
+                turns: []
+            });
+            debateTranscriptStore.clearTurns(sessionId);
+            (session.turns || []).forEach((turn) => {
+                debateTranscriptStore.appendTurn(sessionId, { ...turn, sessionId });
+            });
+            ensureDebateSession(sessionId).title = session.title || sessionId;
+        });
+        const activeId = String(artifact.activeSessionId || sessions[0]?.sessionId || debateTabsState.activeSessionId || '1');
+        if (debateTranscriptStore.getSession(activeId)) {
+            debateTranscriptStore.setActiveSession(activeId);
+            debateTabsState.activeSessionId = activeId;
+        }
+        if (options.render !== false) {
+            renderDebateTranscriptSession(debateTabsState.activeSessionId);
+        }
+        return true;
+    }
+    function loadDebateTranscriptFromStorage() {
+        if (!DebateEngineRuntime?.loadStore || !debateTranscriptStore) return Promise.resolve(false);
+        return DebateEngineRuntime.loadStore()
+            .then((restored) => {
+                const artifact = DebateEngineRuntime.exportArtifact(restored);
+                return hydrateDebateTranscriptFromArtifact(artifact, { render: true });
+            })
+            .catch((err) => {
+                console.warn('[RESULTS] Debate transcript restore failed', err);
+                return false;
+            });
     }
     function approveDebateCard(card) {
         if (!card || card.dataset.approved === 'true') return null;
@@ -14795,6 +15264,15 @@ function checkCompareButtonState() {
         });
         return lines.join('\n\n');
     }
+    function collectDebateArtifact() {
+        if (!DebateEngineRuntime || !debateTranscriptStore) return null;
+        return DebateEngineRuntime.exportArtifact(debateTranscriptStore);
+    }
+    function collectDebateMarkdown() {
+        if (!DebateEngineRuntime || !debateTranscriptStore) return collectDebateFeedText();
+        const session = debateTranscriptStore.getSession(debateTabsState.activeSessionId);
+        return session ? DebateEngineRuntime.exportMarkdown(session) : '';
+    }
     function clearDebateFeed(activeSessionId = debateTabsState.activeSessionId) {
         if (!debateModelCards) return;
         Array.from(debateModelCards.children).forEach((card) => {
@@ -14804,6 +15282,15 @@ function checkCompareButtonState() {
             }
         });
         ensureDebateSession(activeSessionId).messages = [];
+        if (debateTranscriptStore?.clearTurns) {
+            try {
+                getDebateTranscriptSession(activeSessionId);
+                debateTranscriptStore.clearTurns(String(activeSessionId || '1'));
+                scheduleDebateTranscriptPersist();
+            } catch (err) {
+                console.warn('[RESULTS] Debate transcript clear failed', err);
+            }
+        }
         debateFeedState.placeholders = new Set(
             Array.from(debateFeedState.placeholders).filter((key) => !String(key).startsWith(`${activeSessionId}:`))
         );
@@ -15998,11 +16485,7 @@ function exportSingleTemplate(templateName, sourceData = null) {
     debateSessionAddBtn?.addEventListener('click', () => addDebateSession());
     debateSessionDeleteBtn?.addEventListener('click', () => removeDebateSession());
     debateAutoPauseBtn?.addEventListener('click', () => {
-        debatePaused = !debatePaused;
-        if (!debatePaused && typeof debateApprovalBridge.resolve === 'function') {
-            debateApprovalBridge.resolve();
-        }
-        syncDebateAutoPauseButton();
+        setDebatePausedState(!debatePaused, 'auto_pause_button');
     });
     debateSessionCopyBtn?.addEventListener('click', async () => {
         const html = collectDebateFeedHtml();

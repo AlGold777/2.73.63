@@ -4,8 +4,18 @@
 (function initLogReplayHarness(root) {
   'use strict';
 
-  const FINAL_SUCCESS = new Set(['SUCCESS', 'PARTIAL', 'ERROR']);
-  const FAILURE_STATUS = new Set(['ERROR', 'FAILED', 'TIMEOUT', 'CANCELLED']);
+  const FINAL_STATUSES = new Set([
+    'SUCCESS',
+    'PARTIAL',
+    'ERROR',
+    'NO_SEND',
+    'EXTRACT_FAILED',
+    'STREAM_TIMEOUT',
+    'EXTERNAL_LLM_FAILURE',
+    'USER_ACTION_REQUIRED',
+    'UNCERTAIN'
+  ]);
+  const FAILURE_STATUS = new Set(['ERROR', 'FAILED', 'TIMEOUT', 'CANCELLED', 'EXTERNAL_LLM_FAILURE', 'USER_ACTION_REQUIRED', 'UNCERTAIN']);
 
   function normalizeText(value) {
     return String(value || '').trim();
@@ -154,7 +164,7 @@
       || event.decisionKey === 'finalize_error'
       || event.decisionKey === 'upgrade_terminal';
     const terminalLabel = event.labelKey.includes('MODEL_FINAL') || event.labelKey.includes('PIPELINE_ERROR');
-    if ((acceptedTerminal || terminalLabel) && FINAL_SUCCESS.has(event.status)) {
+    if ((acceptedTerminal || terminalLabel) && FINAL_STATUSES.has(event.status)) {
       model.finalStatus = event.status;
       model.finalReason = event.reason || model.finalReason;
       model.terminalEvents += 1;

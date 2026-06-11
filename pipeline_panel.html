@@ -223,6 +223,13 @@
             </div>
             <div class="msg-head-right">
                 <div class="msg-head-right-top">
+                    <div class="debate-run-controls" aria-label="Debate run controls">
+                        <button type="button" id="debate-run-toggle-btn" class="debate-btn debate-btn-primary" title="Run debate" aria-label="Run debate">▶</button>
+                        <label class="debate-turn-limit" title="Maximum auto-continued turns before pausing">
+                            <span>Max</span>
+                            <input type="number" id="debate-max-turns-input" min="1" max="50" value="5" inputmode="numeric" aria-label="Maximum debate turns">
+                        </label>
+                    </div>
                     <div class="mod-controls">
                         <select id="debate-length-select" class="mod-select mod-select-compact" aria-label="Debate length">
                             <option value="300">300</option>
@@ -243,11 +250,11 @@
                             <option value="final">Final Synthesis</option>
                         </select>
                     </div>
-                    <label class="top-new-pages-toggle" data-tooltip="Auto debate mode: ON = without moderator confirmation, OFF = with manual moderator confirmation.">
-                        <span class="top-new-pages-text">Auto</span>
-                        <input type="checkbox" id="auto-checkbox" class="top-new-pages-checkbox">
-                        <span class="top-toggle-track"><span class="top-toggle-thumb"></span></span>
-                    </label>
+                    <select id="debate-run-policy-select" class="mod-select mod-select-policy" aria-label="Debate run policy" title="Debate run policy">
+                        <option value="manual" selected="">Manual</option>
+                        <option value="auto">Auto</option>
+                    </select>
+                    <input type="checkbox" id="auto-checkbox" class="top-new-pages-checkbox debate-auto-compat" hidden="" aria-hidden="true">
                     <label class="top-new-pages-toggle" data-tooltip="Open each model response in a new tab.">
                         <span class="top-new-pages-text">New Pages</span>
                         <input type="checkbox" id="new-pages-checkbox" class="top-new-pages-checkbox" checked="">
@@ -282,7 +289,7 @@
                     <line x1="62" y1="111" x2="138" y2="148" stroke="currentColor" stroke-width="9" stroke-linecap="round"></line>
                 </svg>
             </span>
-            <span>Pipeline</span>
+            <span>Pro</span>
         </button>
         <div class="pipeline-panel pipeline-panel-inline" id="pipeline-panel">
             <div class="panel-header">
@@ -759,6 +766,8 @@
     <script src="lib/purify.min.js"></script>
     <script src="utils/sanitize.js"></script>
     <script src="shared/status-contract.js"></script>
+    <script src="shared/telemetry-export.js"></script>
+    <script src="shared/debate-engine.js"></script>
     <script src="results-shared.js"></script>
     <script src="notes/notes-constants.js"></script>
     <script src="notes/notes-client.js"></script>

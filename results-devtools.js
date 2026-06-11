@@ -177,9 +177,6 @@
         if (normalizedLabel === 'ROUND0_TAB_OPENED') {
             return { roundIndex: 0, phase: 'END' };
         }
-        if (normalizedLabel === 'MODEL_FINAL' || normalizedLabel === 'FINAL_STATUS') {
-            return { roundIndex: 4, phase: 'END' };
-        }
         const match = normalizedLabel.match(/^ROUND(\\d+)_([A-Z0-9]+)$/);
         if (match) {
             if (!Number.isFinite(roundIndex)) {
@@ -958,12 +955,20 @@
     });
     telemetryExportJsonBtn && telemetryExportJsonBtn.addEventListener('click', () => {
         try {
+            // Export the full run-scoped cache, never the UI-filtered table view:
+            // with no active filter the filtered view is empty and the old export
+            // silently degraded to round events only (telemetry completeness
+            // defect from run 1781134505984).
             const sourceEvents = telemetryScopedCache.slice();
-            const { filtered } = getTelemetryFilteredEvents(sourceEvents);
-            const baseEvents = telemetryFilteredCache.length ? telemetryFilteredCache : filtered;
-            const exportEvents = mergeRoundTelemetry(baseEvents, getRoundTelemetryEvents(sourceEvents));
+            const exportEvents = mergeRoundTelemetry(sourceEvents, getRoundTelemetryEvents(sourceEvents));
             if (!exportEvents.length) return;
-            const grouped = groupTelemetryByPlatform(exportEvents);
+            let grouped = groupTelemetryByPlatform(exportEvents);
+            if (window.TelemetryExport?.appendRunSummary) {
+                grouped = window.TelemetryExport.appendRunSummary(grouped, {
+                    runSessionId: resolveCurrentRunSessionId(sourceEvents),
+                    exportedAt: Date.now()
+                });
+            }
             const json = JSON.stringify(grouped, null, 2);
             if (!json || json === '{}') return;
             const blob = new Blob([json], { type: 'application/json' });

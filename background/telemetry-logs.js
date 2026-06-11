@@ -11,6 +11,8 @@ const PLATFORM_DEGRADED_HOURLY_COOLDOWN_MS = 60 * 60 * 1000;
 const PLATFORM_HISTORY_MAX = 50;
 const MAX_LOG_ENTRIES = 60;
 const DIAG_KEY = '__diagnostics_events__';
+const DIAGNOSTICS_EVENTS_MAX_ITEMS = 400;
+const DIAGNOSTICS_EVENTS_MAX_BYTES = 120000;
 // v2.54.24 (2025-12-22 23:14 UTC): Telemetry sampling (Purpose: cap diagnostics volume to 5% of sessions).
 const TELEMETRY_SAMPLE_RATE = 0.05;
 const TELEMETRY_SCHEMA_VERSION = 2;
@@ -19,6 +21,8 @@ const telemetrySampleCache = new TTLMap({ ttlMs: 10 * 60 * 1000, maxSize: 50 });
 const pipelineCompleteCache = new TTLMap({ ttlMs: 10 * 60 * 1000, maxSize: 200 });
 const POST_TERMINAL_NOISE_LABELS = new Set([
   'ANSWER_GENERATING',
+  'ANSWER_COMPLETE_TIMEOUT',
+  'ANSWER_PARTIAL_ON_TIMEOUT',
   'ANSWER: LAYER SEMANTIC',
   'PIPELINE_ERROR',
   'SELECTOR_STATS',
@@ -390,6 +394,7 @@ const PINNED_LABELS = new Set([
   'GROK_PROMPT_ECHO_REJECTED',
   'ANSWER_SANITY_REJECTED',
   'TERMINAL_FAILURE_BLOCKED_BY_ANSWER_EVIDENCE',
+  'ANSWER_LENGTH_SUSPECT',
   'FINALIZATION_DECISION',
   'MODEL_RUN_TRANSITION',
   'STATE_DIVERGENCE_DETECTED',
@@ -448,9 +453,12 @@ async function persistDiagnosticEvent(llmName, entry = {}, { sender, source } = 
     source: entry?.source || source || sender?.url || sender?.tab?.url || null
   });
   const arr = await readDiagnosticsEvents();
-  let next = trimDiagnosticsBuffer([...arr, evt], 200);
+  // 400 entries / 120KB: an 8-model run produces ~400 telemetry events; the old
+  // 200/50KB budget evicted even pinned MODEL_FINAL records before export
+  // (telemetry completeness defect from run 1781134505984).
+  let next = trimDiagnosticsBuffer([...arr, evt], DIAGNOSTICS_EVENTS_MAX_ITEMS);
   const stringify = () => JSON.stringify(next);
-  while (stringify().length > 50000 && next.length > 1) {
+  while (stringify().length > DIAGNOSTICS_EVENTS_MAX_BYTES && next.length > 1) {
     next = dropOldestUnpinned(next);
   }
   await writeDiagnosticsEvents(next);

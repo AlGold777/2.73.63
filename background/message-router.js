@@ -77,7 +77,9 @@ const DIAG_PINNED_LABELS = new Set([
     'FINAL_STATUS',
     'MODEL_MISSING',
     'FOCUS_STUCK',
-    'BUDGET_EXHAUSTED'
+    'BUDGET_EXHAUSTED',
+    'FINALIZATION_DECISION',
+    'ANSWER_LENGTH_SUSPECT'
 ]);
 
 const isPinnedDiagnosticEvent = (entry = {}) => {
@@ -294,6 +296,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     const processMessage = () => {
+        if (self.DebateBackgroundExecutor?.canHandle?.(message)) {
+            self.DebateBackgroundExecutor.handleMessage(message, sender)
+                .then(sendResponse)
+                .catch((err) => {
+                    console.error('[BACKGROUND] Debate executor failed:', err);
+                    sendResponse({ success: false, error: err?.message || 'debate_executor_failed' });
+                });
+            return true;
+        }
         switch (message.type) {
             case 'START_FULLPAGE_PROCESS': {
                 const forceNewTabs = message.forceNewTabs !== undefined ? message.forceNewTabs : true;
@@ -1276,10 +1287,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             sessionId: message.event?.sessionId || null,
                             source: message.event?.source || sender?.url || sender?.tab?.url || null
                         });
-                        let next = diagTrimDiagnosticsBuffer([...await readDiagnosticsEventsFromStorage(), evt], 200);
-                        // Дополнительный guard по размеру: если >50KB, отрезаем старые
+                        // 400/120KB: в синхроне с persistDiagnosticEvent, чтобы полный
+                        // 8-модельный прогон доживал до экспорта (change log 2026-06-11).
+                        let next = diagTrimDiagnosticsBuffer([...await readDiagnosticsEventsFromStorage(), evt], 400);
+                        // Дополнительный guard по размеру: если >120KB, отрезаем старые
                         const stringify = () => JSON.stringify(next);
-                        while (stringify().length > 50000 && next.length > 1) {
+                        while (stringify().length > 120000 && next.length > 1) {
                             next = diagDropOldestUnpinned(next);
                         }
                         await writeDiagnosticsEventsToStorage(next);
@@ -1289,6 +1302,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         sendResponse({ success: false, error: err?.message || String(err) });
                     }
                 })();
+                return true;
+            }
+
+            case 'GET_RUN_OUTCOME_SUMMARY': {
+                // Source of truth for exports: jobState survives results-page reloads,
+                // unlike page-side llmLogs/bridge caches (defect seen in the 2.74.98
+                // smoke run export, which had no terminal evidence at all).
+                try {
+                    const session = jobState?.session || null;
+                    const models = Object.entries(jobState?.llms || {}).map(([llmName, entry]) => ({
+                        llmName,
+                        finalStatus: entry?.finalStatus || null,
+                        terminal: Boolean(entry?.finalStatusRecorded || entry?.finalStatus),
+                        status: entry?.status || null,
+                        statusReason: entry?.statusReason || null,
+                        finalizedAt: entry?.finalizedAt || null,
+                        answerLength: Number(entry?.answerLength || String(entry?.answer || '').length || 0),
+                        answerSource: entry?.responseMeta?.source || entry?.responseSource || null,
+                        dispatchId: entry?.lastDispatchMeta?.dispatchId || null,
+                        promptSubmittedAt: entry?.promptSubmittedAt || null,
+                        lengthPolicyRef: entry?.finalizationEvidence?.lengthPolicy?.policyRef || null,
+                        suspectShortSuccess: entry?.finalizationEvidence?.lengthPolicy?.suspectShortSuccess === true
+                    }));
+                    sendResponse({
+                        success: true,
+                        runSessionId: session?.startTime || null,
+                        complete: models.length > 0 && models.every((m) => m.terminal),
+                        models
+                    });
+                } catch (err) {
+                    sendResponse({ success: false, error: err?.message || String(err) });
+                }
                 return true;
             }
 

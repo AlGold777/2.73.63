@@ -192,7 +192,8 @@
         'answerLength', 'answerHash', 'answerAcceptedAt', 'modelRunState', 'statusContract',
         'postTerminalNoiseCount', 'lastFinalEmitKey', 'lastFinalEmittedAt', 'statusData',
         'budgetTimers', 'recoveryBudgets', 'runId', 'responseMeta', 'responseSource', 'pipelineRunId', 'pipelineRoundId',
-        'pipelineBatchId', 'pipelineState', 'pipelineStage', 'pipelineTabSessionId'
+        'pipelineBatchId', 'pipelineState', 'pipelineStage', 'pipelineTabSessionId',
+        'round4ForceFinalKey', 'round4ForceFinalAt'
       ].forEach((field) => {
         if (typeof entry[field] !== 'undefined') {
           next[field] = clonePlain(entry[field]);
@@ -534,7 +535,7 @@
       return { ok: false, reason: 'stale_ready' };
     }
     if (kind === 'final' && dispatch?.finalStatus && dispatch.dispatchId === incomingDispatchId) {
-      const previousFailure = ['ERROR', 'CRITICAL_ERROR', 'UNRESPONSIVE', 'CIRCUIT_OPEN', 'API_FAILED', 'NO_SEND', 'EXTRACT_FAILED', 'STREAM_TIMEOUT'].includes(String(dispatch.finalStatus || '').toUpperCase());
+      const previousFailure = ['ERROR', 'CRITICAL_ERROR', 'UNRESPONSIVE', 'CIRCUIT_OPEN', 'API_FAILED', 'NO_SEND', 'EXTRACT_FAILED', 'STREAM_TIMEOUT', 'EXTERNAL_LLM_FAILURE', 'USER_ACTION_REQUIRED', 'UNCERTAIN'].includes(String(dispatch.finalStatus || '').toUpperCase());
       const incomingSuccess = ['COPY_SUCCESS', 'SUCCESS', 'DONE', 'COMPLETE', 'PARTIAL', 'STREAM_TIMEOUT_HIDDEN'].includes(String(incomingFinalStatus || '').toUpperCase());
       if (allowRecoveredFinal && previousFailure && incomingSuccess) {
         return { ok: true, reason: 'recovered_final_override' };

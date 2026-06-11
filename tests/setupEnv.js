@@ -5,7 +5,7 @@ global.TextDecoder = global.TextDecoder || TextDecoder;
 
 // jsdom не реализует scrollBy; в тестах глушим
 if (typeof window !== 'undefined') {
-  window.scrollBy = window.scrollBy || (() => {});
+  window.scrollBy = () => {};
 }
 
 global.chrome = {

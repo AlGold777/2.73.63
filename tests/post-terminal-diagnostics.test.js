@@ -88,6 +88,30 @@ describe('post-terminal diagnostics filtering', () => {
     expect(context.sendMessageToResultsTab).not.toHaveBeenCalled();
   });
 
+  test('drops timeout lifecycle diagnostics after terminal success', () => {
+    const context = createSandbox();
+
+    const complete = context.broadcastDiagnostic('DeepSeek', {
+      ts: 101500,
+      type: 'TELEMETRY',
+      label: 'ANSWER_COMPLETE_TIMEOUT',
+      details: 'state=TIMEOUT textLength=2850',
+      level: 'info'
+    });
+    const partial = context.broadcastDiagnostic('DeepSeek', {
+      ts: 101600,
+      type: 'TELEMETRY',
+      label: 'ANSWER_PARTIAL_ON_TIMEOUT',
+      details: 'state=TIMEOUT textLength=2850',
+      level: 'info'
+    });
+
+    expect(complete).toBeNull();
+    expect(partial).toBeNull();
+    expect(context.jobState.llms.DeepSeek.logs).toHaveLength(0);
+    expect(context.sendMessageToResultsTab).not.toHaveBeenCalled();
+  });
+
   test('keeps generation diagnostics before terminal success', () => {
     const context = createSandbox();
 

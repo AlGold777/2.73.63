@@ -32,6 +32,7 @@ const ROUND3_PRECOLLECT_VISIT_MAX_MS = 8000;
 const ROUND4_FOCUS_DELAY_MS = 500;
 const ROUND4_PENDING_WAIT_MAX_MS = 190000;
 const ROUND4_PENDING_POLL_MS = 1500;
+const ROUND4_GATE_WAIT_TELEMETRY_MS = 15000;
 const NO_SEND_STALL_GRACE_MS = 45000;
 const ROUND2_REPAIR_MODELS = new Set(['GPT', 'Gemini', 'Claude', 'Grok', 'Le Chat', 'Qwen']);
 const POST_R2_AUTO_COLLECT_DELAY_MS = 8000;
@@ -82,7 +83,7 @@ const MODEL_FINAL_DEDUP_WINDOW_MS = 20000;
 const RECOVERABLE_TERMINAL_MANUAL_PING_WINDOW_MS = 180000;
 const RECOVERABLE_TERMINAL_PING_STATUSES = new Set(['EXTRACT_FAILED', 'NO_SEND', 'ERROR']);
 const DOM_SNAPSHOT_RECOVERY_MODELS = new Set(['Gemini', 'Perplexity', 'Le Chat', 'Qwen', 'DeepSeek']);
-const DOM_SNAPSHOT_RECOVERY_MIN_CHARS = 80;
+const DOM_SNAPSHOT_RECOVERY_MIN_CHARS = self.AnswerLengthPolicy?.DEFAULTS?.minTerminalChars || 80;
 const DOM_SNAPSHOT_RECOVERY_COOLDOWN_MS = 5000;
 const LATE_COLLECT_CACHE_KEY_PREFIX = 'late_answer_snapshot_v1';
 const LATE_COLLECT_CACHE_MAX_CHARS = 50000;
@@ -116,7 +117,7 @@ const DEFER_STREAM_FINAL_MODELS = new Set(['GPT', 'Gemini', 'Claude', 'Le Chat',
 const DEFER_STREAM_FINAL_RECHECK_MS = 8000;
 const DEFER_STREAM_FINAL_MAX_MS = 180000;
 const DEFER_STREAM_STABLE_FORCE_MS = 30000;
-const DEFER_STREAM_STABLE_FORCE_MIN_CHARS = 1200;
+const DEFER_STREAM_STABLE_FORCE_MIN_CHARS = self.AnswerLengthPolicy?.DEFAULTS?.stableForceMinChars || 1200;
 const EARLY_TERMINAL_GUARD_MODELS = new Set(['GPT', 'Gemini', 'Claude', 'Le Chat', 'Perplexity', 'Grok', 'Qwen', 'DeepSeek']);
 const EARLY_TERMINAL_GUARD_FORCE_SUCCESS_CHARS = 1800;
 const EARLY_TERMINAL_GUARD_MAX_WAIT_MS = 20000;
@@ -1349,6 +1350,28 @@ async function recoverAnswerViaDomSnapshot(llmName, tabId, reason = 'dom_snapsho
 }
 
 
+// Recovery after a hard stop/timeout salvages whatever text the page had at that
+// moment. Without independent completion evidence that text cannot be proven
+// complete, so the terminal outcome must be PARTIAL, not SUCCESS (run
+// 1781159284885: Grok hard-stopped at 180s and a 550-char fragment was finalized
+// as SUCCESS while the user saw only part of the real answer).
+function classifyMaterializeRecoveryFinality(recoveryReason, entry, resultStatus) {
+  if (resultStatus === 'partial_from_snapshot') {
+    return { partial: true, completionReason: 'soft_timeout', context: 'partial_from_snapshot' };
+  }
+  const context = String(recoveryReason || '').toLowerCase();
+  const hardStopContext = /hard_stop|hard_timeout|stream_timeout/.test(context);
+  const hasCompletionEvidence = Boolean(
+    entry?.answerCompleteDetectedAt
+    || entry?.lifecycleReadyAt
+    || entry?.lifecycleReadyMeta?.state === 'COMPLETE'
+  );
+  if (hardStopContext && !hasCompletionEvidence) {
+    return { partial: true, completionReason: 'hard_stop_recovered_partial', context: 'hard_stop_without_completion_evidence' };
+  }
+  return { partial: false, completionReason: 'materialize_recovery', context: hardStopContext ? 'hard_stop_with_completion_evidence' : 'benign' };
+}
+
 function shouldMaterializeBeforeTerminal(llmName, finalStatus, finalReason, error, metaObj = {}) {
   if (!PRE_TERMINAL_MATERIALIZE_MODELS.has(llmName)) return false;
   if (metaObj?.preTerminalMaterializeFinal || metaObj?.manualRecovery || metaObj?.responseMeta?.manualRecovery) return false;
@@ -1473,15 +1496,16 @@ async function runPreTerminalMaterializeRecovery(llmName, tabId, sessionId, reas
     });
     const result = evidence?.result || null;
     if (evidence?.ok && result?.text) {
+      const recoveryFinality = classifyMaterializeRecoveryFinality(reason, afterVisit, result.status);
       const accepted = acceptLateCollectResult(llmName, result, {
         ...(meta || {}),
         preTerminalMaterialize: true,
         materializeLatestEvidence: true,
         responseMeta: {
           source: result.source || 'materialize_recovery',
-          completionReason: result.status === 'partial_from_snapshot' ? 'soft_timeout' : 'materialize_recovery',
-          sanityConfidence: result.status === 'partial_from_snapshot' ? 0.72 : 0.86,
-          partial: result.status === 'partial_from_snapshot',
+          completionReason: recoveryFinality.completionReason,
+          sanityConfidence: recoveryFinality.partial ? 0.72 : 0.86,
+          partial: recoveryFinality.partial,
           recovered: true,
           recoverySource: result.source || evidence.summary?.source || 'materialize_recovery',
           evidenceSource: evidence.summary?.source || result.source || null,
@@ -2765,6 +2789,12 @@ const finalizeNoSendModelIfStalled = (llmName, sessionId, reason = 'round4_gate'
   const stallStartedAt = Number(entry.lastDispatchAt || sessionStart || Date.now());
   const elapsedMs = Math.max(0, Date.now() - stallStartedAt);
   if (elapsedMs < NO_SEND_STALL_GRACE_MS) return false;
+  // Force-final is one-shot per dispatch: handleLLMResponse may defer terminal into
+  // async materialize recovery, and re-firing on every gate poll re-enters that path.
+  const forceFinalKey = entry?.lastDispatchMeta?.dispatchId || `tab_${entry?.tabId || 'unknown'}`;
+  if (entry.round4ForceFinalKey === forceFinalKey) return false;
+  entry.round4ForceFinalKey = forceFinalKey;
+  entry.round4ForceFinalAt = Date.now();
 
   emitTelemetry(llmName, 'ROUND4_FORCE_FINAL', {
     level: 'warning',
@@ -2799,6 +2829,7 @@ async function waitForRound4Gate(modelNames, sessionId) {
   }
 
   const startedAt = Date.now();
+  let lastGateWaitTelemetryAt = 0;
   while (true) {
     if (sessionId && !isSessionActive(sessionId)) {
       return { ready: false, timedOut: false, pendingBefore: [], pendingAfter: [] };
@@ -2807,6 +2838,24 @@ async function waitForRound4Gate(modelNames, sessionId) {
     const pendingBefore = getPendingRoundModels(trackedModels);
     if (!pendingBefore.length) {
       return { ready: true, timedOut: false, pendingBefore, pendingAfter: [] };
+    }
+
+    const now = Date.now();
+    if (now - lastGateWaitTelemetryAt >= ROUND4_GATE_WAIT_TELEMETRY_MS) {
+      lastGateWaitTelemetryAt = now;
+      pendingBefore.forEach((llmName) => {
+        const entry = jobState?.llms?.[llmName];
+        emitTelemetry(llmName, 'ROUND4_GATE_WAIT', {
+          level: 'info',
+          details: entry?.promptSubmittedAt ? 'extraction_pending' : 'awaiting_submit_confirmation',
+          meta: {
+            elapsedMs: now - startedAt,
+            waitMaxMs: ROUND4_PENDING_WAIT_MAX_MS,
+            promptConfirmed: !!entry?.promptSubmittedAt,
+            dispatchId: entry?.lastDispatchMeta?.dispatchId || null
+          }
+        });
+      });
     }
 
     pendingBefore.forEach((llmName) => {
@@ -2823,6 +2872,10 @@ async function waitForRound4Gate(modelNames, sessionId) {
       pendingAfter.forEach((llmName) => {
         const entry = jobState?.llms?.[llmName];
         if (!entry || isFinalizedEntry(entry)) return;
+        const timeoutForceFinalKey = `gate_timeout:${entry?.lastDispatchMeta?.dispatchId || `tab_${entry?.tabId || 'unknown'}`}`;
+        if (entry.round4ForceFinalKey === timeoutForceFinalKey) return;
+        entry.round4ForceFinalKey = timeoutForceFinalKey;
+        entry.round4ForceFinalAt = Date.now();
         const hasPromptConfirmation = !!entry.promptSubmittedAt;
         const errorType = hasPromptConfirmation ? 'extract_failed' : 'no_send';
         const errorMessage = hasPromptConfirmation
@@ -3441,12 +3494,9 @@ function startModelForLLM(llmName, prompt, forceNewTabs, attachments = [], optio
       }
     }
 
-    let apiUsed = false;
-    if (jobState.useApiFallback !== false) {
-      apiUsed = await tryApiDirect(llmName, prompt);
-      if (apiUsed) {
-        return;
-      }
+    const apiUsed = await tryApiDirect(llmName, prompt, attachments);
+    if (apiUsed) {
+      return;
     }
 
     runModelThroughTabs(llmName, prompt, forceNewTabs, attachments, { ...options, sessionId });
@@ -3456,11 +3506,61 @@ function startModelForLLM(llmName, prompt, forceNewTabs, attachments = [], optio
   return llmStartChains[llmName];
 }
 
-async function tryApiDirect(llmName, prompt) {
+async function tryApiDirect(llmName, prompt, attachments = []) {
   const config = apiFallbackConfig[llmName];
-  if (!config) return false;
   if (!jobState?.llms?.[llmName]) return false;
-  if (jobState?.useApiFallback === false) return false;
+  if (jobState?.useApiFallback === false) {
+    const transportDecision = self.TransportPolicy?.decideTransport
+      ? self.TransportPolicy.decideTransport({
+        llmName,
+        apiModeEnabled: false,
+        hasApiConfig: !!config,
+        hasApiKey: false,
+        hasWebUi: true,
+        attachmentsCount: Array.isArray(attachments) ? attachments.length : 0
+      })
+      : { mode: 'web_ui', reason: 'api_mode_disabled', apiEligible: false, webUiEligible: true };
+    emitTelemetry(llmName, 'TRANSPORT_DECISION', {
+      level: 'info',
+      details: `${transportDecision.mode}:${transportDecision.reason}`,
+      meta: {
+        ...transportDecision,
+        dispatchReason: 'start_model'
+      }
+    });
+    jobState.llms[llmName].transportDecision = {
+      ...transportDecision,
+      decidedAt: Date.now()
+    };
+    return false;
+  }
+  if (!config) {
+    const transportDecision = self.TransportPolicy?.decideTransport
+      ? self.TransportPolicy.decideTransport({
+        llmName,
+        apiModeEnabled: jobState?.useApiFallback !== false,
+        hasApiConfig: false,
+        hasApiKey: false,
+        hasWebUi: true,
+        attachmentsCount: Array.isArray(attachments) ? attachments.length : 0
+      })
+      : { mode: 'web_ui', reason: 'api_config_missing', apiEligible: false };
+    emitTelemetry(llmName, 'TRANSPORT_DECISION', {
+      level: 'warning',
+      details: `${transportDecision.mode}:${transportDecision.reason}`,
+      meta: {
+        ...transportDecision,
+        dispatchReason: 'start_model'
+      }
+    });
+    if (jobState.llms[llmName]) {
+      jobState.llms[llmName].transportDecision = {
+        ...transportDecision,
+        decidedAt: Date.now()
+      };
+    }
+    return false;
+  }
   try {
     let apiKey = await ApiKeyStorage.getSessionKey(config.storageKey);
     if (!apiKey) {
@@ -3469,12 +3569,52 @@ async function tryApiDirect(llmName, prompt) {
         ApiKeyStorage.warnPlaintext(config.storageKey);
       }
     }
+    const transportDecision = self.TransportPolicy?.decideTransport
+      ? self.TransportPolicy.decideTransport({
+        llmName,
+        apiModeEnabled: jobState?.useApiFallback !== false,
+        hasApiConfig: !!config,
+        hasApiKey: !!apiKey,
+        hasWebUi: true,
+        attachmentsCount: Array.isArray(attachments) ? attachments.length : 0
+      })
+      : {
+        mode: apiKey && config ? 'api_first' : 'web_ui',
+        reason: apiKey ? 'api_key_available' : 'api_key_missing_use_web_ui',
+        apiEligible: !!(apiKey && config)
+      };
+    emitTelemetry(llmName, 'TRANSPORT_DECISION', {
+      level: transportDecision.apiEligible ? 'info' : 'warning',
+      details: `${transportDecision.mode}:${transportDecision.reason}`,
+      meta: {
+        ...transportDecision,
+        dispatchReason: 'start_model'
+      }
+    });
+    const entry = jobState.llms[llmName];
+    entry.transportDecision = {
+      ...transportDecision,
+      decidedAt: Date.now()
+    };
+    if (transportDecision.mode !== 'api_first') {
+      if (transportDecision.reason === 'api_key_missing_use_web_ui') {
+        logApiEvent(llmName, 'API key missing, using web', 'warning', config, '', getApiEndpointMeta(config));
+      } else {
+        broadcastDiagnostic(llmName, {
+          type: 'TRANSPORT',
+          label: 'Web UI transport selected',
+          details: transportDecision.reason || 'web_ui',
+          level: 'info',
+          meta: transportDecision
+        });
+      }
+      return false;
+    }
     if (!apiKey) {
       logApiEvent(llmName, 'API key missing, using web', 'warning', config, '', getApiEndpointMeta(config));
       return false;
     }
     initRequestMetadata(llmName, null, 'API');
-    const entry = jobState.llms[llmName];
     entry.dispatchAttempts = (entry.dispatchAttempts || 0) + 1;
     entry.dispatchSource = 'api';
     entry.submitSource = 'api';
@@ -4832,6 +4972,7 @@ function resolveModelFinalStatus(finalStatus, finalReason, error) {
   if (errorType === 'user_cancel') return 'CANCELLED';
   if (normalized === 'SUCCESS') return 'SUCCESS';
   if (['PARTIAL', 'STREAM_TIMEOUT', 'STREAM_TIMEOUT_HIDDEN'].includes(normalized)) return 'PARTIAL';
+  if (FAILURE_STATUSES.includes(normalized)) return normalized;
   return 'ERROR';
 }
 
@@ -4858,7 +4999,7 @@ function resolveModelDoneReason({ completionReason, finalStatus, finalReason, er
 function classifyFailure(error = null, context = {}) {
   const responseMeta = context.responseMeta && typeof context.responseMeta === 'object' ? context.responseMeta : {};
   const explicitClass = String(responseMeta.failureClass || context.failureClass || '').trim().toLowerCase();
-  const allowedClasses = new Set(['transport', 'lease_lifecycle', 'page_readiness', 'dispatch', 'generation', 'extraction', 'semantic', 'unknown']);
+  const allowedClasses = new Set(['transport', 'lease_lifecycle', 'page_readiness', 'dispatch', 'generation', 'extraction', 'semantic', 'external_llm', 'unknown']);
   const rawType = String(error?.type || context.errorType || context.finalReason || '').trim();
   const type = rawType.toLowerCase();
   const message = String(error?.message || context.message || '').toLowerCase();
@@ -4891,7 +5032,7 @@ function classifyFailure(error = null, context = {}) {
     return result('lease_lifecycle', true, true);
   }
   if (
-    /wrong_page|page_ready|page readiness|login|required_login|captcha|tab_not_ready|ack_timeout|handshake_timeout|script_not_ready/.test(haystack)
+    /wrong_page|page_ready|page readiness|login|required_login|auth_required|captcha|tab_not_ready|ack_timeout|handshake_timeout|script_not_ready/.test(haystack)
   ) {
     return result('page_readiness', true, true);
   }
@@ -4911,7 +5052,12 @@ function classifyFailure(error = null, context = {}) {
     return result('extraction', true, true);
   }
   if (
-    /answer_prompt_echo|prompt_echo|status text|non-answer|rate_limit|rate limit|policy|blocked|semantic/.test(haystack)
+    /provider_error|model_unavailable|rate_limit|rate limit|external_llm|external llm/.test(haystack)
+  ) {
+    return result('external_llm', true, true);
+  }
+  if (
+    /answer_prompt_echo|prompt_echo|status text|non-answer|policy|blocked|semantic/.test(haystack)
   ) {
     return result('semantic', false, true);
   }
@@ -4921,6 +5067,10 @@ function classifyFailure(error = null, context = {}) {
 function deriveFailureFinalStatus(error = null, sendConfirmed = null, failure = null) {
   const type = String(error?.type || failure?.type || '').toLowerCase();
   const failureClass = String(failure?.class || '').toLowerCase();
+  const reason = String(error?.message || failure?.reason || '').toLowerCase();
+  const haystack = [type, failureClass, reason].filter(Boolean).join(' ');
+  if (/auth_required|login|required_login|captcha|wrong_page|conversation_limit|unsafe_prompt_modal/.test(haystack)) return 'USER_ACTION_REQUIRED';
+  if (/provider_error|model_unavailable|rate_limit|rate limited|external_llm|external llm|api_failed/.test(haystack)) return 'EXTERNAL_LLM_FAILURE';
   if (sendConfirmed === false) return 'NO_SEND';
   if (type === 'send_failed' || type === 'no_send') return 'NO_SEND';
   if (failureClass === 'dispatch' && /send|submit|dispatch|no_send/.test(type)) return type === 'no_send' || /send|submit/.test(type) ? 'NO_SEND' : 'ERROR';
@@ -4928,6 +5078,7 @@ function deriveFailureFinalStatus(error = null, sendConfirmed = null, failure = 
   if (['extraction', 'semantic'].includes(failureClass) && !/^rate_limit|captcha/.test(type)) return 'EXTRACT_FAILED';
   if (type === 'stream_start_timeout') return 'STREAM_TIMEOUT';
   if (failureClass === 'generation' && /stream_start_timeout/.test(type)) return 'STREAM_TIMEOUT';
+  if (failureClass === 'unknown' || type === 'unknown_state' || type === 'uncertain') return 'UNCERTAIN';
   return 'ERROR';
 }
 
@@ -5129,6 +5280,8 @@ function buildFinalizationEvidence(llmName, entry, context = {}) {
     hasAnswerEvidence: !!hasAnswerEvidence,
     answerEvidence,
     evidencePolicy,
+    lengthPolicy: self.AnswerLengthPolicy?.evaluateTerminalAnswerLength?.(llmName, answerLength, { finalStatus })
+      || { policyRef: 'answer-length-policy@fallback', length: answerLength, minTerminalChars: DOM_SNAPSHOT_RECOVERY_MIN_CHARS, meetsTerminalMin: answerLength >= DOM_SNAPSHOT_RECOVERY_MIN_CHARS },
     terminalEligible: !!answerEvidence?.terminalEligible,
     terminalEligibleReason: answerEvidence?.reason || null,
     promptSubmittedAt,
@@ -6029,6 +6182,19 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
   }
   emitFinalizationDecision(llmName, finalizationEvidence);
 
+  if (finalizationEvidence?.success && finalizationEvidence?.lengthPolicy?.suspectShortSuccess) {
+    emitTelemetry(llmName, 'ANSWER_LENGTH_SUSPECT', {
+      level: 'warning',
+      details: `success_len=${finalizationEvidence.answerLength} < suspect_max=${finalizationEvidence.lengthPolicy.shortSuccessSuspectMaxChars}`,
+      meta: {
+        ...finalizationEvidence.lengthPolicy,
+        dispatchId: incomingDispatchId,
+        source: finalizationEvidence.source || null
+      },
+      force: true
+    });
+  }
+
   if (finalizationEvidence.terminalFailure && !finalizationEvidence.accepted) {
     const preservedAnswer = String(entry?.answer || entry?.pendingFinalAnswer || '').trim();
     const preservedHtml = String(entry?.answerHtml || entry?.pendingFinalAnswerHtml || '');
@@ -6165,7 +6331,9 @@ function handleLLMResponse(llmName, answer, error = null, meta = null, answerHtm
   }
   if (!skipModelFinalEmit) {
     emitTelemetry(llmName, 'MODEL_FINAL', {
-      level: modelFinalStatus === 'ERROR' ? 'error' : (modelFinalStatus === 'PARTIAL' ? 'warning' : 'success'),
+      level: FAILURE_STATUSES.includes(modelFinalStatus)
+        ? (modelFinalStatus === 'UNCERTAIN' ? 'warning' : 'error')
+        : (modelFinalStatus === 'PARTIAL' ? 'warning' : 'success'),
       meta: {
         status: modelFinalStatus,
         doneReason,
@@ -6881,6 +7049,9 @@ function sendCleanupCommand(llmName) {
   self.clearAdaptiveCollectTimer = clearAdaptiveCollectTimer;
   self.buildEarlyTerminalGuardSignature = buildEarlyTerminalGuardSignature;
   self.maybeDeferEarlyTerminalSuccess = maybeDeferEarlyTerminalSuccess;
+  self.finalizeNoSendModelIfStalled = finalizeNoSendModelIfStalled;
+  self.waitForRound4Gate = waitForRound4Gate;
+  self.classifyMaterializeRecoveryFinality = classifyMaterializeRecoveryFinality;
   self.normalizeEvidenceText = normalizeEvidenceText;
   self.buildEvidenceDedupeKey = buildEvidenceDedupeKey;
   self.buildRecoveryBudgetKey = buildRecoveryBudgetKey;

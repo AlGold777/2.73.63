@@ -252,6 +252,18 @@ describe('finalization evidence contract', () => {
     const extractionFailure = context.classifyFailure({ type: 'extract_failed', message: 'no_answer_extracted' });
     expect(extractionFailure.class).toBe('extraction');
     expect(context.deriveFailureFinalStatus({ type: 'extract_failed' }, null, extractionFailure)).toBe('EXTRACT_FAILED');
+
+    const userActionFailure = context.classifyFailure({ type: 'auth_required', message: 'login required before dispatch' });
+    expect(userActionFailure.class).toBe('page_readiness');
+    expect(context.deriveFailureFinalStatus({ type: 'auth_required' }, null, userActionFailure)).toBe('USER_ACTION_REQUIRED');
+
+    const externalFailure = context.classifyFailure({ type: 'rate_limit', message: 'provider rate limit' });
+    expect(externalFailure.class).toBe('external_llm');
+    expect(context.deriveFailureFinalStatus({ type: 'rate_limit' }, null, externalFailure)).toBe('EXTERNAL_LLM_FAILURE');
+
+    const unknownFailure = context.classifyFailure({ type: 'unknown_state', message: 'state cannot be classified' });
+    expect(unknownFailure.class).toBe('unknown');
+    expect(context.deriveFailureFinalStatus({ type: 'unknown_state' }, null, unknownFailure)).toBe('UNCERTAIN');
   });
 
   test('records failure class in finalization evidence', () => {

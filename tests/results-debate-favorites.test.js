@@ -130,6 +130,13 @@ function renderDebateDom() {
       <button id="debate-session-copy-btn" type="button">copy</button>
       <button id="debate-session-export-btn" type="button">export</button>
       <button id="debate-session-clear-btn" type="button">clear</button>
+      <button id="debate-auto-pause-btn" class="hidden" type="button">Ⅱ</button>
+      <select id="debate-run-policy-select">
+        <option value="manual" selected>Manual</option>
+        <option value="auto">Auto</option>
+      </select>
+      <input id="auto-checkbox" type="checkbox" hidden aria-hidden="true">
+      <input id="debate-max-turns-input" type="number" value="5">
       <div id="pipeline-panel">
         <div class="model-stack" id="r1-models">
           <div class="model-block">
@@ -256,6 +263,8 @@ async function loadResultsScript() {
   window.__RESULTS_TEST_DEBUG__ = true;
   const pipelineRuntime = fs.readFileSync(path.join(__dirname, '..', 'pipeline', 'pipeline-runtime.js'), 'utf8');
   window.eval(pipelineRuntime);
+  const debateEngine = fs.readFileSync(path.join(__dirname, '..', 'shared', 'debate-engine.js'), 'utf8');
+  window.eval(debateEngine);
   const script = fs.readFileSync(path.join(__dirname, '..', 'results.js'), 'utf8');
   window.eval(script);
   document.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }));
@@ -601,6 +610,90 @@ describe('Pipeline debate favorites view', () => {
 
     await expect(approvalPromise).rejects.toMatchObject({ name: 'AbortError' });
     expect(debug.getApprovalWaiting()).toBe(false);
+  });
+
+  test('debate feed mirrors cards into structured DebateEngine transcript artifact', async () => {
+    const debug = window.__pipelineLifecycleDebug;
+    const card = addPendingApprovalCard({
+      id: 'engine-msg-1',
+      model: 'GPT',
+      text: 'Structured transcript response'
+    });
+
+    card.querySelector('.debate-approval-check').click();
+    await delay(20);
+
+    const artifact = debug.collectDebateArtifact();
+    const activeSession = artifact.sessions.find((session) => session.sessionId === '1');
+
+    expect(debug.getDebateRunPolicy()).toBe('manual');
+    expect(activeSession.turns).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        turnId: 'turn-engine-msg-1',
+        author: 'GPT',
+        authorType: 'model',
+        targets: ['Moderator'],
+        text: 'Structured transcript response',
+        status: 'approved'
+      })
+    ]));
+    expect(debug.collectDebateMarkdown()).toContain('## Turn');
+    expect(debug.collectDebateMarkdown()).toContain('Structured transcript response');
+  });
+
+  test('debate transcript artifact can restore and render the active session', async () => {
+    const debug = window.__pipelineLifecycleDebug;
+    const restored = debug.hydrateDebateTranscriptFromArtifact({
+      activeSessionId: 'restore-1',
+      sessions: [{
+        sessionId: 'restore-1',
+        title: 'Restored',
+        participants: ['GPT'],
+        settings: { runPolicy: 'manual', maxTurns: 5 },
+        turns: [
+          {
+            turnId: 'turn-restore-moderator',
+            sessionId: 'restore-1',
+            index: 1,
+            author: 'Moderator',
+            authorType: 'moderator',
+            targets: ['GPT'],
+            text: 'Restore this debate prompt',
+            status: 'approved',
+            createdAt: '2026-06-11T19:00:00.000Z',
+            completedAt: '2026-06-11T19:00:00.000Z',
+            approvedAt: '2026-06-11T19:00:00.000Z'
+          },
+          {
+            turnId: 'turn-restore-gpt',
+            sessionId: 'restore-1',
+            index: 2,
+            author: 'GPT',
+            authorType: 'model',
+            role: 'Critic',
+            targets: ['Moderator'],
+            text: 'Restored transcript answer',
+            status: 'approved',
+            terminalStatus: 'SUCCESS',
+            createdAt: '2026-06-11T19:01:00.000Z',
+            completedAt: '2026-06-11T19:02:00.000Z',
+            approvedAt: '2026-06-11T19:02:00.000Z'
+          }
+        ]
+      }]
+    });
+
+    expect(restored).toBe(true);
+    expect(document.querySelector('.debate-session-tab.active')?.dataset.sessionId).toBe('restore-1');
+    expect(document.querySelectorAll('#debate-model-cards .debate-model-card[data-session-id="restore-1"]')).toHaveLength(2);
+    expect(document.getElementById('debate-model-cards').textContent).toContain('Restore this debate prompt');
+    expect(document.getElementById('debate-model-cards').textContent).toContain('Restored transcript answer');
+
+    const artifact = debug.collectDebateArtifact();
+    const session = artifact.sessions.find((item) => item.sessionId === 'restore-1');
+    expect(session.turns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ turnId: 'turn-restore-gpt', terminalStatus: 'SUCCESS', status: 'approved' })
+    ]));
   });
 
   test('pipeline output selection uses data-output keys instead of visible labels', () => {

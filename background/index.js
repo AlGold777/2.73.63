@@ -26,6 +26,7 @@ importScripts(
   '../utils/api-key-storage.js',
   '../shared/status-contract.js',
   '../shared/model-run-state.js',
+  '../shared/answer-length-policy.js',
   '../shared/answer-evidence.js',
   '../shared/finalization-controller.js',
   '../shared/recovery-intent.js',
@@ -35,8 +36,10 @@ importScripts(
   '../shared/log-replay-harness.js',
   '../shared/selector-profile-lifecycle.js',
   '../shared/model-policy.js',
+  '../shared/transport-policy.js',
   '../shared/visit-policy.js',
   '../shared/pipeline-fsm.js',
+  '../shared/debate-engine.js',
   'shared-state.js',
   'llm-targets.js',
   'telemetry-logs.js',
@@ -58,5 +61,6 @@ importScripts(
   'health-monitor.js',
   'cleanup-manager.js',
   'lifecycle-runtime.js',
+  'debate-executor.js',
   'message-router.js'
 );

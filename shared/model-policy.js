@@ -11,7 +11,10 @@
     requireAckReady: true,
     transportErrorsRecoverable: true,
     conservativeDispatch: false,
-    promptSubmitTimeoutMs: 15000
+    promptSubmitTimeoutMs: 15000,
+    preferredTransport: 'web_ui',
+    apiDirectAllowed: true,
+    apiSupportsAttachments: false
   });
 
   const MODEL_POLICIES = Object.freeze({

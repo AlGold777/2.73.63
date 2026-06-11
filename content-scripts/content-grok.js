@@ -1181,7 +1181,35 @@
     });
   }
 
-  async function waitForDomAnswer(prompt, timeoutMs = 45000, intervalMs = 900, shouldAbort = () => false, baseline = null) {
+  // Single-flight guard: adaptive probes/manual pings call waitForDomAnswer every few
+  // seconds with a 45s window, which used to stack concurrent polling loops (observed
+  // 6 parallel loops in run 1781134505984, each overshooting its declared timeout).
+  // Concurrent callers for the same prompt now share one in-flight loop.
+  let activeDomAnswerWait = null;
+
+  function waitForDomAnswer(prompt, timeoutMs = 45000, intervalMs = 900, shouldAbort = () => false, baseline = null) {
+    const promptKey = String(prompt || '').slice(0, 200);
+    if (activeDomAnswerWait && activeDomAnswerWait.promptKey === promptKey) {
+      emitDiagnostic({
+        type: 'DOM_FALLBACK',
+        label: 'DOM_FALLBACK_JOINED',
+        details: 'joined in-flight DOM fallback loop',
+        level: 'info',
+        meta: { timeoutMs, intervalMs }
+      });
+      return activeDomAnswerWait.promise;
+    }
+    const tracked = {
+      promptKey,
+      promise: runDomAnswerWait(prompt, timeoutMs, intervalMs, shouldAbort, baseline).finally(() => {
+        if (activeDomAnswerWait === tracked) activeDomAnswerWait = null;
+      })
+    };
+    activeDomAnswerWait = tracked;
+    return tracked.promise;
+  }
+
+  async function runDomAnswerWait(prompt, timeoutMs = 45000, intervalMs = 900, shouldAbort = () => false, baseline = null) {
     const startedAt = Date.now();
     emitDiagnostic({
       type: 'DOM_FALLBACK',
@@ -2295,7 +2323,8 @@
   // -------------------- Экспорт внутрь страницы (по необходимости) --------------------
   window.__grokAllCopyV6 = {
     injectAndGetResponse,
-    contentCleaner
+    contentCleaner,
+    waitForDomAnswer
   };
 
   console.log('[content-grok] AllCopy v6 ready.');

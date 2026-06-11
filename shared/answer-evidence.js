@@ -4,9 +4,12 @@
 (function initAnswerEvidence(root) {
   'use strict';
 
-  const DEFAULT_MIN_CHARS = 80;
-  const DEFAULT_STABLE_MIN_CHARS = 1200;
-  const DEFAULT_SNAPSHOT_TERMINAL_MIN_CHARS = 1200;
+  // Defaults come from shared/answer-length-policy.js when it is loaded first;
+  // the literal fallbacks are the same numbers and exist for legacy load orders.
+  const lengthPolicyDefaults = root.AnswerLengthPolicy?.DEFAULTS || null;
+  const DEFAULT_MIN_CHARS = lengthPolicyDefaults?.minTerminalChars || 80;
+  const DEFAULT_STABLE_MIN_CHARS = lengthPolicyDefaults?.stableForceMinChars || 1200;
+  const DEFAULT_SNAPSHOT_TERMINAL_MIN_CHARS = lengthPolicyDefaults?.snapshotTerminalMinChars || 1200;
 
   function hashText(value = '') {
     const text = String(value || '');
@@ -37,6 +40,10 @@
 
   function isPanelSource(source) {
     return includesAny(source, ['panel', 'ui_panel', 'panel_extraction']);
+  }
+
+  function isApiSource(source) {
+    return includesAny(source, ['api', 'api_response', 'api_transport']);
   }
 
   function isTimeoutReason(reason) {
@@ -83,6 +90,7 @@
     const snapshot = isSnapshotSource(normalizedSource);
     const materialize = isMaterializeSource(normalizedSource);
     const panel = isPanelSource(normalizedSource);
+    const api = isApiSource(normalizedSource);
     const timeout = isTimeoutReason(normalizedReason);
     const hardStop = isHardStopReason(normalizedReason) || isHardStopReason(normalizedHardStopReason);
     const stable = isStableReason(normalizedReason, normalizedSource) || stableForMs > 0 || sameTextSeenCount >= 2;
@@ -102,6 +110,7 @@
         snapshotTerminalEligible
         || materialize
         || panel
+        || api
         || timeout
         || hardStop
         || stableTerminalEligible
@@ -117,6 +126,7 @@
       if (snapshot) return 'snapshot_with_text';
       if (materialize) return 'materialize_with_text';
       if (panel) return 'panel_with_text';
+      if (api) return 'api_with_text';
       if (stable && stopButtonVisible === true) return 'stable_text_stop_visible';
       if (stable && length >= stableMinChars) return 'stable_text';
       if (responseMeta.forceTerminalSuccess) return 'forced_success_with_text';
@@ -132,7 +142,7 @@
       pipelineRunId: input.pipelineRunId || responseMeta.pipelineRunId || null,
       tabId: input.tabId || responseMeta.tabId || null,
       source: source || null,
-      sourceKind: snapshot ? 'snapshot' : (materialize ? 'materialize' : (panel ? 'panel' : (timeout ? 'timeout' : (hardStop ? 'hardstop' : (stable ? 'stable' : 'dom'))))),
+      sourceKind: snapshot ? 'snapshot' : (materialize ? 'materialize' : (panel ? 'panel' : (api ? 'api' : (timeout ? 'timeout' : (hardStop ? 'hardstop' : (stable ? 'stable' : 'dom')))))),
       text,
       htmlLength: String(input.html || '').length,
       length,
@@ -182,6 +192,7 @@
     isSnapshotSource,
     isMaterializeSource,
     isPanelSource,
+    isApiSource,
     isTimeoutReason,
     isHardStopReason,
     isStableReason

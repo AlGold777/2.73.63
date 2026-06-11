@@ -374,7 +374,18 @@ async function executeApiFallback(llmName, prompt, options = {}) {
     apiStatus: 'active',
     message: 'API sucsefull'
   }, endpointMeta));
-  handleLLMResponse(llmName, answer);
+  const entry = jobState?.llms?.[llmName] || null;
+  handleLLMResponse(llmName, answer, null, {
+    dispatchId: entry?.lastDispatchMeta?.dispatchId || null,
+    responseMeta: {
+      source: 'api',
+      answerSource: 'api',
+      completionReason: 'api_response',
+      apiProvider: llmName,
+      apiModel: endpointMeta.model || config.model || null,
+      apiEndpoint: endpointMeta.endpoint || config.endpoint || null
+    }
+  });
   return true;
 }
 // --- V2.0 END: API Fallback Execution Logic ---

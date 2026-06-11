@@ -55,5 +55,24 @@ describe('shared status contract', () => {
       phase: 'error',
       label: 'Error'
     }));
+    expect(StatusContract.deriveResultMeta({ status: 'USER_ACTION_REQUIRED' })).toEqual(expect.objectContaining({
+      phase: 'action_required',
+      label: 'Action required',
+      terminal: true
+    }));
+    expect(StatusContract.deriveResultMeta({ status: 'UNCERTAIN' })).toEqual(expect.objectContaining({
+      phase: 'unknown',
+      label: 'Uncertain',
+      terminal: true
+    }));
+  });
+
+  test('exposes release terminal outcome taxonomy', () => {
+    expect(StatusContract.isTerminalStatus('EXTERNAL_LLM_FAILURE')).toBe(true);
+    expect(StatusContract.isTerminalStatus('USER_ACTION_REQUIRED')).toBe(true);
+    expect(StatusContract.isTerminalStatus('UNCERTAIN')).toBe(true);
+    expect(StatusContract.isFailureStatus('EXTERNAL_LLM_FAILURE')).toBe(true);
+    expect(StatusContract.isFailureStatus('USER_ACTION_REQUIRED')).toBe(true);
+    expect(StatusContract.isFailureStatus('UNCERTAIN')).toBe(true);
   });
 });

@@ -44,6 +44,28 @@ describe('AnswerEvidence Lite', () => {
     }));
   });
 
+  test('API response evidence is terminal-eligible success with API source kind', () => {
+    const evidence = AnswerEvidence.buildAnswerEvidence({
+      llmName: 'GPT',
+      text: 'Direct API answer text. '.repeat(12),
+      responseMeta: {
+        source: 'api',
+        completionReason: 'api_response'
+      }
+    });
+
+    expect(evidence).toEqual(expect.objectContaining({
+      sourceKind: 'api',
+      terminalEligible: true,
+      reason: 'api_with_text',
+      partialAllowed: false
+    }));
+    expect(AnswerEvidence.shouldFinalizeWithEvidence(evidence)).toEqual(expect.objectContaining({
+      ok: true,
+      finalStatus: 'SUCCESS'
+    }));
+  });
+
   test('stable text requires the larger stable threshold', () => {
     const shortStable = AnswerEvidence.buildAnswerEvidence({
       text: 'Stable answer text. '.repeat(20),
